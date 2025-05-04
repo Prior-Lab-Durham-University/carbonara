@@ -42,14 +42,19 @@ cmake ..
 make
 ```
 
-## Testing Carbonara
+## Reproducing structures refined in the paper
 
-To ensure your version of Carbonara is running, run the test case:
+To reproduce the refinement of the two structures presented in the paper, first ensure you are located in `/path/to/carbonara` then run the following: 
 
-1. Ensure you are located in `/path/to/carbonara` and run the following command
+#### human SMARCAL1
 
 ```
 sh RunMe_humanSMARCAL1.sh
+```
+
+#### ChiLob7/4 IgG2
+```
+sh RunMe_C239S.sh
 ```
 
 ## Using Carbonara for new structures
