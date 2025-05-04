@@ -1,6 +1,6 @@
 # Carbonara
 
-Carbonara is scientific software package that bridges the gap between crystal-like and solution-state conformations by efficiently refining protein structures using experimental SAXS (Small Angle X-ray Scattering) data. Starting from AI-predicted models or crystallographic structures, Carbonara rapidly explores conformational space to identify physiologically relevant solution-state conformations. The method can incorporate additional experimental constraints such as disulfide bonds, NMR distance measurements, or FRET data to further guide the refinement process.
+Carbonara bridges the gap between crystal-like and solution-state conformations by efficiently refining protein structures using experimental SAXS (Small Angle X-ray Scattering) data. Starting from AI-predicted models or crystallographic structures, Carbonara rapidly explores conformational space to identify physiologically relevant solution-state conformations. The method can incorporate additional experimental constraints such as disulfide bonds, NMR distance measurements, or FRET data to further guide the refinement process.
 
 <p align="center">
   <img src="figures/method_overview_arrows.png" alt="Method Overview" width="600"/>
