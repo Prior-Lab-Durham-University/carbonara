@@ -4,7 +4,7 @@ Carbonara is scientific software package that bridges the gap between crystal-li
   <img src="figures/method_overview_arrows.png" alt="Method Overview" width="600"/>
 </p>
 
-Schematic representation of the Carbonara refinement pipeline. The workflow proceeds from initial structure analysis through identification of flexible regions, conformational sampling guided by SAXS data constraints, model selection based on optimal fit, and finally all-atom reconstruction for downstream applications.
+Schematic representation of the Carbonara refinement pipeline. The workflow proceeds from an initial structure (a) with identification of flexible regions (b), conformational sampling guided by SAXS data constraints (c), model selection based on optimal fit (d), and finally all-atom reconstruction (e) for downstream applications.
 
 ## Building with CMake
 
@@ -81,7 +81,7 @@ Then run:
 python setup_carbonara.py --pdb path/to/pdb --saxs path/to/saxs --name ProteinName 
 ```
 ```bash
-# Optional flags for customizing refinement
+# Optional flags for customising refinement
 --fit_n_times INT     Number of times to run the fit (default: 5)
 --min_q FLOAT         Minimum q-value (default: 0.01)
 --max_q FLOAT         Maximum q-value (default: 0.2)
