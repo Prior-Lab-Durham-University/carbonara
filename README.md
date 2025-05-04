@@ -1,4 +1,10 @@
-This codebase is a C++ project focused on refinement of protein structures against experimental in solution SAXS. It includes functionality for generating and manipulating molecular structures, analyzing their properties, and fitting them to experimental data.
+Carbonara is scientific software package that bridges the gap between crystal-like and solution-state conformations by efficiently refining protein structures using experimental SAXS (Small Angle X-ray Scattering) data. Starting from AI-predicted models or crystallographic structures, Carbonara rapidly explores conformational space to identify physiologically relevant solution-state conformations. The method can incorporate additional experimental constraints such as disulfide bonds, NMR distance measurements, or FRET data to further guide the refinement process.
+
+<p align="center">
+  <img src="figures/method_overview_arrows.png" alt="Method Overview" width="600"/>
+</p>
+
+Schematic representation of the Carbonara refinement pipeline. The workflow proceeds from initial structure analysis through identification of flexible regions, conformational sampling guided by SAXS data constraints, model selection based on optimal fit, and finally all-atom reconstruction for downstream applications.
 
 ## Building with CMake
 
