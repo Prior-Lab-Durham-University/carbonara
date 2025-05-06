@@ -102,7 +102,7 @@ Then run:
 
 ```bash
 
-sh RunMe_ProteinName.sh
+sh RunMe_*ProteinName*.sh
 
 ```
 
