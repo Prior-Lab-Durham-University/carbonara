@@ -112,11 +112,11 @@ sh RunMe_*ProteinName*.sh
 If you use Carbonara in your research, please cite our preprint!
 
 ```bibtex
-@article{carbonara2024,
+@article{carbonara2025,
   title={Carbonara: A Rapid Method for SAXS-Based Refinement of Protein Structures},
   author={McKeown, J. and Bale, A. and Brown, C. and Fisher, H. and Rambo, R. and Essex, J. and Degiacomi, M. and Prior, C.},
   journal={ResearchSquare},
-  year={2024},
+  year={2025},
   doi={10.21203/rs.3.rs-6447099/v1},
   url={https://doi.org/10.21203/rs.3.rs-6447099/v1}
 }
