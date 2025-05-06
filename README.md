@@ -121,6 +121,8 @@ If you use Carbonara in your research, please cite our preprint!
   url={https://doi.org/10.21203/rs.3.rs-6447099/v1}
 }
 
+```
+
 Shield: [![CC BY-NC-SA 4.0][cc-by-nc-sa-shield]][cc-by-nc-sa]
 
 This work is licensed under a
