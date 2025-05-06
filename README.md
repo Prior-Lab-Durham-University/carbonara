@@ -82,7 +82,7 @@ pip install mdtraj
 pip install biobox
 ```
 
-Then run:
+Setting up the RunMe
 
 ```bash
 python setup_carbonara.py --pdb path/to/pdb --saxs path/to/saxs --name ProteinName 
@@ -97,6 +97,29 @@ python setup_carbonara.py --pdb path/to/pdb --saxs path/to/saxs --name ProteinNa
 --rotation            Apply affine rotations
 
 ```
+
+Then run:
+
+```bash
+
+sh RunMe_ProteinName.sh
+
+```
+
+
+## Citation
+
+If you use Carbonara in your research, please cite our preprint!
+
+```bibtex
+@article{carbonara2024,
+  title={Carbonara: A Rapid Method for SAXS-Based Refinement of Protein Structures},
+  author={McKeown, J. and Bale, A. and Brown, C. and Fisher, H. and Rambo, R. and Essex, J. and Degiacomi, M. and Prior, C.},
+  journal={ResearchSquare},
+  year={2024},
+  doi={10.21203/rs.3.rs-6447099/v1},
+  url={https://doi.org/10.21203/rs.3.rs-6447099/v1}
+}
 
 Shield: [![CC BY-NC-SA 4.0][cc-by-nc-sa-shield]][cc-by-nc-sa]
 
