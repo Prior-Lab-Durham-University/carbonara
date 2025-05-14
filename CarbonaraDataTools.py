@@ -33,9 +33,10 @@ import re
 
 from scipy import interpolate
 
-#from plotly.subplots import make_subplots
-#import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import plotly.graph_objects as go
 import json
+
 
 from glob import glob
 
@@ -1008,3 +1009,221 @@ def write_saxs(SAXS_file, working_path):
 
     return file_path_name
 
+def get_sses(ss_file):
+    '''
+    From a SS fingerprint, returns the SS with the subsection length, eg. ---SSS--- becomes [[-,3],[S,3],[-,3]]]
+    '''
+    lines = []
+    with open(ss_file,'r') as fin:
+        for line in fin:
+            lines+= [line.split()]
+    ss_tensor=[]
+    for i in range(4,4*int(lines[0][0])+1,4):
+        ss = lines[i][0]
+        sses = []
+        count = 1
+        i = 0
+        while i<len(ss)-1:
+            if ss[i+1] == ss[i]:
+                count += 1
+                i += 1
+            else:
+                sses.append([ss[i], count])
+                count = 1
+                i += 1
+        sses.append([ss[-1], count])
+        ss_tensor.append(sses)
+    return ss_tensor
+
+
+def SAXS_fit_plotter(SAXS_file, fit_file, full_q=True):
+
+    fig = make_subplots(rows=2, cols=1,row_heights=[0.7,0.3],vertical_spacing=0,shared_xaxes=True)
+
+    SAXS = np.genfromtxt(SAXS_file)
+
+    fitting = np.genfromtxt(fit_file, skip_footer=1)
+    fit_q = fitting[:,0]
+    fit_I = fitting[:,2]
+
+    q = SAXS[:,0]
+    I = np.log(np.where(SAXS[:,1] <= 0, np.nan, SAXS[:,1]))
+
+    min_q = fit_q.min()
+    max_q = fit_q.max()
+
+
+
+    cond = (q >= min_q) & (q <= max_q)
+    q_range = q[cond]
+    I_range = I[cond]
+
+    tck = interpolate.splrep(fit_q, fit_I)
+    spli_I = interpolate.splev(q_range,tck)
+
+    #     q_selected = q[(q>=min_q)&(q<=max_q)]
+    #     q_grey = q[(q<min_q) | (q>=max_q)]
+
+    #     I_selected = I[(q>=min_q)&(q<=max_q)]
+    #     I_grey = I[(q<min_q) | (q>=max_q)]
+
+    # fig = go.Figure(
+
+    residuals = spli_I - I_range
+
+    if full_q:
+        fig.add_trace( go.Scatter(x=q, y=I, mode='markers', line=dict(color="grey"), opacity=0.7, name='Data'),row=1,col=1 )
+
+    else:
+        fig.add_trace( go.Scatter(x=q_range, y=I_range, mode='markers', line=dict(color="grey"), opacity=0.7, name='Data'),row=1,col=1 )
+
+    fig.add_trace( go.Scatter(x=fit_q, y=fit_I, mode='markers',
+                        marker=dict( color='crimson', size=8),
+                         name='Fit'),row=1,col=1 )
+
+    fig.add_trace( go.Scatter(x=q_range, y=spli_I, mode='lines', line=dict(color="crimson", width=3), name='Fit'),row=1,col=1 )
+
+    fig.add_trace(go.Scatter(x=q_range,y=residuals,mode='lines',name='Residual',showlegend=False,line=dict(color='red')),row=2,col=1)
+    fig.add_trace(go.Scatter(x=q_range,y=np.zeros_like(q_range),mode='lines',showlegend=False,line=dict(color='black',dash='dash',width=1)),row=2,col=1)
+
+    fig.update_layout(
+        # title='Experiment vs Fit',
+                      # yaxis_type = "log",
+                    template='simple_white',
+                    # width=1200, height=800,
+                    font_size=18)
+
+    fig.update_yaxes(title_text="Intensity I(q)", row=1, col=1)
+    fig.update_yaxes(title_text="Residual", row=2, col=1)
+    fig.update_xaxes(title_text="q", row=2, col=1)
+
+    # max_res = max( np.abs(residuals).max(), .5)
+    max_res = np.abs(residuals).max()*1.3
+    fig.update_yaxes(range=[-max_res,max_res],row=2,col=1)
+    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
+    fig.update_traces(showlegend=False)
+    return fig
+
+def highlightVaryingSections(MolPath,PDB_fl,varyingSections,chain=1):
+    resids = getResIDs(PDB_fl)
+    ss = get_sses(MolPath+'/fingerPrint1.dat')[chain-1]
+    cols=[]
+    varcols = []
+    sscoldict = {'H': 'rgb(240,0,128)', 'S':'rgb(255,255,0)', '-': 'grey'}
+    fp=[]
+    for i in range(len(ss)):
+        for j in range(ss[i][1]):
+            fp.append(ss[i][0])
+            if i in varyingSections:
+                varcols.append('red')
+            else:
+                varcols.append('black')
+    sscols = [sscoldict[i] for i in fp]
+    coords_chains = pull_structure_from_pdb(PDB_fl)[0]
+    for coords in coords_chains:
+        breaking_indices = missing_ca_check(coords)
+        if len(breaking_indices) > 0:
+            coords_chains = np.array_split(coords_chains,breaking_indices)
+    mol = coords_chains[chain-1]
+    hover_texts = ['ResID: '+str(resids[chain-1][i]) + ', SS: ' + list(fp)[i] for i in range(len(fp))]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter3d(
+            x=mol[:,0], 
+            y=mol[:,1], 
+            z=mol[:,2],
+            text=hover_texts,
+            hoverinfo='text',
+            name='Varying Sections',
+            marker=dict(
+                size=1,
+                color=varcols,
+            ),
+            line=dict(
+                color=varcols,
+                width=10
+            )
+        ))
+    fig.add_trace(go.Scatter3d(
+            x=mol[:,0], 
+            y=mol[:,1], 
+            z=mol[:,2],
+            text=hover_texts,
+            hoverinfo='text',
+            visible='legendonly',
+            name='Secondary Structure',
+            marker=dict(
+                size=1,
+                color=sscols,
+            ),
+            line=dict(
+                color=sscols,
+                width=12.5
+            )
+        ))
+    fig.update_layout(width=1000,height=1000)
+    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
+    fig.update_layout(
+        showlegend=True,
+        legend=dict(x=0),
+        scene=dict(
+            xaxis_title='',
+            yaxis_title='',
+            zaxis_title='',
+            aspectratio = dict( x=1, y=1, z=1 ),
+            aspectmode = 'manual',
+            xaxis = dict(
+                gridcolor="white",
+                showbackground=False,
+                zerolinecolor="white",
+                nticks=0,
+                showticklabels=False),
+            yaxis = dict(
+                gridcolor="white",
+                showbackground=False,
+                zerolinecolor="white",
+                nticks=0,
+                showticklabels=False),
+            zaxis = dict(
+                gridcolor="white",
+                showbackground=False,
+                zerolinecolor="white",
+                nticks=0,
+                showticklabels=False),),
+    )
+    return fig
+
+def getResIDs(pdb_fl):
+    M = pdb_2_biobox(pdb_fl)
+    ca_idx = (M.data['name']=='CA').values
+    resids = M.get_data(indices=ca_idx)
+    coords_chains_in,sequence_chains_in,_,_= pull_structure_from_pdb(pdb_fl)
+    resids = resids[:,5]
+    
+    # >> check for missing residues geometrically in the chain(s)
+    for j in range(len(coords_chains_in)):
+        breaking_indices = missing_ca_check(coords_chains_in[j])
+        if len(breaking_indices) > 0:
+            coords_chains_in[j] = break_into_chains(coords_chains_in[j],sequence_chains_in[j],breaking_indices)[0]
+    coords_chains = []
+    for i in range(len(coords_chains_in)):
+        if isinstance(coords_chains_in[i],list):
+            for j in range(len(coords_chains_in[i])):
+                coords_chains.append(coords_chains_in[i][j])
+        else:
+            coords_chains.append(coords_chains_in[i])
+    idx = 0
+    resid_tensor=[]
+    for i in range(len(coords_chains)):
+        resid_tensor.append(resids[idx:idx+len(coords_chains[i])])
+        idx+=len(coords_chains[i])
+    return resid_tensor
+
+def groupResIDs(pdb_fl,fp_fl,chain=1):
+    resids = getResIDs(pdb_fl)
+    ss = get_sses(fp_fl)
+    grouped = []
+    idx=0
+    for i in ss[chain-1]:
+        grouped.append([i[0],resids[chain-1][idx:idx+i[1]][0],resids[chain-1][idx:idx+i[1]][-1]])
+        idx+=i[1]
+    return(grouped)
