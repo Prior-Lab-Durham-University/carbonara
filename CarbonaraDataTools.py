@@ -669,7 +669,7 @@ def generate_random_structures(coords_file, fingerprint_file):
         outputname = random_working+'/section_'+str(l)
 
 #         !./generate_structure {fingerprint_file} {coords_file} {outputname} {l}
-        result = subprocess.run([random_working+'carbonara/build/bin/generate_structure', fingerprint_file, coords_file, outputname, str(l)], capture_output=True, text=True)
+        result = subprocess.run([current+'/build/bin/generate_structure', fingerprint_file, coords_file, outputname, str(l)], capture_output=True, text=True)
 
     # print('')
     # print('Finished generating random structures')
