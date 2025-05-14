@@ -1227,3 +1227,12 @@ def groupResIDs(pdb_fl,fp_fl,chain=1):
         grouped.append([i[0],resids[chain-1][idx:idx+i[1]][0],resids[chain-1][idx:idx+i[1]][-1]])
         idx+=i[1]
     return(grouped)
+
+
+def possibleLinkerList(pdb_fl,fp_fl,chain=1):
+    grouped = groupResIDs(pdb_fl,fp_fl,chain)
+    poss = []
+    for i in range(len(grouped)):
+        if grouped[i][0]=='-':
+            poss.append([i,'ResID: ' + str(grouped[i][1]) + '-' + str(grouped[i][2])])
+    return np.array(poss)
