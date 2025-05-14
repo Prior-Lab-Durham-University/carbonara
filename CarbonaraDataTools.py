@@ -1236,3 +1236,14 @@ def possibleLinkerList(pdb_fl,fp_fl,chain=1):
         if grouped[i][0]=='-':
             poss.append([i,'ResID: ' + str(grouped[i][1]) + '-' + str(grouped[i][2])])
     return np.array(poss)
+
+
+def linkerLengthCheck(resid_str):
+    res_range = resid_str.split(' ')[-1]
+    start = int(res_range.split('-')[0])
+    end = int(res_range.split('-')[1])
+    if end-start<3:
+        return False
+    else:
+        return True
+
