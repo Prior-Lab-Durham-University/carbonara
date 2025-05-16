@@ -1260,3 +1260,22 @@ def linkerLengthCheck(resid_str):
     else:
         return True
 
+def toggle_paired_predictions(script_path):
+    with open(script_path, 'r') as f:
+        lines = f.readlines()
+
+    with open(script_path, 'w') as f:
+        for line in lines:
+            if line.strip().startswith("pairedPredictions="):
+                line = "pairedPredictions=True\n"
+            f.write(line)
+
+def toggle_startk(script_path,kmaxstart):
+    with open(script_path, 'r') as f:
+        lines = f.readlines()
+
+    with open(script_path, 'w') as f:
+        for line in lines:
+            if line.strip().startswith("kmaxStart="):
+                line = "kmaxStart=="+str(kmaxtstart)+"\n"
+            f.write(line)
