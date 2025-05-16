@@ -1036,6 +1036,19 @@ def get_sses(ss_file):
     return ss_tensor
 
 
+def read_triplets_from_file(filename):
+    data = []
+    with open(filename, 'r') as f:
+        for line in f:
+            # Try converting the line to 3 floats
+            try:
+                numbers = list(map(float, line.strip().split()))
+                if len(numbers) == 3:
+                    data.append(numbers)
+            except ValueError:
+                continue  # Skip non-numeric lines
+    return np.array(data)
+    
 def SAXS_fit_plotter(SAXS_file, fit_file, full_q=True):
 
     fig = make_subplots(rows=2, cols=1,row_heights=[0.7,0.3],vertical_spacing=0,shared_xaxes=True)
