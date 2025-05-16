@@ -1296,3 +1296,43 @@ def read_triplets_from_file(filename):
                 continue  # Skip non-numeric lines
     return np.array(data)
 
+def translate_distance_constraints(contactPredsIn,coords,working_path,fixedDistList=[]):
+    # shift the coordinates back one to fit [0,1, array labelling
+    contactPreds =contactPredsIn
+    dists= []
+    for i in range(len(contactPredsIn)):
+        contactPreds[i][0] = contactPredsIn[i][0]
+        contactPreds[i][1] = contactPredsIn[i][1]
+    contactPredNara = []
+    for i in range(len(contactPreds)):
+        contactPreds[i].sort()
+        currIndex=0;
+        ss = get_secondary(working_path+"/fingerPrint1.dat")
+        sections = section_finder_sub(ss)
+        currMax=len(sections[0])
+        prevMax=0
+        while (contactPreds[i][0]>currMax and currIndex<len(sections)):
+            currIndex= currIndex+1
+            currMax=currMax+len(sections[currIndex])
+            prevMax = prevMax+len(sections[currIndex-1])
+           # second coord of pair
+        pair1 =[currIndex,contactPreds[i][0]-prevMax-1]
+        currIndex=0;
+        currMax=len(sections[0])
+        prevMax=0
+        while (contactPreds[i][1]>currMax and currIndex<len(sections)):
+            currIndex= currIndex+1
+            currMax=currMax+len(sections[currIndex])
+            prevMax = prevMax+len(sections[currIndex-1])
+        pair2 =[currIndex,contactPreds[i][1]-prevMax-1]
+        if len(fixedDistList)>0:
+            dist = fixedDistList[i]
+        else:
+            dist = np.linalg.norm(coords[contactPreds[i][1]-1]-coords[contactPreds[i][0]-1])
+        # contactPredNara.append(pair1+pair2+[dist])
+        contactPredNara.append(pair1+pair2+[dist]+[0.1])
+        dists.append(dist)
+
+        # now write to file
+    np.savetxt(working_path+"/fixedDistanceConstraints1.dat",contactPredNara,fmt="%i %i %i %i %1.10f %1.10f")
+
