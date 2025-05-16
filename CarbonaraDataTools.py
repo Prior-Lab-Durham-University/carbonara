@@ -2615,3 +2615,13 @@ def overlayCluster(MolPath,RunName,label):
     fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
     fig.update_traces(showlegend=False)
     return fig
+
+def toggle_paired_predictions(script_path):
+    with open(script_path, 'r') as f:
+        lines = f.readlines()
+
+    with open(script_path, 'w') as f:
+        for line in lines:
+            if line.strip().startswith("pairedPredictions="):
+                line = "pairedPredictions=True\n"
+            f.write(line)
