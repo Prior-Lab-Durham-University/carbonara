@@ -1336,3 +1336,7 @@ def translate_distance_constraints(contactPredsIn,coords,working_path,fixedDistL
         # now write to file
     np.savetxt(working_path+"/fixedDistanceConstraints1.dat",contactPredNara,fmt="%i %i %i %i %1.10f %1.10f")
 
+def get_secondary(fingerprint_file):
+    fplst=np.loadtxt(fingerprint_file, str)
+    fplstout= [np.asarray(list(fplst[i])) for i in range(2,len(fplst),2)]
+    return fplstout
