@@ -2633,5 +2633,5 @@ def toggle_startk(script_path,kmaxstart):
     with open(script_path, 'w') as f:
         for line in lines:
             if line.strip().startswith("kmaxStart="):
-                line = "kmaxStart=="+str(kmaxtstart)\n"
+                line = "kmaxStart=="+str(kmaxtstart)+"\n"
             f.write(line)
