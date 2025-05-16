@@ -1053,7 +1053,7 @@ def SAXS_fit_plotter(SAXS_file, fit_file, full_q=True):
 
     fig = make_subplots(rows=2, cols=1,row_heights=[0.7,0.3],vertical_spacing=0,shared_xaxes=True)
 
-    SAXS = np.genfromtxt(SAXS_file)
+    SAXS = read_triplets_from_file(filename)
 
     fitting = np.genfromtxt(fit_file, skip_footer=1)
     fit_q = fitting[:,0]
@@ -1279,3 +1279,19 @@ def toggle_startk(script_path,kmaxstart):
             if line.strip().startswith("kmaxStart="):
                 line = "kmaxStart=="+str(kmaxtstart)+"\n"
             f.write(line)
+
+import numpy as np
+
+def read_triplets_from_file(filename):
+    data = []
+    with open(filename, 'r') as f:
+        for line in f:
+            # Try converting the line to 3 floats
+            try:
+                numbers = list(map(float, line.strip().split()))
+                if len(numbers) == 3:
+                    data.append(numbers)
+            except ValueError:
+                continue  # Skip non-numeric lines
+    return np.array(data)
+
