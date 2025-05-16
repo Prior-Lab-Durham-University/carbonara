@@ -1053,7 +1053,7 @@ def SAXS_fit_plotter(SAXS_file, fit_file, full_q=True):
 
     fig = make_subplots(rows=2, cols=1,row_heights=[0.7,0.3],vertical_spacing=0,shared_xaxes=True)
 
-    SAXS = read_triplets_from_file(filename)
+    SAXS = read_triplets_from_file(SAXS_file)
 
     fitting = np.genfromtxt(fit_file, skip_footer=1)
     fit_q = fitting[:,0]
