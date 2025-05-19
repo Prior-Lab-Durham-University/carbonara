@@ -169,11 +169,30 @@ def main():
         # Process PDB and extract structure information
         coords_chains, sequence_chains, secondary_structure_chains, missing_residues_chains = cdt.pull_structure_from_pdb(args.pdb)
         # Give warning if missing residues are found
-        for coords in coords_chains:
-            breaking_indices = cdt.missing_ca_check(coords, threshold_dist_Å=10)
+        print(len(coords_chains))
+        new_coords_chains = []
+        new_sequence_chains = []
+        new_secondary_structure_chains = []
+
+        for i in range(len(coords_chains)):
+            breaking_indices = cdt.missing_ca_check(coords_chains[i], threshold_dist_Å=7)
             if len(breaking_indices) > 0:
                 print("Warning: Missing segments of chain found: ", len(breaking_indices), breaking_indices)
-        
+
+            # Always split — even if indices is empty, returns [full array]
+            split_coords = np.array_split(coords_chains[i], breaking_indices)
+            split_seq = np.array_split(sequence_chains[i], breaking_indices)
+            split_ss = np.array_split(secondary_structure_chains[i], breaking_indices)
+
+            new_coords_chains.extend(split_coords)
+            new_sequence_chains.extend(split_seq)
+            new_secondary_structure_chains.extend(split_ss)
+
+            # Convert to array of objects if needed
+        coords_chains = np.array(new_coords_chains, dtype=object)
+        sequence_chains = np.array(new_sequence_chains, dtype=object)
+        secondary_structure_chains = np.array(new_secondary_structure_chains, dtype=object)
+
         # collapse coordinates file into one chain
         
         for i, coords in enumerate(coords_chains):
