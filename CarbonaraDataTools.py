@@ -201,6 +201,31 @@ def Carbonara_2_PDB(coords_file, fp_file, output_file):
 
 # The meeet of extracting
 
+def clean_s_sequences(arr):
+    arr = np.array(arr)
+    result = arr.copy()
+
+    i = 0
+    while i < len(arr):
+        if arr[i] == 'S':
+            # Check for isolated single 'S'
+            if (i == 0 or arr[i - 1] != 'S') and (i + 1 == len(arr) or arr[i + 1] != 'S'):
+                result[i] = '-'
+                i += 1
+            # Check for isolated pair 'S S' not part of longer sequence
+            elif (i + 1 < len(arr) and arr[i + 1] == 'S' and
+                  (i == 0 or arr[i - 1] != 'S') and
+                  (i + 2 == len(arr) or arr[i + 2] != 'S')):
+                result[i] = '-'
+                result[i + 1] = '-'
+                i += 2
+            else:
+                # Part of a longer sequence, skip to end of sequence
+                while i < len(arr) and arr[i] == 'S':
+                    i += 1
+        else:
+            i += 1
+    return result
 
 def pull_structure_from_pdb(pdb_file):
     """
@@ -247,6 +272,8 @@ def pull_structure_from_pdb(pdb_file):
     ss_pred = md.compute_dssp(traj, simplified=True)[0]
     ss_map = {'H': 'H', 'E': 'S', 'C': '-'}
     ss_pred_mapped = np.array([ss_map[ss] for ss in ss_pred])
+
+    ss_pred_mapped = clean_s_sequences(ss_pred_mapped)
     
     # For each chain in the PDB
     residue_index = 0
