@@ -198,6 +198,32 @@ def Carbonara_2_PDB(coords_file, fp_file, output_file):
 
 # The meet of extracting 
 
+def clean_s_sequences(arr):
+    arr = np.array(arr)
+    result = arr.copy()
+
+    i = 0
+    while i < len(arr):
+        if arr[i] == 'S':
+            # Check for isolated single 'S'
+            if (i == 0 or arr[i - 1] != 'S') and (i + 1 == len(arr) or arr[i + 1] != 'S'):
+                result[i] = '-'
+                i += 1
+            # Check for isolated pair 'S S' not part of longer sequence
+            elif (i + 1 < len(arr) and arr[i + 1] == 'S' and
+                  (i == 0 or arr[i - 1] != 'S') and
+                  (i + 2 == len(arr) or arr[i + 2] != 'S')):
+                result[i] = '-'
+                result[i + 1] = '-'
+                i += 2
+            else:
+                # Part of a longer sequence, skip to end of sequence
+                while i < len(arr) and arr[i] == 'S':
+                    i += 1
+        else:
+            i += 1
+    return result
+
 def pull_structure_from_pdb(pdb_file):
     """
     Pulls the structure from a (single) PDB file and returns the coordinates and sequence of the chain(s).
