@@ -25,7 +25,7 @@ noStructures=1
 ### argv[ 7] request to apply hydrophobic covering WITHIN monomers will be a list of sections on which to apply it -- Currently not used
 withinMonomerHydroCover=none
 ### argv[ 8] kmin
-kmin=0.01
+kmin=0.02
 ### argv[ 9] kmax
 kmax=0.2
 ### argv[ 10] kmax Start
