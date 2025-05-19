@@ -26,7 +26,7 @@ int main(int argc, const char* argv[]) {
 
     // Set up model parameters
     ModelParameters params;
-    params.kmin = 0.0;
+    params.kmin = 0.01;
     params.kmax = std::stod(argv[5]);
     params.kmaxCurr = params.kmax;
     params.rmin = 3.7;
