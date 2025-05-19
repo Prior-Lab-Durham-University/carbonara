@@ -1043,7 +1043,7 @@ def read_triplets_from_file(filename):
             # Try converting the line to 3 floats
             try:
                 numbers = list(map(float, line.strip().split()))
-                if len(numbers) == 3:
+                if len(numbers) == 3 or len(numbers)==2:
                     data.append(numbers)
             except ValueError:
                 continue  # Skip non-numeric lines
