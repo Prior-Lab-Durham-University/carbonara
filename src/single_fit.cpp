@@ -20,7 +20,7 @@ std::string center_string(const std::string& str, int width) {
 
 int main(int argc, const char* argv[]) {
     if (argc < 6) {
-        std::cerr << "Usage: " << argv[0] << " <scattering_data_file> <fingerprint_file> <coordinate_file> <output_prefix> <q_max>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <scattering_data_file> <fingerprint_file> <coordinate_file> <output_prefix> <q_min> <q_max>" << std::endl;
         return 1;
     }
 
