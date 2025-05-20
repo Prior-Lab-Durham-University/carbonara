@@ -36,7 +36,10 @@ from scipy import interpolate
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 import json
+import plotly.io as pio
 
+# Set Plotly to use the correct renderer for Colab
+pio.renderers.default = 'colab'
 
 from glob import glob
 
