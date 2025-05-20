@@ -270,7 +270,7 @@ def pull_structure_from_pdb(pdb_file):
     
     # Compute secondary structure for the entire trajectory
     ss_pred = md.compute_dssp(traj, simplified=True)[0]
-    ss_map = {'H': 'H', 'E': 'S', 'C': '-'}
+    ss_map = {'H': 'H', 'E': 'S', 'C': '-','NA': '-'}
     ss_pred_mapped = np.array([ss_map[ss] for ss in ss_pred])
 
     ss_pred_mapped = clean_s_sequences(ss_pred_mapped)
