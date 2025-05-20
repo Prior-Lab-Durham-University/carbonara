@@ -1310,6 +1310,17 @@ def toggle_startk(script_path, kmaxstart):
             else:
                 f.write(line)
 
+def toggle_kmin(script_path,kmin):
+    with open(script_path, 'r') as f:
+        lines = f.readlines()
+
+    with open(script_path, 'w') as f:
+        for line in lines:
+            if line.strip().startswith("kmin="):
+                f.write(f"kmin={kminstart}\n")
+            else:
+                f.write(line)
+
 def read_triplets_from_file(filename):
     data = []
     with open(filename, 'r') as f:
