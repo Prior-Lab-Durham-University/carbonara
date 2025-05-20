@@ -1317,7 +1317,7 @@ def toggle_kmin(script_path,kmin):
     with open(script_path, 'w') as f:
         for line in lines:
             if line.strip().startswith("kmin="):
-                f.write(f"kmin={kminstart}\n")
+                f.write(f"kmin={kmin}\n")
             else:
                 f.write(line)
 
