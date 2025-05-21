@@ -106,7 +106,7 @@ Then run:
 sh RunMe_*ProteinName*.sh
 
 ```
-## Colab implementaion
+## Colab implementation
 
 A colab implementation of the setup which features graphical interactivity and a guided walkthourgh of the setup can be found here
 
