@@ -36,10 +36,8 @@ from scipy import interpolate
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
 import json
-import plotly.io as pio
 
 # Set Plotly to use the correct renderer for Colab
-pio.renderers.default = 'colab'
 
 from glob import glob
 
@@ -1381,3 +1379,130 @@ def get_secondary(fingerprint_file):
     fplst=np.loadtxt(fingerprint_file, str)
     fplstout= [np.asarray(list(fplst[i])) for i in range(2,len(fplst),2)]
     return fplstout
+
+
+def flatten_extend(matrix):
+     flat_list = []
+     for row in matrix:
+         flat_list.extend(row)
+     return flat_list
+
+
+def read_coords_from_file(filename):
+    data = []
+    with open(filename, 'r') as f:
+        for line in f:
+            # Try converting the line to 3 floats
+            try:
+                numbers = list(map(float, line.strip().split()))
+                if len(numbers) ==3:
+                    data.append(numbers)
+            except ValueError:
+                continue  # Skip non-numeric lines
+    return np.array(data)
+
+def plotMolAndSAXS(RunPath,saxs_fl,mol_fl):
+    '''
+    Combined plot of a given mol and saxs fit.
+    '''
+    fig = make_subplots(rows=2, cols=1,row_heights=[0.7,0.3],vertical_spacing=0, specs=[[{'type': 'scene'}], [{'type': 'xy'}]])
+    ### First plot mol
+   # Load coordinates
+    coords =read_coords_from_file(mol_fl)
+
+    # Load secondary structure list
+    sec = flatten_extend(get_secondary(RunPath + "fingerPrint1.dat"))
+
+    # Ensure lengths match
+    assert len(coords) == len(sec), "Length of coordinates and secondary structure must match"
+
+    # Color and opacity logic
+    def get_style(a, b):
+        if 'H' in (a, b):
+            return 'red', 1.0
+        elif 'S' in (a, b):
+            return 'green', 1.0
+        else:
+            return 'blue', 0.3  # transparent coil
+
+    # Add line segments conditionally
+    for i in range(len(coords) - 1):
+        point_a = coords[i]
+        point_b = coords[i + 1]
+        distance = np.linalg.norm(point_a - point_b)
+    
+        if distance > 5:
+            continue  # skip long segments
+
+        color, opacity = get_style(sec[i], sec[i+1])
+    
+        fig.add_trace(go.Scatter3d(
+            x=[point_a[0], point_b[0]],
+            y=[point_a[1], point_b[1]],
+            z=[point_a[2], point_b[2]],
+            mode='lines',
+            line=dict(color=color, width=10),
+            opacity=opacity,
+            showlegend=False
+        ), row=1, col=1)
+
+    # Final layout
+    fig.update_layout(width=1000, height=1000)
+    ### Now plot SAXS
+    SAXS = read_triplets_from_file(RunPath+"Saxs.dat")
+    fitting = np.genfromtxt(saxs_fl, skip_footer=1)
+    fit_q = fitting[:,0]
+    fit_I = fitting[:,2]
+
+    q = SAXS[:,0]
+    I = np.log(SAXS[:,1])
+
+    min_q = fit_q.min()
+    max_q = fit_q.max()
+
+
+
+    cond = (q >= min_q) & (q <= max_q)
+    q_range = q[cond]
+    I_range = I[cond]
+    kval  = np.min(np.array([len(fit_I)-1,5]))
+    tck = interpolate.splrep(fit_q, fit_I,k=int(kval))
+    spli_I = interpolate.splev(q_range,tck)
+
+    residuals = spli_I - I_range
+    residuals = residuals/max(residuals)
+
+    fig.add_trace(go.Scatter(x=q,y=I, mode='markers', line=dict(color="grey"), opacity=0.7, name='Data'),row=2,col=1 )
+    fig.add_trace(go.Scatter(x=fit_q, y=fit_I, mode='markers', marker=dict( color='crimson', size=8), name='Fit'),row=2,col=1 )
+    fig.add_trace( go.Scatter(x=q_range, y=spli_I, mode='lines', line=dict(color="crimson", width=3), name='Fit'),row=2,col=1 )
+
+    fig.update_layout(
+                    template='simple_white',
+                    font_size=18)
+
+    fig.update_yaxes(title_text="Intensity I(q)", row=2, col=1)
+    fig.update_xaxes(title_text="q", row=2, col=1)
+    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
+    fig.update_traces(showlegend=False)
+    fig.update_layout(
+        showlegend=False,
+        scene=dict(
+            xaxis_title='',
+            yaxis_title='',
+            zaxis_title='',
+            aspectratio = dict( x=1, y=1, z=1 ),
+            aspectmode = 'manual',
+            xaxis = dict(
+                visible=False,
+                showbackground=False,
+                showticklabels=False,
+                ),
+            yaxis = dict(
+                visible=False,
+                showbackground=False,
+                showticklabels=False),
+            zaxis = dict(
+                visible=False,
+                showbackground=False,
+                showticklabels=False)))
+    return fig.show()
