@@ -80,6 +80,7 @@ pip install cython
 pip install tqdm 
 pip install mdtraj 
 pip install biobox
+pip install plotly
 ```
 
 Setting up the RunMe
@@ -105,6 +106,13 @@ Then run:
 sh RunMe_*ProteinName*.sh
 
 ```
+
+```
+A colab implementation of the setup which features graphical interactivity and a guided walkthourgh of the setup can be found here
+
+https://colab.research.google.com/drive/1l0ncymMdAFEovUpluW5y-gkX9-AzWREv#scrollTo=1Pe-wUqNQvPX
+
+Please make a copy. You can run the code in colab but also download the fitting folders and script.
 
 
 ## Citation
