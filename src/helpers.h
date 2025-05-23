@@ -61,7 +61,7 @@ std::string write_molecules(const std::string& basePath, const int& improvementI
 
 // writes simulated scattering to file and returns the scatterName (scatterName needed for logging!)
 std::string write_scatter(const std::string& basePath, const int& improvementIndex, moleculeFitAndState& molFit,
-                          experimentalData& ed, double kmin, double kmaxCurr, const std::string& body = "main");
+                          experimentalData& ed, double kmin, double kmaxCurr,std::vector<std::vector<double> > & mixtureList, const std::string& body = "main");
 
 // Do we accept or reject a new fitting - method implemented in here
 bool checkTransition(double &chiSqVal, double &chiSqCurr,double &uniformProb,int index,int &maxSteps);

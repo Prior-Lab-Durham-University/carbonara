@@ -22,6 +22,7 @@ public:
   std::vector<std::vector<point> > getNormals();
   std::vector<std::vector<point> > getBinormals();
   std::vector<std::vector<point> > getCoordinates();
+  std::vector<std::vector<std::string> > getAminoList();
   std::vector<point> getCoordinatesSection(int i);
   int getSubsecSize(int sec);
   std::vector<std::vector<point> > getSubsecCoordinates(int &sec);

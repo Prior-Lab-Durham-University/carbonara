@@ -196,7 +196,7 @@ void increaseKmax(std::pair<double,double>& scatterFit, std::vector<moleculeFitA
 
     params.improvementIndexTest=0;
     // generate a new first fit.
-    scatterFit = molFitAndStateSet[0].getOverallFit(ed, params.mixtureList,params.helRatList,params.kmin,params.kmaxCurr);
+    scatterFit = molFitAndStateSet[0].getOverallFit(ed, params.mixtureList,params.kmin,params.kmaxCurr);
 
 }
 
@@ -219,9 +219,10 @@ void updateAndLog(int& improvementIndex, std::vector<ktlMolecule>& mol, ktlMolec
     mol[l] = newMol;
     molState = newMolState;
     overallFit = newOverallFit;
+    molState.updateMolecule(mol);
 
     std::string moleculeNameMain = write_molecules(params.basePath, improvementIndex, mol, "default");
-    std::string scatterNameMain = write_scatter(params.basePath, improvementIndex, molState, ed, params.kmin, params.kmaxCurr);
+    std::string scatterNameMain = write_scatter(params.basePath, improvementIndex, molState, ed, params.kmin, params.kmaxCurr,params.mixtureList);
 
     logger.logEntry(improvementIndex, k, overallFit.first, molState.getWrithePenalty(), molState.getOverlapPenalty(),
                     molState.getDistanceConstraints(), params.kmaxCurr, scatterNameMain, moleculeNameMain,
@@ -278,13 +279,13 @@ std::string write_molecules(const std::string& basePath, const int& improvementI
 
 
 std::string write_scatter(const std::string& basePath, const int& improvementIndex, moleculeFitAndState& molFit,
-                          experimentalData& ed, double kmin, double kmaxCurr, const std::string& body) {
+                          experimentalData& ed, double kmin, double kmaxCurr,std::vector<std::vector<double> > & mixtureList, const std::string& body) {
 
     std::string scatterName;
 
     scatterName = constructScatterName(basePath, "scatter", ".dat", improvementIndex, body);
 
-    molFit.writeScatteringToFile(ed, kmin, kmaxCurr, scatterName.c_str());
+    molFit.writeScatteringToFile(ed,mixtureList, scatterName.c_str());
 
     return scatterName;
 
@@ -327,7 +328,7 @@ double getHydrophobicPackingPenalty(double &packValue){
 // all the random numbers a boy could wish for
 RandomGenerator::RandomGenerator()
     : generator(rdev()),
-        distTran(-4.0, 4.0),
+        distTran(-10.0, 10.0),
         rotAng(0.0, 2.0),
         theAng(0.0, 3.14159265359),
         phiAng(0.0, 6.28318530718),

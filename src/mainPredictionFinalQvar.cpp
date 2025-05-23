@@ -1,7 +1,6 @@
 /* Carbonara Version: 0.2.0 */
 
 #include "ktlMoleculeRandom.h"
-#include "hydrationShellRandom.h"
 #include "experimentalData.h"
 #include <string.h>
 #include "moleculeFitAndState.h"
@@ -84,22 +83,17 @@ int main(int argc, const char* argv[]) {
 
   std::pair<double, double> overallFit;
   if (params.affineTrans == true) {
-    overallFit = molState.getOverallFitForceConnection(ed, params.mixtureList, params.helRatList, params.kmin, params.kmaxCurr);
+    overallFit = molState.getOverallFitForceConnection(ed, params.mixtureList, params.kmin, params.kmaxCurr);
   } else {
-    overallFit = molState.getOverallFit(ed, params.mixtureList, params.helRatList, params.kmin, params.kmaxCurr);
+    overallFit = molState.getOverallFit(ed, params.mixtureList, params.kmin, params.kmaxCurr);
   }
-
   logger.logMetadata(argv[16], params);
-
-  std::string scatterNameInitial = write_scatter(argv[12], improvementIndex, molState, ed, params.kmin, params.kmaxCurr, "initial");
+  std::string scatterNameInitial = write_scatter(argv[12], improvementIndex, molState, ed, params.kmin, params.kmaxCurr,params.mixtureList, "initial");
   std::string xyzNameInitial = write_molecules(argv[12], improvementIndex, moleculeStructures, "initial");
-
-  // log starting point
+   // log starting point
   logger.logEntry(0, 0, overallFit.first, molState.getWrithePenalty(), molState.getOverlapPenalty(),
                   molState.getDistanceConstraints(), params.kmaxCurr, scatterNameInitial, xyzNameInitial, molState.C2);
-
   logger.consoleInitial(overallFit.first, molState.getWrithePenalty(), molState.getOverlapPenalty(), molState.getDistanceConstraints());
-
   /* Main algorithm */
 
   // numberOfChainsInEachStructure vector tells us how many chains are in each structure
@@ -119,7 +113,7 @@ int main(int argc, const char* argv[]) {
 
 //    if (overallFit.second < 0.0002 || (params.improvementIndexTest > std::round(params.noScatterFitSteps / 5) && overallFit.second < 0.0007)) {
 
-      if (overallFit.second < 0.0001) {
+      if (overallFit.second < 0.0002) {
 
       increaseKmax(overallFit, molStateSet, ed, params, logger);
     }
@@ -131,7 +125,7 @@ int main(int argc, const char* argv[]) {
     int historicFitIndex = rng.getChangeIndexProbability(fitStep, params);
     molState = molStateSet[historicFitIndex];
     moleculeStructures = molState.getMolecule();
-    overallFit = molState.getFit();
+    //overallFit = molState.getFit();
 
     for (int structureIndex = 0; structureIndex < moleculeStructures.size(); structureIndex++) {
       int netIndex = 0;
@@ -156,13 +150,13 @@ int main(int argc, const char* argv[]) {
           point tranVec(xtran, ytran, ztran);
 
           molCopyR.changeMoleculeMultiRotate(angle, kv, chainNumber, tranVec);
-          bool cacaDist = molCopyR.checkCalphas(chainNumber);
-
+          
+          bool cacaDist= molCopyR.checkCalphas(chainNumber,moleculeStructures[structureIndex]);
           if (cacaDist == false) {
 
             // calculate the new fit for this
             moleculeFitAndState newMolState = molState;
-            std::pair<double, double> newOverallFit = newMolState.getOverallFit(ed, params.mixtureList, params.helRatList, molCopyR, params.kmin, params.kmaxCurr, structureIndex);
+            std::pair<double, double> newOverallFit = newMolState.getOverallFitForceConnection(ed, params.mixtureList, molCopyR, params.kmin, params.kmaxCurr, structureIndex);
             double uProb = rng.getDistributionR();
 
             if (checkTransition(newOverallFit.first, overallFit.first, uProb, fitStep, params.noScatterFitSteps)) {
@@ -171,6 +165,7 @@ int main(int argc, const char* argv[]) {
               updateAndLog(improvementIndex, moleculeStructures, molCopyR, molState, newMolState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
 
               logger.consoleChange("fitImprove", params);
+	      molState.updateScatteringFit(ed,params.mixtureList,params.kmin, params.kmaxCurr);
             }
           }
         } // rotate/translate section ends
@@ -193,14 +188,14 @@ int main(int argc, const char* argv[]) {
             int indexCh = totalIndex - netIndex;
             ktlMolecule newMol = moleculeStructures[structureIndex];
             bool cacaDist = modifyMolecule(newMol, moleculeStructures[structureIndex], indexCh, chainNumber);
-
+            cacaDist= newMol.checkCalphas(chainNumber,moleculeStructures[structureIndex]);
             if (cacaDist == false) {
 
               moleculeFitAndState newmolState = molState;
 
               // calculate the fitting of changed molecule
-              std::pair<double, double> newOverallFit = newmolState.getOverallFit(ed, params.mixtureList, params.helRatList, newMol, params.kmin, params.kmaxCurr, structureIndex);
-
+              std::pair<double, double> newOverallFit = newmolState.getOverallFit(ed, params.mixtureList, newMol, params.kmin, params.kmaxCurr, structureIndex);
+	      
               double uProb = rng.getDistributionR();
 
               if (checkTransition(newOverallFit.first, overallFit.first, uProb, fitStep, params.noScatterFitSteps)) {
@@ -209,7 +204,8 @@ int main(int argc, const char* argv[]) {
                 improvementIndex++;
                 updateAndLog(improvementIndex, moleculeStructures, newMol, molState, newmolState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
                 logger.consoleChange("fitImprove", params);
-                std::cout << "Hydration density parameter C2: " << newmolState.C2 << " \n";
+		molState.getOverallFit(ed, params.mixtureList, params.kmin, params.kmaxCurr);
+		// std::cout << "Hydration density parameter C2: " << newmolState.C2 << " \n";
 
               }
             }
@@ -234,7 +230,7 @@ int main(int argc, const char* argv[]) {
   improvementIndex++;
 
   std::string moleculeNameEnd = write_molecules(argv[12], improvementIndex, moleculeStructures, "end");
-  std::string scatterNameEnd = write_scatter(argv[12], improvementIndex, molState, ed, params.kmin, params.kmaxCurr, "end");
+  std::string scatterNameEnd = write_scatter(argv[12], improvementIndex, molState, ed, params.kmin, params.kmaxCurr,params.mixtureList, "end");
 
   std::cout << "\n best overall mol name: " << moleculeNameEnd << "\n";
   std::cout << " overallFitBest fit: " << overallFit.first << "\n";

@@ -41,6 +41,10 @@ std::vector<point> ktlMolecule::getCoordinatesSection(int i){
   return coords[i];
 }
 
+std::vector<std::vector<std::string> > ktlMolecule::getAminoList(){
+  return aminoList;
+}
+
 int ktlMolecule::getSubsecSize(int sec){
   // the minus 1 is becasue the labellingnumbers are 1,2,3 e.t.c but for chainList 1 is at index0
   return chainList[sec-1].second-chainList[sec-1].first+1;
@@ -640,6 +644,7 @@ std::vector<double> ktlMolecule::checkOverlapWithRad(double &wRad,int &sec){
   return overlappedSecs;
 }
 
+
 std::vector<double> ktlMolecule::checkOverlapWithRad(double &wRad){
   std::vector<double> overlappedSecs;
   distSets.clear();
@@ -854,7 +859,6 @@ bool ktlMolecule::checkCalphas(int &secNo,ktlMolecule &ktl){
   }
   return violated;
 }
-
 
 
 void ktlMolecule::changeMoleculeSingle(int &index,std::vector<std::vector<point> > &cdsIn,std::vector<std::pair<std::string,int> > &nameSizeSubList){
