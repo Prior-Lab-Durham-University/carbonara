@@ -228,6 +228,7 @@ def clean_s_sequences(arr):
             i += 1
     return result
 
+
 def pull_structure_from_pdb(pdb_file):
     """
     Pulls the structure from a (single) PDB file using MDTraj and returns the coordinates
@@ -257,10 +258,11 @@ def pull_structure_from_pdb(pdb_file):
     
     # Create a mapping for three-letter to one-letter amino acid codes
     three_to_one = get_residue_map()
+
     
     # Get unique chains
     chains = [chain for chain in topology.chains]
-    
+
     if len(chains) == 0:
         raise ValueError("No chains found in pdb file")
     
@@ -272,10 +274,11 @@ def pull_structure_from_pdb(pdb_file):
     # Compute secondary structure for the entire trajectory
     ss_pred = md.compute_dssp(traj, simplified=True)[0]
     ss_map = {'H': 'H', 'E': 'S', 'C': '-','NA': '-'}
+   
     ss_pred_mapped = np.array([ss_map[ss] for ss in ss_pred])
 
     ss_pred_mapped = clean_s_sequences(ss_pred_mapped)
-    
+
     # For each chain in the PDB
     residue_index = 0
     for chain in chains:
@@ -286,7 +289,7 @@ def pull_structure_from_pdb(pdb_file):
         ca_atoms_indices = []
         resids = []
         seq = []
-        
+
         for res in residues:
             resids.append(res.resSeq)
             
@@ -303,7 +306,7 @@ def pull_structure_from_pdb(pdb_file):
                     break
         
         # Get coordinates of CA atoms
-       if ca_atoms_indices:
+        if ca_atoms_indices:
             ca_coords = traj.xyz[0, ca_atoms_indices, :]*10 # << nm to A!!!
             if(len(ca_coords)>10):
                 coords_chains.append(ca_coords)
@@ -319,8 +322,10 @@ def pull_structure_from_pdb(pdb_file):
                 missing_residues_chains.append(missing_residues)
                 
                 residue_index += len(residues)
-        
+            
     return coords_chains, sequence_chains, secondary_structure_chains, missing_residues_chains
+
+
 
 
 # dealing with unclean PDBs
