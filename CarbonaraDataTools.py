@@ -304,7 +304,7 @@ def pull_structure_from_pdb(pdb_file):
                     break
         
         # Get coordinates of CA atoms
-        if ca_atoms_indices:
+       if ca_atoms_indices:
             ca_coords = traj.xyz[0, ca_atoms_indices, :]*10 # << nm to A!!!
             if(len(ca_coords)>10):
                 coords_chains.append(ca_coords)
@@ -319,7 +319,7 @@ def pull_structure_from_pdb(pdb_file):
                 missing_residues = find_missing_residues(resids)
                 missing_residues_chains.append(missing_residues)
                 
-                residue_index += len(residues))
+                residue_index += len(residues)
         
     return coords_chains, sequence_chains, secondary_structure_chains, missing_residues_chains
 
