@@ -15,7 +15,6 @@ set(SOURCES
     src/randomMolGen.cpp
     src/ktlMoleculeRandom.cpp
     src/experimentalData.cpp
-    src/hydrationShellRandom.cpp
     src/skmt.cpp
     src/writheFP.cpp
     src/moleculeFitAndState.cpp
