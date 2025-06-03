@@ -1009,7 +1009,6 @@ def write_mixture_file(working_path):
 #     else:
 #          copy input file
 
-
 def write_saxs(SAXS_file, working_path):
     with open(SAXS_file) as oldfile, open('temp.txt', 'w') as newfile:
         for line in oldfile:
@@ -1022,13 +1021,12 @@ def write_saxs(SAXS_file, working_path):
             if len(final_list)==0:
                 newfile.write(line)
 
-    saxs_arr = np.genfromtxt('temp.txt')
+    saxs_arr = read_triplets_from_file('temp.txt')
 
     if saxs_arr.shape[1] == 3:
         saxs_arr = saxs_arr[:,:3]
 
     #check if it is in angstoms, if the last value is >1 we assume its in nanometers.
-
     if saxs_arr[-1,0] >1:
         for i in range(0,len(saxs_arr)):
             saxs_arr[i,0]=saxs_arr[i,0]/10.0
@@ -1038,6 +1036,7 @@ def write_saxs(SAXS_file, working_path):
     os.remove("temp.txt")
 
     return file_path_name
+
 
 def get_sses(ss_file):
     '''
