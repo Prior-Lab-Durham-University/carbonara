@@ -291,8 +291,7 @@ def pull_structure_from_pdb(pdb_file):
             resids.append(res.resSeq)
             
             # Get one letter code for the residue
-            i
-            f res.name in three_to_one:
+            if res.name in three_to_one:
                 seq.append(three_to_one[res.name])
             else:
                 seq.append('X')  # Unknown amino acid
