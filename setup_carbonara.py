@@ -219,7 +219,7 @@ def main():
         mixture_file = cdt.write_mixture_file(working_path=refine_dir)
         
         # Copy SAXS file to Saxs.dat (this is the file that Carbonara will use)
-        shutil.copy2(args.saxs, os.path.join(refine_dir, 'Saxs.dat'))
+        cdt.write_saxs(args.saxs,refine_dir)
         
         # auto select flexible linker chains that dont break inter-beta sheets
         varying_linker_chains = []
