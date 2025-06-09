@@ -1098,16 +1098,16 @@ def SAXS_fit_plotter(SAXS_file, fit_file, full_q=True):
     min_q = fit_q.min()
     max_q = fit_q.max()
 
+    if q[-1] >1:
+        for i in range(0,len(q)):
+            q[i]=q[i,0]/10.0
 
 
     cond = (q >= min_q) & (q <= max_q)
     q_range = q[cond]
     I_range = I[cond]
 
-    if q_range[-1] >1:
-        for i in range(0,len(q_range)):
-            q_range[i]=q_range[i,0]/10.0
-
+    
     tck = interpolate.splrep(fit_q, fit_I)
     spli_I = interpolate.splev(q_range,tck)
 
