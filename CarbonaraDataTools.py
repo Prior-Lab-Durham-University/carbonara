@@ -1201,7 +1201,7 @@ def SAXS_fit_plotter(SAXS_file, fit_file, full_q=True):
 
     if q[-1] >1:
         for i in range(0,len(q)):
-            q[i]=q[i,0]/10.0
+            q[i]=q[i]/10.0
 
 
     cond = (q >= min_q) & (q <= max_q)
