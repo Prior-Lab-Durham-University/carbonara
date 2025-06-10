@@ -26,6 +26,10 @@ from tqdm import tqdm
 #from Bio.PDB.DSSP import make_dssp_dict
 #from DSSPparser import parseDSSP
 
+from pdbfixer import PDBFixer
+from openmm.app import PDBFile
+from tempfile import NamedTemporaryFile
+
 import biobox as bb
 
 import shutil
@@ -227,6 +231,103 @@ def clean_s_sequences(arr):
         else:
             i += 1
     return result
+
+
+def pull_structure_from_pdb(file_path):
+    """
+    Pulls the structure from a (single) PDB file using MDTraj and returns the coordinates
+    and sequence of the chain(s).
+
+    Parameters:
+        pdb_file (str): The path of the PDB file.
+
+    Returns:
+        coords_chain (list): A list of numpy arrays containing the CA coordinates of the chain(s).
+        sequence_chain (list): A list of numpy arrays containing the sequence of the chain(s).
+        secondary_structure_chains (list): A list of predicted secondary structures for each chain.
+        missing_residues_chain (list): A list of numpy arrays containing the missing residues of the chain(s).
+
+    Raises:
+        ValueError: If no chains are found in the PDB file.
+
+    Example:
+        coords_chains, sequence_chains, secondary_structure_chains, missing_residues_chains =
+            pull_structure_from_pdb_mdtraj('/path/to/pdb/file.pdb')
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+
+    """
+    To deal with alphaFold3 cif format
+    """
+    if ext == ".pdb":
+        traj = md.load(file_path)
+    elif ext == ".cif":
+        # Load with PDBFixer
+        fixer = PDBFixer(filename=file_path)
+        fixer.findMissingResidues()
+        fixer.findMissingAtoms()
+        fixer.addMissingAtoms()
+        fixer.addMissingHydrogens()
+
+        # Write to temporary PDB file and load with MDTraj
+        with NamedTemporaryFile(mode="w", suffix=".pdb", delete=False) as temp:
+           PDBFile.writeFile(fixer.topology, fixer.positions, temp)
+           temp_path = temp.name
+        traj = md.load(temp_path)
+        os.remove(temp_path)  # clean up temporary file
+    else:
+        raise ValueError(f"Unsupported file extension: {ext}")
+
+    topology = traj.topology
+    three_to_one = get_residue_map()
+
+    chains = list(topology.chains)
+    if len(chains) == 0:
+        raise ValueError("No chains found in structure")
+
+    coords_chains = []
+    sequence_chains = []
+    secondary_structure_chains = []
+    missing_residues_chains = []
+
+    ss_pred = md.compute_dssp(traj, simplified=True)[0]
+    ss_map = {'H': 'H', 'E': 'S', 'C': '-', 'NA': '-'}
+    ss_pred_mapped = np.array([ss_map.get(ss, '-') for ss in ss_pred])
+    ss_pred_mapped = clean_s_sequences(ss_pred_mapped)
+
+    residue_index = 0
+    for chain in chains:
+        residues = list(chain.residues)
+        ca_atoms_indices = []
+        resids = []
+        seq = []
+
+        for res in residues:
+            resids.append(res.resSeq)
+            seq.append(three_to_one.get(res.name, 'X'))
+
+            for atom in res.atoms:
+                if atom.name == 'CA':
+                    ca_atoms_indices.append(atom.index)
+                    break
+
+        if ca_atoms_indices:
+            ca_coords = traj.xyz[0, ca_atoms_indices, :] * 10  # nm to Å
+            if len(ca_coords) > 10:
+                coords_chains.append(ca_coords)
+                sequence_chains.append(np.array(seq))
+
+                chain_ss = ss_pred_mapped[residue_index:residue_index + len(residues)]
+                secondary_structure_chains.append(chain_ss)
+
+                resids = np.array(resids)
+                missing_residues = find_missing_residues(resids)
+                missing_residues_chains.append(missing_residues)
+
+                residue_index += len(residues)
+
+    return coords_chains, sequence_chains, secondary_structure_chains, missing_residues_chains
+
 
 
 def pull_structure_from_pdb(pdb_file):
