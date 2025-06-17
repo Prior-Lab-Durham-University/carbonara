@@ -81,6 +81,8 @@ pip install tqdm
 pip install mdtraj 
 pip install biobox
 pip install plotly
+pip install openmm
+pip install git+https://github.com/openmm/pdbfixer.git
 ```
 
 Setting up the RunMe
