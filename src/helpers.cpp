@@ -98,6 +98,7 @@ void readFixedDistancesConstraints(const char* argv[], std::vector<ktlMolecule>&
 
       for(int i=0;i<noStructures;i++){
         std::string contactPredictions = std::string(argv[2]) + "fixedDistanceConstraints" + std::to_string(i + 1) + ".dat";
+	std::cout<<contactPredictions<<"\n";
         mol[i].loadContactPredictions(contactPredictions.c_str());
       }
     }
@@ -231,6 +232,28 @@ void updateAndLog(int& improvementIndex, std::vector<ktlMolecule>& mol, ktlMolec
 }
 
 
+void updateAndLog_ChiSq(int& improvementIndex, std::vector<ktlMolecule>& mol, ktlMolecule& newMol,
+                  moleculeFitAndState& molState, moleculeFitAndState& newMolState,
+                  std::pair<double,double>& overallFit, std::pair<double,double>& newOverallFit,
+                  Logger& logger, int l, int k, experimentalData& ed, ModelParameters& params) {
+
+    mol[l] = newMol;
+    molState = newMolState;
+    overallFit = newOverallFit;
+    molState.updateMolecule(mol);
+
+    std::string moleculeNameMain = write_molecules(params.basePath, improvementIndex, mol, "default");
+    std::string scatterNameMain;
+    scatterNameMain= write_scatter_ChiSq(params.basePath, improvementIndex, molState, ed, params.kmin, params.kmaxCurr,params.mixtureList);
+
+    logger.logEntry(improvementIndex, k, overallFit.first, molState.getWrithePenalty(), molState.getOverlapPenalty(),
+                    molState.getDistanceConstraints(), params.kmaxCurr, scatterNameMain, moleculeNameMain,
+                    molState.C2);
+
+}
+
+
+
 std::string constructMoleculeName(const std::string& basePath, const std::string& prefix, const std::string& extension,
                                   const int& submol, const int& improvementIndex, const std::string& body) {
 
@@ -286,6 +309,20 @@ std::string write_scatter(const std::string& basePath, const int& improvementInd
     scatterName = constructScatterName(basePath, "scatter", ".dat", improvementIndex, body);
 
     molFit.writeScatteringToFile(ed,mixtureList, scatterName.c_str());
+
+    return scatterName;
+
+}
+
+
+std::string write_scatter_ChiSq(const std::string& basePath, const int& improvementIndex, moleculeFitAndState& molFit,
+                          experimentalData& ed, double kmin, double kmaxCurr,std::vector<std::vector<double> > & mixtureList, const std::string& body) {
+
+    std::string scatterName;
+
+    scatterName = constructScatterName(basePath, "scatter", ".dat", improvementIndex, body);
+
+    molFit.writeScatteringToFile_ChiSq(ed,mixtureList, scatterName.c_str());
 
     return scatterName;
 
