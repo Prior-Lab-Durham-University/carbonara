@@ -20,14 +20,14 @@ std::string center_string(const std::string& str, int width) {
 
 int main(int argc, const char* argv[]) {
     if (argc < 6) {
-        std::cerr << "Usage: " << argv[0] << " <scattering_data_file> <fingerprint_file> <coordinate_file> <output_prefix> <q_max>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <scattering_data_file> <fingerprint_file> <coordinate_file> <output_prefix> <qmin> <q_max>" << std::endl;
         return 1;
     }
 
     // Set up model parameters
     ModelParameters params;
-    params.kmin = 0.0;
-    params.kmax = std::stod(argv[5]);
+    params.kmin = std::stod(argv[5]);
+    params.kmax = std::stod(argv[6]);
     params.kmaxCurr = params.kmax;
     params.rmin = 3.7;
     params.rmax = 3.9;
@@ -56,7 +56,9 @@ int main(int argc, const char* argv[]) {
     std::vector<double> dummyHelRatList = {0.5}; // Dummy helix ratio
     std::pair<double, double> fit = molState.getOverallFit(ed, dummyMixtureList, params.kmin, params.kmaxCurr);
 
-
+    std::cout<<"fit quality "<<fit.second<<"\n";
+			    
+			    
     /* Output results
     std::cout << horizontal_line() << std::endl;
     std::cout << center_string("Fit Results", 50) << std::endl;
