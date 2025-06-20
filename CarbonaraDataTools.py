@@ -21,10 +21,18 @@ import shutil
 #import rmsd
 from tqdm import tqdm
 
+from typing import List, Set
+
+
 #from Bio.PDB import PDBParser
 #from Bio.PDB.DSSP import DSSP
 #from Bio.PDB.DSSP import make_dssp_dict
 #from DSSPparser import parseDSSP
+
+from pdbfixer import PDBFixer
+from openmm.app import PDBFile
+from tempfile import NamedTemporaryFile
+import matplotlib.pyplot as plt
 
 import biobox as bb
 
@@ -228,6 +236,104 @@ def clean_s_sequences(arr):
             i += 1
     return result
 
+
+def pull_structure_from_pdb(file_path):
+    """
+    Pulls the structure from a (single) PDB file using MDTraj and returns the coordinates
+    and sequence of the chain(s).
+
+    Parameters:
+        pdb_file (str): The path of the PDB file.
+
+    Returns:
+        coords_chain (list): A list of numpy arrays containing the CA coordinates of the chain(s).
+        sequence_chain (list): A list of numpy arrays containing the sequence of the chain(s).
+        secondary_structure_chains (list): A list of predicted secondary structures for each chain.
+        missing_residues_chain (list): A list of numpy arrays containing the missing residues of the chain(s).
+
+    Raises:
+        ValueError: If no chains are found in the PDB file.
+
+    Example:
+        coords_chains, sequence_chains, secondary_structure_chains, missing_residues_chains =
+            pull_structure_from_pdb_mdtraj('/path/to/pdb/file.pdb')
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+
+    """
+    To deal with alphaFold3 cif format
+    """
+    if ext == ".pdb":
+        traj = md.load(file_path)
+    elif ext == ".cif":
+        # Load with PDBFixer
+        fixer = PDBFixer(filename=file_path)
+        fixer.findMissingResidues()
+        fixer.findMissingAtoms()
+        fixer.addMissingAtoms()
+        fixer.addMissingHydrogens()
+
+        # Write to temporary PDB file and load with MDTraj
+        with NamedTemporaryFile(mode="w", suffix=".pdb", delete=False) as temp:
+           PDBFile.writeFile(fixer.topology, fixer.positions, temp)
+           temp_path = temp.name
+        traj = md.load(temp_path)
+        os.remove(temp_path)  # clean up temporary file
+    else:
+        raise ValueError(f"Unsupported file extension: {ext}")
+
+    topology = traj.topology
+    three_to_one = get_residue_map()
+
+    chains = list(topology.chains)
+    if len(chains) == 0:
+        raise ValueError("No chains found in structure")
+
+    coords_chains = []
+    sequence_chains = []
+    secondary_structure_chains = []
+    missing_residues_chains = []
+
+    ss_pred = md.compute_dssp(traj, simplified=True)[0]
+    ss_map = {'H': 'H', 'E': 'S', 'C': '-', 'NA': '-'}
+    ss_pred_mapped = np.array([ss_map.get(ss, '-') for ss in ss_pred])
+    ss_pred_mapped = clean_s_sequences(ss_pred_mapped)
+
+    residue_index = 0
+    for chain in chains:
+        residues = list(chain.residues)
+        ca_atoms_indices = []
+        resids = []
+        seq = []
+
+        for res in residues:
+            resids.append(res.resSeq)
+            seq.append(three_to_one.get(res.name, 'X'))
+
+            for atom in res.atoms:
+                if atom.name == 'CA':
+                    ca_atoms_indices.append(atom.index)
+                    break
+
+        if ca_atoms_indices:
+            ca_coords = traj.xyz[0, ca_atoms_indices, :] * 10  # nm to Å
+            if len(ca_coords) > 10:
+                coords_chains.append(ca_coords)
+                sequence_chains.append(np.array(seq))
+
+                chain_ss = ss_pred_mapped[residue_index:residue_index + len(residues)]
+                secondary_structure_chains.append(chain_ss)
+
+                resids = np.array(resids)
+                missing_residues = find_missing_residues(resids)
+                missing_residues_chains.append(missing_residues)
+
+                residue_index += len(residues)
+
+    return coords_chains, sequence_chains, secondary_structure_chains, missing_residues_chains
+
+
+
 def pull_structure_from_pdb(pdb_file):
     """
     Pulls the structure from a (single) PDB file using MDTraj and returns the coordinates
@@ -257,10 +363,11 @@ def pull_structure_from_pdb(pdb_file):
     
     # Create a mapping for three-letter to one-letter amino acid codes
     three_to_one = get_residue_map()
+
     
     # Get unique chains
     chains = [chain for chain in topology.chains]
-    
+
     if len(chains) == 0:
         raise ValueError("No chains found in pdb file")
     
@@ -272,10 +379,11 @@ def pull_structure_from_pdb(pdb_file):
     # Compute secondary structure for the entire trajectory
     ss_pred = md.compute_dssp(traj, simplified=True)[0]
     ss_map = {'H': 'H', 'E': 'S', 'C': '-','NA': '-'}
+   
     ss_pred_mapped = np.array([ss_map[ss] for ss in ss_pred])
 
     ss_pred_mapped = clean_s_sequences(ss_pred_mapped)
-    
+
     # For each chain in the PDB
     residue_index = 0
     for chain in chains:
@@ -286,7 +394,7 @@ def pull_structure_from_pdb(pdb_file):
         ca_atoms_indices = []
         resids = []
         seq = []
-        
+
         for res in residues:
             resids.append(res.resSeq)
             
@@ -305,21 +413,24 @@ def pull_structure_from_pdb(pdb_file):
         # Get coordinates of CA atoms
         if ca_atoms_indices:
             ca_coords = traj.xyz[0, ca_atoms_indices, :]*10 # << nm to A!!!
-            coords_chains.append(ca_coords)
-            sequence_chains.append(np.array(seq))
-            
-            # Get secondary structure for this chain
-            chain_ss = ss_pred_mapped[residue_index:residue_index + len(residues)]
-            secondary_structure_chains.append(chain_ss)
-            
-            # Find missing residues
-            resids = np.array(resids)
-            missing_residues = find_missing_residues(resids)
-            missing_residues_chains.append(missing_residues)
-            
-            residue_index += len(residues)
+            if(len(ca_coords)>10):
+                coords_chains.append(ca_coords)
+                sequence_chains.append(np.array(seq))
+                
+                # Get secondary structure for this chain
+                chain_ss = ss_pred_mapped[residue_index:residue_index + len(residues)]
+                secondary_structure_chains.append(chain_ss)
+                
+                # Find missing residues
+                resids = np.array(resids)
+                missing_residues = find_missing_residues(resids)
+                missing_residues_chains.append(missing_residues)
+                
+                residue_index += len(residues)
             
     return coords_chains, sequence_chains, secondary_structure_chains, missing_residues_chains
+
+
 
 
 # dealing with unclean PDBs
@@ -1007,7 +1118,6 @@ def write_mixture_file(working_path):
 #     else:
 #          copy input file
 
-
 def write_saxs(SAXS_file, working_path):
     with open(SAXS_file) as oldfile, open('temp.txt', 'w') as newfile:
         for line in oldfile:
@@ -1020,13 +1130,12 @@ def write_saxs(SAXS_file, working_path):
             if len(final_list)==0:
                 newfile.write(line)
 
-    saxs_arr = np.genfromtxt('temp.txt')
+    saxs_arr = read_triplets_from_file('temp.txt')
 
     if saxs_arr.shape[1] == 3:
-        saxs_arr = saxs_arr[:,:2]
+        saxs_arr = saxs_arr[:,:3]
 
     #check if it is in angstoms, if the last value is >1 we assume its in nanometers.
-
     if saxs_arr[-1,0] >1:
         for i in range(0,len(saxs_arr)):
             saxs_arr[i,0]=saxs_arr[i,0]/10.0
@@ -1036,6 +1145,7 @@ def write_saxs(SAXS_file, working_path):
     os.remove("temp.txt")
 
     return file_path_name
+
 
 def get_sses(ss_file):
     '''
@@ -1093,12 +1203,16 @@ def SAXS_fit_plotter(SAXS_file, fit_file, full_q=True):
     min_q = fit_q.min()
     max_q = fit_q.max()
 
+    if q[-1] >1:
+        for i in range(0,len(q)):
+            q[i]=q[i]/10.0
 
 
     cond = (q >= min_q) & (q <= max_q)
     q_range = q[cond]
     I_range = I[cond]
 
+    
     tck = interpolate.splrep(fit_q, fit_I)
     spli_I = interpolate.splev(q_range,tck)
 
@@ -1506,3 +1620,132 @@ def plotMolAndSAXS(RunPath,saxs_fl,mol_fl):
                 showbackground=False,
                 showticklabels=False)))
     return fig.show()
+
+
+def load_pae_matrix(json_path):
+    """
+    Load a Predicted Aligned Error (PAE) matrix from a JSON file.
+    
+    Supports AlphaFold DB format (list of dicts with 'predicted_aligned_error')
+    and AlphaFold v3/custom format (dict with 'pae' or 'predicted_aligned_error' key).
+    Returns:
+        numpy.ndarray: 2D array of PAE values.
+    Raises:
+        ValueError: If no supported PAE format is found in the JSON.
+    """
+    # Read the JSON file
+    with open(json_path, 'r') as f:
+        data = json.load(f)
+    
+    # Determine the format and extract the PAE matrix
+    if isinstance(data, list):
+        # Format 1: AlphaFold DB style (list containing dict with PAE data)
+        if not data:
+            raise ValueError("PAE JSON list is empty.")
+        entry = data[0]
+        if isinstance(entry, dict):
+            # Check known keys for PAE matrix
+            if 'predicted_aligned_error' in entry:
+                matrix = entry['predicted_aligned_error']
+            elif 'predicted_alignment_error' in entry:
+                matrix = entry['predicted_alignment_error']
+            elif 'pae' in entry:
+                matrix = entry['pae']
+            else:
+                raise ValueError("No PAE matrix found under expected keys in the JSON list entry.")
+        else:
+            raise ValueError("PAE JSON list does not contain a dictionary object.")
+    
+    elif isinstance(data, dict):
+        # Format 2: AlphaFold v3 or custom style (PAE under top-level keys in a dict)
+        if 'predicted_aligned_error' in data:
+            matrix = data['predicted_aligned_error']
+        elif 'predicted_alignment_error' in data:
+            matrix = data['predicted_alignment_error']
+        elif 'pae' in data:
+            matrix = data['pae']
+        else:
+            raise ValueError("No supported PAE key ('predicted_aligned_error' or 'pae') found in the JSON file.")
+    
+    else:
+        # Unsupported JSON structure
+        raise ValueError("Unsupported JSON format for PAE data.")
+    
+    # Convert the matrix to a NumPy array and return
+    return np.array(matrix)
+
+def getFlexibleSections(file_path,pae_threshold = 1.0):
+    pae_data = load_pae_matrix(file_path)
+    if len(pae_data)==0:
+        print("No 'pae' data found in the JSON file.")
+    else:
+        # Convert PAE data to a NumPy array for easier manipulation
+        pae_array = np.array(pae_data)
+        window_size = 2  # Define a window size
+        high_pae_residues = []
+        for i in range(len(pae_array) - window_size + 1):
+            window = pae_array[i:i + window_size, i:i + window_size]
+            avg_pae = np.mean(window)
+            if avg_pae > pae_threshold:
+                #print(f"Residue range {i}-{i + window_size} exceeds threshold with avg PAE {avg_pae}")
+                high_pae_residues.extend(range(i, i + window_size))
+    # Remove duplicate residue indices
+        high_pae_residues = sorted(set(high_pae_residues))
+        # Plotting the PAE heatmap with inverted colors
+        plt.figure(figsize=(8, 6))
+        heatmap = plt.imshow(pae_array, cmap='Greens_r', interpolation='nearest', aspect='auto')
+        plt.colorbar(heatmap, label='Expected position error (Ångströms)')
+        # Highlight regions identified as linkers
+        for res in high_pae_residues:
+            plt.axvline(x=res, color='red', linestyle='--', alpha=0.3)
+            plt.axhline(y=res, color='red', linestyle='--', alpha=0.3)
+        # Set labels
+        plt.xlabel('Scored residue')
+        plt.ylabel('Aligned residue')
+        plt.title('Predicted Aligned Error (PAE) Heatmap')
+
+        # Show the plot
+        plt.show()
+        # Second plot: Highlighting selected residues
+        plt.figure(figsize=(10, 2))
+        plt.bar(range(len(pae_array)), [1 if i in high_pae_residues else 0 for i in range(len(pae_array))], color='green', alpha=0.6)
+        plt.xlabel('Residue Index')
+        plt.ylabel('')
+        plt.title('Residues Identified as Linkers or Between Domains')
+        plt.yticks([0, 1], [])
+        plt.grid(axis='x')
+
+        # Show the second plot
+        plt.show()
+        return np.array([1 if i in high_pae_residues else 0 for i in range(len(pae_array))])
+
+from typing import List, Set
+
+def find_flexible_linker_sections(ss_string: str, pae_flags: List[int]) -> Set[int]:
+    assert len(ss_string) == len(pae_flags), "Length of sequence and PAE list must match"
+    
+    flexible_linker_indices = set()
+    i = 0
+    section_index = 0
+
+    while i < len(ss_string):
+        current_char = ss_string[i]
+        start = i
+
+        # Move i to the end of the current segment
+        while i < len(ss_string) and ss_string[i] == current_char:
+            i += 1
+        end = i
+
+        # Check only if this section is a linker
+        if current_char == '-' and any(pae_flags[start:end]):
+            flexible_linker_indices.add(section_index)
+
+        section_index += 1
+
+    return flexible_linker_indices
+
+def getFlexibility(paeFile,fingerprint_file):
+    flexsec =getFlexibleSections(paeFile,pae_threshold = 1.2)
+    fingerprint = get_secondary(fingerprint_file)
+    return [list(find_flexible_linker_sections(np.concatenate(fingerprint), flexsec))]
