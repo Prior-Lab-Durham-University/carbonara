@@ -311,32 +311,6 @@ void ktlMolecule::readInSequence(const char* filename,double &rmin,double &rmax,
 	    aminoType.push_back(sequence.substr(i,1));
 	  }else{
 	    //store the previous type and length, if it is a helix check for breaks
-	    if(prevType=="Helix"){
-	      // helix check for glycine or prolene
-	      int currLower=0;
-	      int currSize=0;
-	      std::vector<std::string> aminoTypeSub;
-	      for(int j=0;j<aminoType.size();j++){
-		aminoTypeSub.push_back(aminoType[j]);
-		currSize++;
-		//helix breaker, currently removed
-		//if ((((aminoType[j]=="G" || aminoType[j]=="P")&& (j>2 && j<(aminoType.size()-3))) &&currSize>3) || (j==aminoType.size()-1) ){
-		if(j==aminoType.size()-1){
-		  std::pair<std::string,int> stpr;
-		  stpr.first = prevType;stpr.second = j-currLower+1;
-		  currLower=j+1;
-		  nameSizeList.push_back(stpr);
-		  aminoList.push_back(aminoTypeSub);
-		  distChanges.push_back(0.0);
-		  aminoTypeSub.clear();
-		  currSize=0;
-		  }
-	      }
-	      prevType=type;
-	      aminoType.clear();
-	      aminoType.push_back(sequence.substr(i,1));
-	      n=1;
-	    }else{
 	      //strand or linker, no need to separate
 	      std::pair<std::string,int> stpr;
 	      stpr.first = prevType;stpr.second = n;
@@ -348,7 +322,6 @@ void ktlMolecule::readInSequence(const char* filename,double &rmin,double &rmax,
 	      // empty the aminoVector
 	      aminoType.push_back(sequence.substr(i,1));
 	      n=1;
-	    }
 	  }
 	}
       }
@@ -357,6 +330,7 @@ void ktlMolecule::readInSequence(const char* filename,double &rmin,double &rmax,
       nameSizeList.push_back(stpr);
       distChanges.push_back(0.0);
       aminoList.push_back(aminoType);
+      aminoType.clear();
       p.second = nameSizeList.size()-1;
       chainList.push_back(p);
       /*std::cout<<chainList.size()<<"\n";
@@ -1152,6 +1126,7 @@ void ktlMolecule::loadContactPredictions(const char* contactloc){
        int ind1,ind2,ind3,ind4;double distance,percentage;
        std::getline(cpfile,output);
        std::stringstream ss(output);
+       if(output.length()>0){
        ss>>ind1;
        ss.ignore();
        ss>>ind2;
@@ -1172,6 +1147,7 @@ void ktlMolecule::loadContactPredictions(const char* contactloc){
        std::tuple<std::pair<int,int>,std::pair<int,int>,std::pair<double,double> > tp;
        std::get<0>(tp) = pr1;std::get<1>(tp) = pr2;std::get<2>(tp) = pr3;
        contactPairList.push_back(tp);
+       }
      }
      int cpls =contactPairList.size();
   }
@@ -1194,9 +1170,12 @@ double ktlMolecule::getLennardJonesContact(){
     //std::cout<<"size2 "<<coords[pr2.first].size()<<"\n";
     //std::cout<<"d comp "<<prWiseDist<<" "<<std::get<2>(tp).first<<"\n";
     double distFrac=(prWiseDist-std::get<2>(tp).first)/(std::get<2>(tp).first);
+    //std::cout<<distFrac<<"\n";
     double distFracWeighted = distFrac/(std::get<2>(tp).second);
+    //std::cout<<distFracWeighted<<" "<<std::get<2>(tp).second<<"\n";
     //std::cout<<"\n";
     ljval = ljval + 0.0001*distFracWeighted*distFracWeighted*distFracWeighted*distFracWeighted;
+    //std::cout<<"pen bounded ?"<<distFracWeighted<<"\n";
     //cd1.printPoint();
     //cd2.printPoint();
     //double drat = prWiseDist/std::get<2>(tp);
