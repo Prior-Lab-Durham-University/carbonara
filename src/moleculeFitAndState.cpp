@@ -92,6 +92,10 @@ void  moleculeFitAndState::writeScatteringToFile(experimentalData &ed,std::vecto
   ed.writeScatteringToFile(mixtureVals,filename);
 }
 
+void  moleculeFitAndState::writeScatteringToFile_ChiSq(experimentalData &ed,std::vector<std::vector<double> > &mixtureVals,const char* filename){
+  ed.writeScatteringToFile_ChiSq(mixtureVals,filename);
+}
+
 
 
 double moleculeFitAndState::getOverlapPenalty(double &closestApproachDist,std::vector<double> &overlapDists){
@@ -251,7 +255,7 @@ double  moleculeFitAndState::getDistanceConstraints(){
 
 
 std::pair<double,double> moleculeFitAndState::getOverallFit(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,double &kmin,double &kmax){
-  // get the scattering   
+  // get the scattering
   double scatterAndHydrationConstraint = ed.calculateChiSquared(mol,kmin,kmax,mixtureList);
   /***************************************************************
 
@@ -262,13 +266,44 @@ std::pair<double,double> moleculeFitAndState::getOverallFit(experimentalData &ed
      iii) A writhe penalty to ensure the moelule doesn't become too disentangled.
 
   **************************************************************/
+  //std::cout<<"scattering "<<scatterAndHydrationConstraint<<"\n";
   double overlapPenalty = applyOverlapPenalty();
+  //std::cout<<"Overlap Constraints "<<overlapPenalty<<"\n";
   double distanceConstraints = applyDistanceConstraints();
   //std::cout<<"Distance Constraints "<<distanceConstraints<<"\n";
   applyWritheConstraint();
-  // std::cout<<"Writhe penalty "<<writhePenalty<<"\n";
+  //std::cout<<"Writhe penalty "<<writhePenalty<<"\n";
   //calculateConnectionPenalty(mol[0],0);
-  double currFit = scatterAndHydrationConstraint +distanceConstraints + writhePenalty+overlapPenalty;
+  double currFit = scatterAndHydrationConstraint +1.0*(distanceConstraints + writhePenalty+overlapPenalty);
+  std::pair<double,double> fitStats;
+  fitStats.first = currFit;
+  fitStats.second = scatterAndHydrationConstraint;
+
+  // pass along best hydration C2 parameter
+  return fitStats;
+}
+
+std::pair<double,double> moleculeFitAndState::getOverallFit_ChiSq(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,double &kmin,double &kmax){
+  // get the scattering   
+  double scatterAndHydrationConstraint = ed.calculateChiSquared_Weighted(mol,kmin,kmax,mixtureList);
+  /***************************************************************
+
+   apply penalties which are "un protein like". Currently we are using
+
+     i) a very strict overlap penalty which exponetiallp penalises non local sections coming close than 4 A.
+     ii) A distance constraint measure, which is only active if the user inputs a set of distance consrtrainst like contact predictions.
+     iii) A writhe penalty to ensure the moelule doesn't become too disentangled.
+
+  **************************************************************/
+  
+  double overlapPenalty = applyOverlapPenalty();
+  //std::cout<<"Overlap penalty "<<overlapPenalty<<"\n";
+  double distanceConstraints = applyDistanceConstraints();
+  //std::cout<<"Distance Constraints "<<distanceConstraints<<"\n";
+  applyWritheConstraint();
+  //std::cout<<"Writhe penalty "<<writhePenalty<<"\n";
+  //calculateConnectionPenalty(mol[0],0);
+  double currFit = scatterAndHydrationConstraint +100.0*(distanceConstraints + writhePenalty+overlapPenalty);
   std::pair<double,double> fitStats;
   fitStats.first = currFit;
   fitStats.second = scatterAndHydrationConstraint;
@@ -299,9 +334,40 @@ std::pair<double,double> moleculeFitAndState::getOverallFitForceConnection(exper
   for(int i=0;i<mol.size();i++){
     calculateConnectionPenalty(mol[i],i);
   }
-  // std::cout<<"original connection Pen "<<connectionPenalty<<"\n";
+  std::cout<<"original connection Pen "<<connectionPenalty<<"\n";
   // if the user has specidfed some sub chains to be connected.
-  double currFit = scatterAndHydrationConstraint  +distanceConstraints + writhePenalty+connectionPenalty;
+  double currFit = scatterAndHydrationConstraint  +1.0*(distanceConstraints + writhePenalty+connectionPenalty);
+  std::pair<double,double> fitStats;
+  fitStats.first = currFit;
+  fitStats.second = scatterAndHydrationConstraint;
+
+  return fitStats;
+}
+
+std::pair<double,double> moleculeFitAndState::getOverallFitForceConnection_ChiSq(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,double &kmin,double &kmax){
+  // get the scattering   
+  double scatterAndHydrationConstraint = ed.calculateChiSquared_Weighted(mol,kmin,kmax,mixtureList);;
+  /***************************************************************
+
+   apply penalties which are "un protein like". Currently we are using
+
+     i) a very strict overlap penalty which exponetiallp penalises non local sections coming close than 4 A.
+     ii) A distance constraint measure, which is only active if the user inputs a set of distance consrtrainst like contact predictions.
+     iii) A writhe penalty to ensure the moelule doesn't become too disentangled.
+
+  **************************************************************/
+  double overlapPenalty = applyOverlapPenalty();
+  double distanceConstraints = applyDistanceConstraints();
+  //std::cout<<"Distance Constraints "<<distanceConstraints<<"\n";
+  applyWritheConstraint();
+  //std::cout<<"Writhe penalty "<<writhePenalty<<"\n";
+  //std::cout<<" scattering  "<<scatterAndHydrationConstraint<<"\n";
+  for(int i=0;i<mol.size();i++){
+    calculateConnectionPenalty(mol[i],i);
+  }
+  //std::cout<<"original connection Pen "<<connectionPenalty<<"\n";
+  // if the user has specidfed some sub chains to be connected.
+  double currFit = scatterAndHydrationConstraint  +100.0*(distanceConstraints +overlapPenalty+ writhePenalty+connectionPenalty);
   std::pair<double,double> fitStats;
   fitStats.first = currFit;
   fitStats.second = scatterAndHydrationConstraint;
@@ -318,6 +384,33 @@ std::pair<double,double> moleculeFitAndState::getOverallFit(experimentalData &ed
   // apply penalties
   //std::cout<<"updated "<<scatterAndHydrationConstraint<<"\n";
    double overlapPenalty = applyOverlapPenalty();
+   // std::cout<<"Overlap Penalty update "<<overlapPenalty<<"\n";
+   double distanceConstraints = applyDistanceConstraints(molNew,i);
+   //std::cout<<"Distance constraints update "<<distanceConstraints<<"\n";
+  alterWritheSet(molNew,i);
+  applyWritheConstraint();
+  // std::cout<<" writhe penalty  "<<writhePenalty<<"\n";
+  //calculateConnectionPenalty(molNew,i);
+  //std::cout<<" scattering  "<<scatterAndHydrationConstraint<<"\n";
+  //std::cout<<" connection penalty  "<<connectionPenalty<<"\n";
+  double currFit = scatterAndHydrationConstraint +1.0*(overlapPenalty +distanceConstraints + writhePenalty);
+  //std::cout<<currFit<<"\n";
+  std::pair<double,double> fitStats;
+  fitStats.first = currFit;
+  fitStats.second = scatterAndHydrationConstraint;
+
+
+  return fitStats;
+}
+
+
+std::pair<double,double> moleculeFitAndState::getOverallFit_ChiSq(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,ktlMolecule &molNew,double &kmin,double &kmax,int &i){
+  // update the molecule distances for molecule i;
+  calculateMoleculeDistances(molNew,i);
+  double scatterAndHydrationConstraint = ed.calculateChiSquaredUpdate_Weighted(molNew,i,kmin,kmax,mixtureList);
+  // apply penalties
+  //std::cout<<"updated "<<scatterAndHydrationConstraint<<"\n";
+   double overlapPenalty = applyOverlapPenalty();
     //std::cout<<"Overlap Penalty "<<overlapPenalty<<"\n";
    double distanceConstraints = applyDistanceConstraints(molNew,i);
    // std::cout<<"Distance constraints "<<distanceConstraints<<"\n";
@@ -327,7 +420,7 @@ std::pair<double,double> moleculeFitAndState::getOverallFit(experimentalData &ed
   //calculateConnectionPenalty(molNew,i);
   //std::cout<<" scattering  "<<scatterAndHydrationConstraint<<"\n";
   //std::cout<<" connection penalty  "<<connectionPenalty<<"\n";
-  double currFit = scatterAndHydrationConstraint +overlapPenalty +distanceConstraints + writhePenalty;
+  double currFit = scatterAndHydrationConstraint +100.0*(overlapPenalty +distanceConstraints + writhePenalty);
   //std::cout<<currFit<<"\n";
   std::pair<double,double> fitStats;
   fitStats.first = currFit;
@@ -355,7 +448,34 @@ std::pair<double,double> moleculeFitAndState::getOverallFitForceConnection(exper
   calculateConnectionPenalty(molNew,i);
   //std::cout<<" scattering  "<<scatterAndHydrationConstraint<<"\n";
   //std::cout<<" connection penalty  "<<connectionPenalty<<"\n";
-  double currFit = scatterAndHydrationConstraint +overlapPenalty +distanceConstraints + writhePenalty+connectionPenalty;
+  double currFit = scatterAndHydrationConstraint +1.0*(overlapPenalty +distanceConstraints + writhePenalty+connectionPenalty);
+  //std::cout<<currFit<<"\n";
+  std::pair<double,double> fitStats;
+  fitStats.first = currFit;
+  fitStats.second = scatterAndHydrationConstraint;
+
+  return fitStats;
+}
+
+
+std::pair<double,double> moleculeFitAndState::getOverallFitForceConnection_ChiSq(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,ktlMolecule &molNew,double &kmin,double &kmax,int &i){
+  // update the molecule distances for molecule i;
+  calculateMoleculeDistances(molNew,i);
+  int bestHelRatList=0;
+  // now update the hydration shell
+  double scatterAndHydrationConstraint =  ed.calculateChiSquaredUpdate_Weighted(molNew,i,kmin,kmax,mixtureList);
+  // apply penalties
+  double overlapPenalty = applyOverlapPenalty();
+  //std::cout<<"Overlap Penalty change "<<overlapPenalty<<"\n";
+  double distanceConstraints = applyDistanceConstraints(molNew,i);
+  //std::cout<<"Distance constraints "<<distanceConstraints<<"\n";
+  alterWritheSet(molNew,i);
+  applyWritheConstraint();
+  //std::cout<<" writhe penalty change "<<writhePenalty<<"\n";
+  calculateConnectionPenalty(molNew,i);
+  //std::cout<<" scattering change "<<scatterAndHydrationConstraint<<"\n";
+  // std::cout<<" connection penalty change "<<connectionPenalty<<"\n";
+  double currFit = scatterAndHydrationConstraint +100.0*(overlapPenalty +distanceConstraints + writhePenalty+connectionPenalty);
   //std::cout<<currFit<<"\n";
   std::pair<double,double> fitStats;
   fitStats.first = currFit;
@@ -374,6 +494,15 @@ void moleculeFitAndState::updateScatteringFit(experimentalData &ed,std::vector<s
   double dummyScatter = ed.calculateChiSquared(mol,kmin,kmax,mixtureList);
   std::cout<<"double check baseLine "<<dummyScatter<<"\n";
 }
+
+void moleculeFitAndState::updateScatteringFit_ChiSq(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,double &kmin,double &kmax){
+  for(int i=0;i<mol.size();i++){
+    calculateMoleculeDistances(mol[i],i);
+  }
+  double dummyScatter = ed.calculateChiSquared_Weighted(mol,kmin,kmax,mixtureList);
+  //std::cout<<"double check baseLine "<<dummyScatter<<"\n";
+}
+
 
 double moleculeFitAndState::getBetaSheetReward() {
 
