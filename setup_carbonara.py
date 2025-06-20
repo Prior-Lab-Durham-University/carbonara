@@ -7,7 +7,7 @@ import sys
 import CarbonaraDataTools as cdt
 import numpy as np
 
-def write_runme(working_path, fit_name, fit_n_times, min_q, max_q,max_q_start, max_fit_steps, pairedQ=False, rotation=False):
+def write_runme(working_path, fit_name, fit_n_times, min_q, max_q,max_q_start, max_fit_steps, pairedQ=False, rotation=False,errors=False):
 
     curr = os.getcwd()
     script_name = 'RunMe_' + str(fit_name) + '.sh'
@@ -124,6 +124,10 @@ def write_runme(working_path, fit_name, fit_n_times, min_q, max_q,max_q_start, m
             fout.write('affineTrans=True\n')
         else:
             fout.write('affineTrans=False\n')
+
+        fout.write('### argv[19] is true if we want to use errors in the scattering calculation false if not.\n')
+
+        fout.write('useErrors=True\n')
         
         fout.write(f'for i in {{1..{fit_n_times}}}\n')
         fout.write('do\n')
@@ -132,7 +136,7 @@ def write_runme(working_path, fit_name, fit_n_times, min_q, max_q,max_q_start, m
         fout.write('    echo "\\n"\n')
         fout.write('    echo "Max number of fitting steps: " $maxNoFitSteps\n')
         fout.write('    echo "\\n"\n')
-        fout.write('    $ROOT/build/bin/predictStructureQvary $ScatterFile $fileLocs $initialCoordsFile $pairedPredictions $fixedsections $noStructures $withinMonomerHydroCover $kmin $kmax $kmaxStart $maxNoFitSteps $predictionFile/mol$i $scatterOut/scatter$i.dat $mixtureFile $prevFitStr $logLoc/fitLog$i.dat $endLinePrevLog $affineTrans\n')
+        fout.write('    $ROOT/build/bin/predictStructureQvary $ScatterFile $fileLocs $initialCoordsFile $pairedPredictions $fixedsections $noStructures $withinMonomerHydroCover $kmin $kmax $kmaxStart $maxNoFitSteps $predictionFile/mol$i $scatterOut/scatter$i.dat $mixtureFile $prevFitStr $logLoc/fitLog$i.dat $endLinePrevLog $affineTrans $useErrors &\n') 
         fout.write('done\n')
     
     # Make the script executable
@@ -145,16 +149,20 @@ def main():
     parser.add_argument('-p', '--pdb', required=True, help='Path to input PDB file')
     parser.add_argument('-s', '--saxs', required=True, help='Path to input SAXS data file')
     parser.add_argument('-n', '--name', required=True, help='Name for this protein/refinement')
+    parser.add_argument('-f', '--pae', required=False, help='PAE file for this protein, used to specify flexibility')
     parser.add_argument('-d', '--dir', default=os.getcwd(), help='Base directory (default: current directory)')
     
     # Additional parameters for write_runme
     parser.add_argument('--fit_n_times', type=int, default=20, help='Number of times to run the fit (default: 5)')
     parser.add_argument('--min_q', type=float, default=0.01, help='Minimum q-value (default: 0.01)')
     parser.add_argument('--max_q', type=float, default=0.2, help='Maximum q-value (default: 0.2)')
-    parser.add_argument('--max_q_start', type=float, default=0.1, help='Maximum q-value to start fitting to (default: 0.1)')
+    parser.add_argument('--max_q_start', type=float, default=0.2, help='Maximum q-value to start fitting to (default: 0.1)')
     parser.add_argument('--max_fit_steps', type=int, default=10000, help='Maximum number of fitting steps (default: 1000)')
     parser.add_argument('--pairedQ', action='store_true', help='Use paired predictions')
     parser.add_argument('--rotation', action='store_true', help='Apply affine rotations')
+    #parser.add_argument('--errors', action='store_true', help='Use experimental erros in fitting protocol')
+    parser.add_argument('--alphaFoldFlex', action='store_true', help='Use an alphaFold pae file to specify the flexibility of the molecule')
+    
     
     args = parser.parse_args()
     
@@ -169,7 +177,7 @@ def main():
         # Process PDB and extract structure information
         coords_chains, sequence_chains, secondary_structure_chains, missing_residues_chains = cdt.pull_structure_from_pdb(args.pdb)
         # Give warning if missing residues are found
-        print(len(coords_chains))
+        print("number of chains is ",len(coords_chains))
         new_coords_chains = []
         new_sequence_chains = []
         new_secondary_structure_chains = []
@@ -204,7 +212,7 @@ def main():
         # write this to file
         
         coords_files = []
-        coords_files.append(cdt.write_coordinates_file(coords_full, working_path=refine_dir, carb_index=1))
+        coords_files.append(cdt.write_coordinates_file(coords_full, working_path=refine_dir, carb_index=1))  
         
         # Write fingerprint file
         number_of_chains = len(coords_chains)
@@ -219,22 +227,25 @@ def main():
         mixture_file = cdt.write_mixture_file(working_path=refine_dir)
         
         # Copy SAXS file to Saxs.dat (this is the file that Carbonara will use)
-        shutil.copy2(args.saxs, os.path.join(refine_dir, 'Saxs.dat'))
+        cdt.write_saxs(args.saxs,refine_dir)
         
-        # auto select flexible linker chains that dont break inter-beta sheets
+        # se alphaFold flexibility 
         varying_linker_chains = []
-        index =0
-        for coord_file in coords_files:
-            varying_linker_chains.append(cdt.auto_select_varying_linker(coord_file, fingerprint_file))
-            index = index +1
-            
+        if args.alphaFoldFlex:
+        #use pae scores to specify flexibility
+           varying_linker_chains =  cdt.getFlexibility(args.pae,fingerprint_file)
+        else:
+        # auto select flexible linker chains that dont break inter-beta sheets
+            index =0
+            for coord_file in coords_files:
+                varying_linker_chains.append(cdt.auto_select_varying_linker(coord_file, fingerprint_file))
+                index = index +1
+
         # write flexible linkers to files (varysections1.dat, varysections2.dat, etc [each file is for a different chain])
-        print(varying_linker_chains)
         varying_section_files = []
         for varying_linkers in varying_linker_chains:
             varying_section_files.append(cdt.write_varysections_file(varying_linkers, refine_dir))
-        
-        # Write the RunMe_bsa.sh script
+        # Write the RunMe_<name>.sh script
         run_script = write_runme(
             working_path=refine_dir,
             fit_name=args.name,
@@ -244,10 +255,12 @@ def main():
             max_q_start=args.max_q_start,
             max_fit_steps=args.max_fit_steps,
             pairedQ=args.pairedQ,
-            rotation=args.rotation
+            rotation=args.rotation,
+            errors=args.errors
         )
         
         # Updated output message
+
 
         new_data_dir = os.path.join(os.getcwd(), "carbonara_runs", args.name)
         print("\nSetup completed successfully!")
