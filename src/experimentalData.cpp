@@ -9,7 +9,7 @@ experimentalData::experimentalData(const char* scatterFile){
   std::ifstream scatterdat;
   scatterdat.open(scatterFile);
   std::string sctline;
-  double kval; double Ival;
+  double kval; double Ival;double Eval;
 
   if(scatterdat.is_open()){
      while(!scatterdat.eof()){
@@ -18,18 +18,25 @@ experimentalData::experimentalData(const char* scatterFile){
       ss>>kval;
       ss.ignore();
       ss>>Ival;
+      ss.ignore();
+      ss>>Eval;
 
       // std::cout << "\n kval: " << kval << ", Ival: " << Ival  << "\n";
-      std::pair<double,double> pr;
-      pr.first=kval;pr.second=Ival;
-      scatVec.push_back(pr);
+      std::vector<double> ln;
+      ln.push_back(kval);
+      ln.push_back(Ival);
+      ln.push_back(Eval);
+      scatVec.push_back(ln);
+      exprQset.push_back(kval);
+      exprIset.push_back(Ival);
+      exprEset.push_back(Eval);
      }
   }else{
     std::cout<<"no scattering file found\n";
   }
   // set the minimum and maximum possibe k values, given the data
-  absKmin = scatVec[0].first;
-  absKmax = scatVec[scatVec.size()-1].first;
+  absKmin = scatVec[0][0];
+  absKmax = scatVec[scatVec.size()-1][0];
 
    form_factors['B'] = {5.325233, 5.321616, 5.321073, 5.330379, 5.367118, 5.418221, 5.548391, 5.694481, 5.802268, 5.880531, 5.900372, 5.865756, 5.778460, 5.611933, 5.353311, 5.065751, 4.844303, 4.655859, 4.507514, 4.382296, 4.200807};
     form_factors['A'] = {6.860783, 6.884742, 6.936093, 6.987066, 7.002729, 7.001643, 7.011408, 7.059012, 7.136653, 7.204735, 7.278987, 7.358991, 7.468390, 7.587982, 7.698403, 7.792850, 7.835658, 7.747937, 7.795444, 8.008073, 8.268595};
@@ -53,6 +60,8 @@ experimentalData::experimentalData(const char* scatterFile){
     form_factors['Y'] = {5.100512, 5.130500, 5.228212, 5.390429, 5.591930, 5.801286, 5.978783, 6.084779, 6.201869, 6.252052, 6.266182, 6.257378, 6.282480, 6.352914, 6.603123, 6.989089, 7.407878, 7.660326, 7.929643, 8.116093, 8.308664};
     form_factors['V'] = {0.028584, 0.028193, 0.026019, 0.023774, 0.010495, 0.002455, 0.000000, 0.000000, 0.006006, 0.012980, 0.016876, 0.014590, 0.028809, 0.029842, 0.008057, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000};
 
+
+    
     // set up "idealised q values for Josh's coefficients (to change maybe)"
 
     for (int i = 0; i <= 20; i++) {
@@ -145,22 +154,45 @@ bool experimentalData::binDataCheck(double &dMax,double &qmin,double &qmax){
     double qmaxBin = qmin + j*dq;
     std::vector<double> intensities;
     // if we have selected a higher q than the lowest experimental data, seacrch for the minimum point
-    while(scatVec[k].first<qminBin){
+    while(scatVec[k][0]<qminBin){
       k++;
     }
-   
+    // std::cout << "\n j: " << j << ", qminBin: " << qminBin << ", qmaxBin: " << qmaxBin <<", scatVec[k] first: " << scatVec[k].first << ", scatVec[k] second: " << scatVec[k].second << "\n";
 
-    while(scatVec[k].first>=qminBin &&scatVec[k].first<=qmaxBin){
+    while(scatVec[k][0]>=qminBin &&scatVec[k][0]<=qmaxBin){
 
-          intensities.push_back(scatVec[k].second);
+          intensities.push_back(scatVec[k][1]);
           k++;
     }
     if(intensities.size()<2){
       goodsplit=false;
     }
 
+    // std::cout << "\n j: " << j << ", intensity size: " << intensities.size() << "\n";
+
   }
   return  goodsplit;
+}
+
+void experimentalData::subsetScatteringData(std::vector<double>& A,
+                      std::vector<double>& B,
+                      std::vector<double>& C,
+                      double kmin, double kmax,
+                      std::vector<double>& A_selected,
+                      std::vector<double>& B_selected,
+                      std::vector<double>& C_selected)
+{
+    A_selected.clear();
+    B_selected.clear();
+    C_selected.clear();
+
+    for (size_t i = 0; i < A.size(); ++i) {
+        if (A[i] >= kmin && A[i] <= kmax) {
+            A_selected.push_back(A[i]);
+            B_selected.push_back(B[i]);
+            C_selected.push_back(C[i]);
+        }
+    }
 }
 
 
@@ -177,7 +209,7 @@ int experimentalData::setPhases(double &dMax,double &qmin,double &qmax){
 
   if(noDistBins!=noDistBinsTemp){
     noDistBins=noDistBinsTemp;
-    // std::cout<<"\n no dist bins A " << noDistBins << "\n";
+    //std::cout<<"\n no dist bins A " << noDistBins << "\n";
 
     //check if we can bin
     bool binsOk=false;
@@ -186,7 +218,7 @@ int experimentalData::setPhases(double &dMax,double &qmin,double &qmax){
       binsOk = binDataCheck(dMax,qmin,qmax);
       if(binsOk==false){
 	noDistBins=noDistBins-1;
-  // std::cout<<"\n no dist bins check: " << noDistBins << "\n";
+	// std::cout<<"\n no dist bins check: " << noDistBins << "\n";
 
       }
     }
@@ -211,18 +243,19 @@ int experimentalData::setPhases(double &dMax,double &qmin,double &qmax){
 	  double qminBin = qmin+(j-1)*dq;
 	  double qmaxBin = qmin+j*dq;
 	  std::vector<double> intensities;
+	  std::vector<double> errors; 
 	  // for the logged standard deviation.
 	  double intensitySum = 0.0;
 	  int noIntensities=0;
 	  std::vector<double> loggedIntensities;
 	  // if we have selected a higher q than the lowest experimental data, seacrch for the minimum point
-	  while(scatVec[k].first<qminBin){
+	  while(scatVec[k][0]<qminBin){
 	    k++;
 	  }
-	  while(scatVec[k].first>=qminBin &&scatVec[k].first<=qmaxBin){
-	    intensities.push_back(scatVec[k].second);
-	    if(scatVec[k].second>0.0){
-	      double loggedInten = std::log(scatVec[k].second);
+	  while(scatVec[k][0]>=qminBin &&scatVec[k][0]<=qmaxBin){
+	    intensities.push_back(scatVec[k][1]);
+	    if(scatVec[k][1]>0.0){
+	      double loggedInten = std::log(scatVec[k][1]);
 	      intensitySum = intensitySum + loggedInten;
 	      noIntensities++;
 	      loggedIntensities.push_back(loggedInten);
@@ -235,12 +268,16 @@ int experimentalData::setPhases(double &dMax,double &qmin,double &qmax){
 	  int medPt =int(std::round(float(size)/2.0));
 	  experimentalIntensity.push_back(intensities[medPt-1]);
 	  // calulate the mean
+	  double mean = intensitySum/double(noIntensities);
 	}
       }
     }
   }
   // now take the median of the scattering data
   // std::cout<<"\n fin setPhases * \n";
+
+  //finally  chop the experimental data to this range
+  subsetScatteringData(exprQset,exprIset,exprEset,qmin,qmax,exprQSubset,exprISubset,exprESubset);
   return noDistBins;
 }
 
@@ -265,16 +302,19 @@ std::vector<point> experimentalData::calculate_geometric_normals(std::vector<poi
     for (size_t i = 1; i < ca_vectors.size(); i++) {
         
         point norm = ca_vectors[i] - ca_vectors[i-1];
+	
         norm = norm * (-1.0) / norm.length();   // outward
         normals.push_back(norm);
-        
     }
     
     point first_norm = ca_vectors[0] * (-1.0) / ca_vectors[0].length();
     point final_norm = ca_vectors.back() / ca_vectors.back().length();
     
+    
     normals.insert( normals.begin(), first_norm );
     normals.push_back( final_norm );
+
+    
     
     return normals;
 }
@@ -325,6 +365,9 @@ std::vector<std::vector<double> > experimentalData::calculate_distances( std::ve
             } else {
                 double dist = coordinates[i].eDist(coordinates[j]);
 		if(dist>maxDist[molIndex]){
+		  //std::cout<<"new biggest dist "<<dist<<"\n";
+		  //coordinates[i].printPoint();
+		  //coordinates[j].printPoint();
 		  maxDist[molIndex] = dist;
 		}
                 distances[i][j] = dist;
@@ -351,7 +394,8 @@ ScatteringCenters experimentalData::process_structure(std::vector<point>& ca_coo
     std::vector<point> side_chain_positions = place_side_chains(ca_coords, geometric_normals, residue_names);
         
     ScatteringCenters centers;
-    
+   
+  
     // add backbone + sidechains centres for non-GLY/ALA residues
     for (size_t i=0; i < residue_names.size(); i++) {
         
@@ -360,9 +404,11 @@ ScatteringCenters experimentalData::process_structure(std::vector<point>& ca_coo
             // backbone
             centers.coordinates.push_back(ca_coords[i]);
             centers.types.push_back('B');
-            
+
+	    
             // side chain
             centers.coordinates.push_back(side_chain_positions[i]);
+	   
             centers.types.push_back(residue_names[i]);
         }
     }
@@ -478,6 +524,8 @@ std::vector<double> experimentalData::calculate_intensity_at_experimental_q(std:
 
 
  double experimentalData::calculateChiSquared(std::vector<ktlMolecule> &mol,double &qmin,double &qmax,std::vector<std::vector<double> > &mixtureVals){
+    kMin = qmin;
+   kMax = qmax;
    for(int i=0;i<mol.size();i++){
      maxDist.push_back(0.0);
    }
@@ -505,9 +553,21 @@ std::vector<double> experimentalData::calculate_intensity_at_experimental_q(std:
    }
 
    IvecOnData.clear();
-   for(int i=0;i<mol.size();i++){
+   /*for(int i=0;i<mol.size();i++){
      IvecOnData.push_back(calculate_intensity_at_experimental_q(Ivec[i]));
+     }*/
+
+
+   for(int i=0;i<mol.size();i++){
+     IvecOnData.push_back( calculate_intensity_at_experimental_q(q,Ivec[i],exprQSubset));
    }
+   
+
+   // interpolate the experimental data at the shannon
+
+   exprIInterp.clear();
+   
+   exprIInterp =calculate_intensity_at_experimental_q(qvals,experimentalIntensity,exprQSubset);
    
    double pred=10000.0;
 
@@ -525,9 +585,9 @@ std::vector<double> experimentalData::calculate_intensity_at_experimental_q(std:
      
      for(int l=0;l<Icomb.size();l++){
     //std::cout<<std::log(scatVals[i])+(std::log(experimentalIntensity[0])-std::log(scatVals[0]))<<" "<<std::log(experimentalIntensity[i])<<"\n";
-       double logScatDif= std::log(Icomb[l]) - std::log(experimentalIntensity[l]);
+       double logScatDif= std::log(Icomb[l]) - std::log(exprIInterp[l]);
        logdifs.push_back(logScatDif);
-       if(qvals[l]<0.1){
+       if(exprQSubset[l]<kMin+0.01){
 	 logDifMean =  logDifMean + logScatDif;
 	 noMean++;
        }
@@ -538,7 +598,6 @@ std::vector<double> experimentalData::calculate_intensity_at_experimental_q(std:
      double predTemp =0.0;
      for(int l=0;l<Icomb.size();l++){
        double scatDif = logdifs[l] - logDifMean;
-       //std::cout<<l<<" "<<scatDif<<" "<<logDifMean<<"\n";
        predTemp = predTemp + scatDif*scatDif;
      }
      if(predTemp<pred){
@@ -546,7 +605,7 @@ std::vector<double> experimentalData::calculate_intensity_at_experimental_q(std:
      }
    }
    //std::cout<<"in ed norm "<<pred/(IvecOnData[0].size()-1)<<"\n";
-   return pred/(IvecOnData[0].size()-1);
+   return pred/(exprQSubset.size()-1);
  }
 
 
@@ -554,6 +613,8 @@ std::vector<double> experimentalData::calculate_intensity_at_experimental_q(std:
 
 
 double experimentalData::calculateChiSquaredUpdate(ktlMolecule& molNew,int& k,double &qmin,double &qmax,std::vector<std::vector<double> > &mixtureVals){
+   kMin = qmin;
+   kMax = qmax;
    // loop over all molecules considered and calculate their side chains and distances
    maxDist[k]=0.0;
    std::vector<std::vector<point> > coords=molNew.getCoordinates();
@@ -563,6 +624,7 @@ double experimentalData::calculateChiSquaredUpdate(ktlMolecule& molNew,int& k,do
    std::vector<char> chainResidues = flatten_residueNames(aminoList);
    ScatteringCenters calphsAndSideChains  = process_structure(chainCoordinates,chainResidues,k);
    scs[k] = calphsAndSideChains;
+   
 
    // use the maximum distance size to set the number of q values we fit to:
    double dMax = *std::max_element(begin(maxDist), end(maxDist));
@@ -570,8 +632,10 @@ double experimentalData::calculateChiSquaredUpdate(ktlMolecule& molNew,int& k,do
    // now loop over all molecules and calculate their scattering
 
    Ivec[k]=calculate_saxs_implicit(scs[k]);
-   IvecOnData[k] = calculate_intensity_at_experimental_q(Ivec[k]);
-   
+   IvecOnData[k] = calculate_intensity_at_experimental_q(q,Ivec[k],exprQSubset);
+
+   exprIInterp.clear();
+   exprIInterp = calculate_intensity_at_experimental_q(qvals,experimentalIntensity,exprQSubset);
    double pred=10000.0;
 
    for(int i =0;i<mixtureVals.size();i++){
@@ -587,15 +651,14 @@ double experimentalData::calculateChiSquaredUpdate(ktlMolecule& molNew,int& k,do
      std::vector<double> logdifs;
      for(int l=0;l<Icomb.size();l++){
     //std::cout<<std::log(scatVals[i])+(std::log(experimentalIntensity[0])-std::log(scatVals[0]))<<" "<<std::log(experimentalIntensity[i])<<"\n";
-       double logScatDif= std::log(Icomb[l]) - std::log(experimentalIntensity[l]);
+       double logScatDif= std::log(Icomb[l]) - std::log(exprIInterp[l]);
        logdifs.push_back(logScatDif);
-       if(qvals[i]<0.1){
+       if(exprQSubset[l]<kMin+0.01){
 	 logDifMean =  logDifMean + logScatDif;
 	 noMean++;
        }
      }
      logDifMean = logDifMean/double(noMean);
-
      // finally calculate the "chi squared value "
      double predTemp =0.0;
      for(int l=0;l<Icomb.size();l++){
@@ -606,8 +669,7 @@ double experimentalData::calculateChiSquaredUpdate(ktlMolecule& molNew,int& k,do
        pred = predTemp;
      }
    }
-   //std::cout<<" in ed update "<<pred/(IvecOnData[0].size()-1)<<"\n";
-   return pred/(IvecOnData[0].size()-1);
+   return pred/(exprQSubset.size()-1);
  }
 
 
@@ -617,6 +679,7 @@ void experimentalData::writeScatteringToFile(std::vector<std::vector<double> > &
   double logDifMeanFinal = 10000.0;
   double pred =10000.0;
   std::vector<double> IcombBest;
+  exprIInterp = calculate_intensity_at_experimental_q(qvals,experimentalIntensity,exprQSubset);
   for(int i =0;i<mixtureVals.size();i++){
     std::vector<double> Icomb(IvecOnData[0].size(),0.0);
     for(int j =0;j<mixtureVals[i].size();j++){
@@ -630,21 +693,21 @@ void experimentalData::writeScatteringToFile(std::vector<std::vector<double> > &
     std::vector<double> logdifs;
     for(int l=0;l<Icomb.size();l++){
       //std::cout<<std::log(scatVals[i])+(std::log(experimentalIntensity[0])-std::log(scatVals[0]))<<" "<<std::log(experimentalIntensity[i])<<"\n";
-      double logScatDif= std::log(Icomb[l]) - std::log(experimentalIntensity[l]);
+      double logScatDif= std::log(Icomb[l]) - std::log(exprIInterp[l]);
       logdifs.push_back(logScatDif);
-      if(qvals[i]<0.1){
+      if(exprQSubset[l]<kMin+0.01){
 	logDifMean =  logDifMean + logScatDif;
 	noMean++;
        }
     }
     logDifMean = logDifMean/double(noMean);
     // finally calculate the "chi squared value "
-    double predTemp =0.0;
+    double predTemp =10000.0;
     for(int l=0;l<Icomb.size();l++){
       double scatDif = logdifs[l] - logDifMean;
       predTemp = predTemp + scatDif*scatDif;
     }
-    if(predTemp<pred){
+    if(predTemp<pred || i==0){
 	pred = predTemp;
 	best = i;
 	logDifMeanFinal = logDifMean;
@@ -656,7 +719,7 @@ void experimentalData::writeScatteringToFile(std::vector<std::vector<double> > &
   std::ofstream myfile;
   myfile.open(filename);
   for(int i=0;i<IcombBest.size();i++){
-    myfile<<qvals[i]<<" "<<IcombBest[i]<<" "<<std::log(IcombBest[i])- logDifMeanFinal<<" "<<std::log(experimentalIntensity[i])<<"\n";
+    myfile<<exprQSubset[i]<<" "<<IcombBest[i]<<" "<<std::log(IcombBest[i])- logDifMeanFinal<<" "<<std::log(exprISubset[i])<<"\n";
   }
   // finally add the percentage combination values
   for(int i=0;i<mixtureVals[best].size();i++){
@@ -671,3 +734,241 @@ void experimentalData::writeScatteringToFile(std::vector<std::vector<double> > &
 
 
 
+std::vector<double> experimentalData::calculate_intensity_at_experimental_q(std::vector<double>& q_mod,std::vector<double>& I_mod,std::vector<double>& expQRange) {
+    
+    size_t N = q_mod.size() - 1;
+    std::vector<double> A(N), B(N), C(N), D(N);
+    calculate_spline_coefficients(q_mod, I_mod, A, B, C, D);
+    
+    std::vector<double> I_interp;
+    for(int i =0; i<expQRange.size();i++) {
+      I_interp.push_back(evaluate_spline(expQRange[i], q_mod, A, B, C, D));   
+    }
+    return I_interp;
+}
+
+
+ double experimentalData::calculateChiSquared_Weighted(std::vector<ktlMolecule> &mol,double &qmin,double &qmax,std::vector<std::vector<double> > &mixtureVals){
+   kMin = qmin;
+   kMax = qmax;
+   for(int i=0;i<mol.size();i++){
+     maxDist.push_back(0.0);
+   }
+   // loop over all molecules considered and calculate their side chains and distances
+   for(int i=0;i<mol.size();i++){
+     //get calpha's
+     std::vector<std::vector<point> > coords=mol[i].getCoordinates();
+     std::vector<point> chainCoordinates = flatten_coords(coords);
+     // get side chains
+     std::vector<std::vector<std::string> > aminoList = mol[i].getAminoList();
+     std::vector<char> chainResidues = flatten_residueNames(aminoList);
+     ScatteringCenters calphsAndSideChains  = process_structure(chainCoordinates,chainResidues,i);
+     scs.push_back(calphsAndSideChains);
+   }
+
+   // use the maximum distance size to set the number of q values we fit to:
+   double dMax = *std::max_element(begin(maxDist), end(maxDist));
+ 
+   int noBins = setPhases(dMax,qmin,qmax);
+
+   // now loop over all molecules and calculate their scattering
+
+   Ivec.clear();
+   for(int i=0;i<mol.size();i++){
+     Ivec.push_back(calculate_saxs_implicit(scs[i]));
+   }
+
+   IvecOnData.clear();
+   
+   for(int i=0;i<mol.size();i++){
+     IvecOnData.push_back(calculate_intensity_at_experimental_q(q,Ivec[i],exprQSubset));
+   }
+
+   double pred=10000.0;
+
+   for(int i =0;i<mixtureVals.size();i++){
+     std::vector<double> Icomb(IvecOnData[0].size(),0.0);
+     for(int j =0;j<mixtureVals[i].size();j++){
+       for(int k =0;k<IvecOnData[j].size();k++){
+	 Icomb[k] = IvecOnData[j][k]*mixtureVals[i][j];
+       }
+     }
+     // calculate the "chi squared fit" first calculae all the distances and work out the scale factor
+     double logDifMean=0;
+     int noMean=0;
+     std::vector<double> logdifs;
+     
+     for(int l=0;l<Icomb.size();l++){
+       // double logScatDif= std::log(Icomb[l]) - std::log(experimentalIntensity[l]);
+       double logScatDif= std::log(Icomb[l]) - std::log(exprISubset[l]);
+       logdifs.push_back(logScatDif);
+       if(exprQSubset[l]<kMin+0.01){
+	 logDifMean =  logDifMean + logScatDif;
+	 noMean++;
+       }
+     }
+     logDifMean = logDifMean/double(noMean);
+   
+   
+     for(int l=0;l<Icomb.size();l++){
+       double logScatScaled = std::log(Icomb[l])-logDifMean;
+       double scatScaled = std::exp(logScatScaled);
+       Icomb[l] = scatScaled;
+     }
+     // now (spline interpolate)
+     //std::vector<double> Imodel = calculate_intensity_at_experimental_q(qvals,Icomb,exprQSubset);
+     std::vector<double> Imodel = Icomb;
+     double predTemp =0.0;
+    
+     for(int l =0;l<exprQSubset.size();l++){
+       double scatInterp = Imodel[l];
+       double dif = scatInterp - exprISubset[l];
+       //std::cout<<l<<" "<<dif<<" "<<exprESubset[l]<<"\n";
+       predTemp = predTemp + dif*dif/(exprESubset[l]*exprESubset[l]);
+       //predTemp = predTemp + dif*dif;
+     }
+     predTemp = std::abs(predTemp/(exprQSubset.size()-1) -1);
+     if(predTemp<pred){
+      pred = predTemp;
+     }
+     //std::cout<<"in ed norm (0)"<<pred<<" "<<predTemp<<"\n";
+   }
+   return pred;
+ }
+
+double experimentalData::calculateChiSquaredUpdate_Weighted(ktlMolecule& molNew,int& k,double &qmin,double &qmax,std::vector<std::vector<double> > &mixtureVals){
+   // loop over all molecules considered and calculate their side chains and distances
+   kMin = qmin;
+   kMax = qmax;
+   maxDist[k]=0.0;
+   std::vector<std::vector<point> > coords=molNew.getCoordinates();
+   std::vector<point> chainCoordinates = flatten_coords(coords);
+     // get side chains
+   std::vector<std::vector<std::string> > aminoList = molNew.getAminoList();
+   std::vector<char> chainResidues = flatten_residueNames(aminoList);
+   ScatteringCenters calphsAndSideChains  = process_structure(chainCoordinates,chainResidues,k);
+   scs[k] = calphsAndSideChains;
+
+   // use the maximum distance size to set the number of q values we fit to:
+   double dMax = *std::max_element(begin(maxDist), end(maxDist));
+   int noBins = setPhases(dMax,qmin,qmax);
+   // now loop over all molecules and calculate their scattering
+
+   Ivec[k]=calculate_saxs_implicit(scs[k]);
+   IvecOnData[k] = calculate_intensity_at_experimental_q(q,Ivec[k],exprQSubset);
+   
+   double pred=10000.0;
+
+   for(int i =0;i<mixtureVals.size();i++){
+     std::vector<double> Icomb(IvecOnData[0].size(),0.0);
+     for(int j =0;j<mixtureVals[i].size();j++){
+       for(int k =0;k<IvecOnData[j].size();k++){
+	 Icomb[k] = IvecOnData[j][k]*mixtureVals[i][j];
+       }
+     }
+     // calculate the "chi squared fit" first calculae all the distances and work out the scale factor
+     double logDifMean=0;
+     int noMean=0;
+     std::vector<double> logdifs;
+     
+     for(int l=0;l<Icomb.size();l++){
+       // double logScatDif= std::log(Icomb[l]) - std::log(experimentalIntensity[l]);
+       double logScatDif= std::log(Icomb[l]) - std::log(exprISubset[l]);
+       logdifs.push_back(logScatDif);
+       if(exprQSubset[l]<kMin+0.01){
+	 logDifMean =  logDifMean + logScatDif;
+	 noMean++;
+       }
+     }
+     logDifMean = logDifMean/double(noMean);
+   
+   
+     for(int l=0;l<Icomb.size();l++){
+       double logScatScaled = std::log(Icomb[l])-logDifMean;
+       double scatScaled = std::exp(logScatScaled);
+       Icomb[l] = scatScaled;
+     }
+     // now (spline interpolate)
+     //std::vector<double> Imodel = calculate_intensity_at_experimental_q(qvals,Icomb,exprQSubset);
+     std::vector<double> Imodel = Icomb;
+     double predTemp =0.0;
+    
+     for(int l =0;l<exprQSubset.size();l++){
+       double scatInterp = Imodel[l];
+       double dif = scatInterp - exprISubset[l];
+       //std::cout<<l<<" "<<dif<<" "<<exprESubset[l]<<"\n";
+       predTemp = predTemp + dif*dif/(exprESubset[l]*exprESubset[l]);
+       //predTemp = predTemp + dif*dif;
+     }
+     predTemp = std::abs(predTemp/(exprQSubset.size()-1) -1);
+     if(predTemp<pred){
+      pred = predTemp;
+     }
+     //std::cout<<"in ed update"<<pred<<" "<<predTemp<<"\n";
+   }
+   return pred;
+ }
+
+
+void experimentalData::writeScatteringToFile_ChiSq(std::vector<std::vector<double> > &mixtureVals,const char* filename){
+  int best =0;
+  double logDifMeanFinal = 10000.0;
+  double pred =10000.0;
+  std::vector<double> IcombBest;
+  for(int i =0;i<mixtureVals.size();i++){
+    std::vector<double> Icomb(IvecOnData[0].size(),0.0);
+    for(int j =0;j<mixtureVals[i].size();j++){
+      for(int k =0;k<IvecOnData[j].size();k++){
+	Icomb[k] = IvecOnData[j][k]*mixtureVals[i][j];
+      }
+    }
+     double logDifMean=0;
+     int noMean =0;
+     std::vector<double> logdifs;
+     for(int l=0;l<Icomb.size();l++){
+       // double logScatDif= std::log(Icomb[l]) - std::log(experimentalIntensity[l]);
+       double logScatDif= std::log(Icomb[l]) - std::log(exprISubset[l]);
+       logdifs.push_back(logScatDif);
+       if(exprQSubset[l]<kMin+0.01){
+	 logDifMean =  logDifMean + logScatDif;
+	 noMean++;
+       }
+     }
+     logDifMean = logDifMean/double(noMean);
+     for(int l=0;l<Icomb.size();l++){
+       double logScatScaled = std::log(Icomb[l])-logDifMean;
+       double scatScaled = std::exp(logScatScaled);
+       Icomb[l] = scatScaled;
+     }
+     // now (spline interpolate)
+     std::vector<double> Imodel = Icomb;
+    // finally calculate the "chi squared value "
+    pred=100000.0;
+    double predTemp =0.0;
+    for(int l =0;l<exprQSubset.size();l++){
+      double scatInterp = Imodel[l];
+      double dif = scatInterp - exprISubset[l];
+      predTemp = predTemp + dif*dif/(exprESubset[l]*exprESubset[l]);
+    }
+    predTemp = std::abs(predTemp/(exprQSubset.size()-1) -1);
+    if(predTemp<pred){
+      pred = predTemp;
+      IcombBest= Imodel;
+    }
+  }
+  // write to file
+  std::ofstream myfile;
+  myfile.open(filename);
+  for(int l =0;l<exprQSubset.size();l++){
+    myfile<<exprQSubset[l]<<" "<<IcombBest[l]<<" "<<std::log(IcombBest[l])<<" "<<std::log(exprISubset[l])<<"\n";
+  }
+  // finally add the percentage combination values
+  for(int i=0;i<mixtureVals[best].size();i++){
+    if(i==(mixtureVals[best].size()-1)){
+      myfile<<mixtureVals[best][i]<<"\n";
+    }else{
+      myfile<<mixtureVals[best][i]<<" ";
+    }
+  }
+  myfile.close();
+ }
