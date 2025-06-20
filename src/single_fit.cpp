@@ -54,7 +54,7 @@ int main(int argc, const char* argv[]) {
     // Perform single fit
     std::vector<std::vector<double>> dummyMixtureList = {{1.0}}; // 100% of single structure
     std::vector<double> dummyHelRatList = {0.5}; // Dummy helix ratio
-    std::pair<double, double> fit = molState.getOverallFit(ed, dummyMixtureList, params.kmin, params.kmaxCurr);
+    std::pair<double, double> fit = molState.getOverallFit_ChiSq(ed, dummyMixtureList, params.kmin, params.kmaxCurr);
 
     std::cout<<"fit quality "<<fit.second<<"\n";
 			    
@@ -70,7 +70,7 @@ int main(int argc, const char* argv[]) {
 
     std::string outputPrefix = argv[4];
     std::string logFile = outputPrefix + "initialScatter.dat";
-    ed.writeScatteringToFile(dummyMixtureList,logFile.c_str());
+    ed.writeScatteringToFile_ChiSq(dummyMixtureList,logFile.c_str());
     /* Write fitted structure and scattering
     //std::string moleculeName = write_molecules(outputPrefix, 0, molecules, "fitted");
     std::string scatterName = write_scatter(outputPrefix, 0, molState, ed, params.kmin, params.kmaxCurr,params.mixtureList, "fitted");
