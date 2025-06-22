@@ -7,7 +7,7 @@ import sys
 import CarbonaraDataTools as cdt
 import numpy as np
 
-def write_runme(working_path, fit_name, fit_n_times, min_q, max_q,max_q_start, max_fit_steps, pairedQ=False, rotation=False,errors=False):
+def write_runme(working_path, fit_name, fit_n_times, min_q, max_q,max_q_start, max_fit_steps, pairedQ=False, rotation=False):
 
     curr = os.getcwd()
     script_name = 'RunMe_' + str(fit_name) + '.sh'
@@ -255,8 +255,7 @@ def main():
             max_q_start=args.max_q_start,
             max_fit_steps=args.max_fit_steps,
             pairedQ=args.pairedQ,
-            rotation=args.rotation,
-            errors=args.errors
+            rotation=args.rotation
         )
         
         # Updated output message
