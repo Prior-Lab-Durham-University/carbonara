@@ -2,7 +2,6 @@
 #define ALG_ROUTE
 
 #include "ktlMoleculeRandom.h"
-#include "hydrationShellRandom.h"
 #include "writheFP.h"
 #include "experimentalData.h"
 #include "parameters.h"
@@ -16,30 +15,32 @@ public:
   moleculeFitAndState(std::vector<ktlMolecule> &mol, ModelParameters& params);
   std::vector<ktlMolecule> getMolecule();
   void updateMolecule(std::vector<ktlMolecule> &molNew);
-  double calculateScattering(experimentalData &ed,double &kmin,double &kmax,std::vector<double> &mixtureVals);
-  void writeScatteringToFile(experimentalData &ed,double &kmin,double &kmax,const char* filename);
-  void writeHyrdationShellToFile(const char* filename,int &i);
+  void writeScatteringToFile(experimentalData &ed,std::vector<std::vector<double> > &mixtureVals,const char* filename);
+  void writeScatteringToFile_ChiSq(experimentalData &ed,std::vector<std::vector<double> > &mixtureVals,const char* filename);
   double getOverlapPenalty(double &closestApproachDist,std::vector<double> &overlapDists);
   double applyOverlapPenalty();
   double applyDistanceConstraints();
   double applyDistanceConstraints(ktlMolecule &molNew,int &i);
   void calculateMoleculeDistances(ktlMolecule &molNew,int &i);
-  void calcuateHydrationDistances(hydrationShellMinimal &hs,int &i);
   double calculateUserSpecifiedConnectionPenalty(ktlMolecule &molNew,std::vector<int> &chainSet1,std::vector<int> &chainSet2);
   double calculateUserSpecifiedConnectionPenalty(int chInd,std::vector<int> &chainSet1,std::vector<int> &chainSet2);
   void applyWritheConstraint();
   void calculateConnectionPenalty(ktlMolecule &molNew, int &chInd);
-  std::pair<double,double>  getFit();
   double getWrithePenalty();
   double getOverlapPenalty();
   double getDistanceConstraints();
   void alterWritheSet(ktlMolecule &molNew,int &i);
-  std::pair<double,double> getOverallFit(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,std::vector<double> &helRatList,double &kmin,double &kmax);
-  std::pair<double,double>  getOverallFitForceConnection(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,std::vector<double> &helRatList,double &kmin,double &kmax);
-  std::pair<double,double> getOverallFit(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,std::vector<double> &helRatList,ktlMolecule &molNew,double &kmin,double &kmax,int &i);
-  std::pair<double,double>  getOverallFitForceConnection(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,std::vector<double> &helRatList,ktlMolecule &molNew,double &kmin,double &kmax,int &i);
-
+  std::pair<double,double> getOverallFit(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,double &kmin,double &kmax);
+  std::pair<double,double> getOverallFit_ChiSq(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,double &kmin,double &kmax);
+  std::pair<double,double>  getOverallFitForceConnection(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,double &kmin,double &kmax);
+  std::pair<double,double>  getOverallFitForceConnection_ChiSq(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,double &kmin,double &kmax);
+  std::pair<double,double> getOverallFit(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,ktlMolecule &molNew,double &kmin,double &kmax,int &i);
+  std::pair<double,double> getOverallFit_ChiSq(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,ktlMolecule &molNew,double &kmin,double &kmax,int &i);
+  std::pair<double,double>  getOverallFitForceConnection(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,ktlMolecule &molNew,double &kmin,double &kmax,int &i);
+  std::pair<double,double>  getOverallFitForceConnection_ChiSq(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,ktlMolecule &molNew,double &kmin,double &kmax,int &i);
+  void updateScatteringFit(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,double &kmin,double &kmax);
   double currFit;
+  void updateScatteringFit_ChiSq(experimentalData &ed,std::vector<std::vector<double> > &mixtureList,double &kmin,double &kmax);
   double getBetaSheetReward();
 
 
@@ -60,14 +61,12 @@ private:
   std::vector<double> contactPredPen;
   double writhePenalty;
   double originalOverlapPenalty;
-  double scatterAndHydrationConstraint;
   double Rin,Rout,RShell,ntrivs,closestApproachDist;
   double solventsPerLink,rmin,rmax,lmin;
   std::vector<double> percentageCombinations;
   std::vector<ktlMolecule> mol;
   double connectionPenalty;
   std::vector<double> connectionPenaltySet;
-  std::vector<hydrationShellMinimal> hydrationShellBest;
 };
 
 #endif

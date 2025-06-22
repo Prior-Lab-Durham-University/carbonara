@@ -20,7 +20,7 @@ std::string center_string(const std::string& str, int width) {
 
 int main(int argc, const char* argv[]) {
     if (argc < 6) {
-        std::cerr << "Usage: " << argv[0] << " <scattering_data_file> <fingerprint_file> <coordinate_file> <output_prefix> <q_min> <q_max>" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <scattering_data_file> <fingerprint_file> <coordinate_file> <output_prefix> <qmin> <q_max>" << std::endl;
         return 1;
     }
 
@@ -54,22 +54,26 @@ int main(int argc, const char* argv[]) {
     // Perform single fit
     std::vector<std::vector<double>> dummyMixtureList = {{1.0}}; // 100% of single structure
     std::vector<double> dummyHelRatList = {0.5}; // Dummy helix ratio
-    std::pair<double, double> fit = molState.getOverallFit(ed, dummyMixtureList, dummyHelRatList, params.kmin, params.kmaxCurr);
+    std::pair<double, double> fit = molState.getOverallFit_ChiSq(ed, dummyMixtureList, params.kmin, params.kmaxCurr);
 
-
-    // Output results
+    std::cout<<"fit quality "<<fit.second<<"\n";
+			    
+			    
+    /* Output results
     std::cout << horizontal_line() << std::endl;
     std::cout << center_string("Fit Results", 50) << std::endl;
     std::cout << horizontal_line() << std::endl;
     std::cout << std::left << std::setw(20) << "Overall fit:" << std::setw(30) << fit.first << std::endl;
     std::cout << std::left << std::setw(20) << "Scattering fit:" << std::setw(30) << fit.second << std::endl;
-    std::cout << std::left << std::setw(20) << "Hydration C2:" << std::setw(30) << molState.C2 << std::endl;
     std::cout << horizontal_line() << std::endl;
+    */
 
     std::string outputPrefix = argv[4];
-    // Write fitted structure and scattering
-    std::string moleculeName = write_molecules(outputPrefix, 0, molecules, "fitted");
-    std::string scatterName = write_scatter(outputPrefix, 0, molState, ed, params.kmin, params.kmaxCurr, "fitted");
+    std::string logFile = outputPrefix + "initialScatter.dat";
+    ed.writeScatteringToFile_ChiSq(dummyMixtureList,logFile.c_str());
+    /* Write fitted structure and scattering
+    //std::string moleculeName = write_molecules(outputPrefix, 0, molecules, "fitted");
+    std::string scatterName = write_scatter(outputPrefix, 0, molState, ed, params.kmin, params.kmaxCurr,params.mixtureList, "fitted");
 
     // Log it
     std::string logFile = outputPrefix + "_logFile.dat";
@@ -78,23 +82,13 @@ int main(int argc, const char* argv[]) {
                     molState.getDistanceConstraints(), params.kmaxCurr, scatterName, moleculeName,
                     molState.C2);
 
-    // Write hydration shell
-    std::string hydrationShellName = outputPrefix + "_hydration_shell.dat";
-    int moleculeIndex = 0; // Since we only have one molecule
-    molState.writeHyrdationShellToFile(hydrationShellName.c_str(), moleculeIndex);
-
     // Output file information
     std::cout << center_string("Output Files", 50) << std::endl;
     std::cout << horizontal_line() << std::endl;
     std::cout << std::left << std::setw(25) << "Fitted structure:" << moleculeName << std::endl;
     std::cout << std::left << std::setw(25) << "Fitted scattering:" << scatterName << std::endl;
-    std::cout << std::left << std::setw(25) << "Hydration shell:" << hydrationShellName << std::endl;
     std::cout << horizontal_line() << std::endl;
 
-    // Additional information
-    std::cout << center_string("Note", 50) << std::endl;
-    std::cout << center_string("Now with negative water!", 50) << std::endl;
-    std::cout << horizontal_line() << std::endl;
-
+    */
     return 0;
 }

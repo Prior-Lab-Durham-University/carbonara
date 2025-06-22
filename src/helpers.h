@@ -46,6 +46,11 @@ void updateAndLog(int& improvementIndex, std::vector<ktlMolecule>& mol, ktlMolec
                   moleculeFitAndState& molState, moleculeFitAndState& newMolState,
                   std::pair<double,double>& overallFit, std::pair<double,double>& newOverallFit,
                   Logger& logger, int l, int k, experimentalData& ed, ModelParameters& params);
+                  
+void updateAndLog_ChiSq(int& improvementIndex, std::vector<ktlMolecule>& mol, ktlMolecule& newMol,
+                  moleculeFitAndState& molState, moleculeFitAndState& newMolState,
+                  std::pair<double,double>& overallFit, std::pair<double,double>& newOverallFit,
+                  Logger& logger, int l, int k, experimentalData& ed, ModelParameters& params);
 
 
 // Construct molecule file name - accounting for sub structure
@@ -61,8 +66,11 @@ std::string write_molecules(const std::string& basePath, const int& improvementI
 
 // writes simulated scattering to file and returns the scatterName (scatterName needed for logging!)
 std::string write_scatter(const std::string& basePath, const int& improvementIndex, moleculeFitAndState& molFit,
-                          experimentalData& ed, double kmin, double kmaxCurr, const std::string& body = "main");
-
+                          experimentalData& ed, double kmin, double kmaxCurr,std::vector<std::vector<double> > & mixtureList, const std::string& body = "main");
+                          
+std::string write_scatter_ChiSq(const std::string& basePath, const int& improvementIndex, moleculeFitAndState& molFit,
+                          experimentalData& ed, double kmin, double kmaxCurr,std::vector<std::vector<double> > & mixtureList, const std::string& body = "main");
+                          
 // Do we accept or reject a new fitting - method implemented in here
 bool checkTransition(double &chiSqVal, double &chiSqCurr,double &uniformProb,int index,int &maxSteps);
 
