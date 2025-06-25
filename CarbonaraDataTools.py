@@ -70,7 +70,25 @@ def sort_by_creation(file_lst):
 
 def pdb_2_biobox(pdb_file):
     M = bb.Molecule()
-    M.import_pdb(pdb_file)
+    ext = os.path.splitext(pdb_file)[1].lower()
+    if ext == ".pdb":
+        M.import_pdb(pdb_file)
+    elif ext == ".cif":
+        # Load with PDBFixer
+        fixer = PDBFixer(filename=pdb_file)
+        fixer.findMissingResidues()
+        fixer.findMissingAtoms()
+        fixer.addMissingAtoms()
+        fixer.addMissingHydrogens()
+
+        # Write to temporary PDB file and load with MDTraj
+        with NamedTemporaryFile(mode="w", suffix=".pdb", delete=False) as temp:
+           PDBFile.writeFile(fixer.topology, fixer.positions, temp)
+           temp_path = temp.name
+        M.import_pdb(temp_path)
+        os.remove(temp_path)  # clean up temporary file
+    else:
+        raise ValueError(f"Unsupported file extension: {ext}")
     return M
 
 
