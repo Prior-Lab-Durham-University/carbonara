@@ -1919,3 +1919,30 @@ def merge_chains_robust_all(chains, merge_indices):
 def update_modified_segments(old_segment_list, mapping):
     return {mapping[s] for s in old_segment_list if s in mapping}
 
+
+# If you are happy with this merging then set it in place
+
+def export_chains_to_file(chains, filename):
+    """
+    Export a list of chains (with 'sequence' and 'structure') to a file
+    in the original alternating format.
+    """
+    with open(filename, 'w') as f:
+        f.write(f"{len(chains)}\n\n")  # Write number of chains
+
+        for chain in chains:
+            f.write(f"{chain['sequence']}\n\n")
+            f.write(f"{chain['structure']}\n\n")
+
+def export_segment_list(segment_set, filename):
+    """
+    Write a set of segment numbers to a file, one per line, without trailing newline at the end.
+    """
+    segments = sorted(segment_set)
+    with open(filename, 'w') as f:
+        for i, seg in enumerate(segments):
+            if i < len(segments) - 1:
+                f.write(f"{seg}\n")
+            else:
+                f.write(f"{seg}")  # last line, no newline
+
