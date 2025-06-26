@@ -1768,3 +1768,154 @@ def getFlexibility(paeFile,fingerprint_file):
     flexsec =getFlexibleSections(paeFile,pae_threshold = 1.2)
     fingerprint = get_secondary(fingerprint_file)
     return [list(find_flexible_linker_sections(np.concatenate(fingerprint), flexsec))]
+
+
+
+def parse_structures_with_segments(filename):
+    with open(filename, 'r') as f:
+        lines = [line.strip() for line in f if line.strip()]
+
+    n = int(lines[0])
+    sequences = lines[1::2]
+    structures = lines[2::2]
+
+    chains = []
+    segment_index = 0  # global segment counter
+
+    for seq, struct in zip(sequences, structures):
+        segments = []
+        for match in re.finditer(r'(-+|S+|H+)', struct):
+            start, end = match.start(), match.end()
+            label = match.group()
+            segments.append({
+                'start': start,
+                'end': end,
+                'type': label[0],
+                'segment_num': segment_index
+            })
+            segment_index += 1
+
+        chains.append({
+            'sequence': seq,
+            'structure': struct,
+            'segments': segments
+        })
+
+    return chains
+
+def colorize(text, color='red'):
+    # ANSI red for terminal; in Colab can also use HTML span + display(HTML(...))
+    return f"\033[91m{text}\033[0m"  # red
+
+def print_structure_with_highlights(chains, highlight_segments):
+    for i, chain in enumerate(chains):
+        print(f"\n=== Chain {i+1} ===")
+        struct_colored = list(chain['structure'])  # mutable char list
+
+        for segment in chain['segments']:
+            if segment['segment_num'] in highlight_segments:
+                for pos in range(segment['start'], segment['end']):
+                    struct_colored[pos] = colorize(struct_colored[pos])
+
+        print("Structure:")
+        print("".join(struct_colored))
+        print("Sequence:")
+        print(chain['sequence'])
+
+def merge_chains_robust_all(chains, merge_indices):
+    """
+    Merge specified chains, remap segment numbers globally across all chains.
+    Returns:
+        new_chains: list of updated chain dicts
+        segment_map: dict of old segment number -> new segment number
+    """
+    import re
+    from collections import defaultdict, Counter
+
+    merge_set = set(idx - 1 for idx in merge_indices)
+    new_chains = []
+    old_to_new_segment = {}
+    merged_seq = ''
+    merged_struct = ''
+    merged_segment_ids = []
+    merged_original_segments = []
+
+    segment_counter = 0  # For assigning new segment numbers
+    segment_offset = 0   # How many segments we've added so far (to shift future chains)
+
+    # Phase 1: Process and build merged chain
+    for i, chain in enumerate(chains):
+        if i in merge_set:
+            struct = chain['structure']
+            segment_ids = [None] * len(struct)
+
+            for seg in chain['segments']:
+                for j in range(seg['start'], seg['end']):
+                    segment_ids[j] = seg['segment_num']
+
+            merged_seq += chain['sequence']
+            merged_struct += struct
+            merged_segment_ids.extend(segment_ids)
+            merged_original_segments.extend(chain['segments'])
+
+    # Recompute segments for merged chain
+    merged_segments = []
+    char_to_new_segment = [None] * len(merged_struct)
+    for match in re.finditer(r'(-+|S+|H+)', merged_struct):
+        start, end = match.start(), match.end()
+        type_char = match.group()[0]
+        merged_segments.append({
+            'start': start,
+            'end': end,
+            'type': type_char,
+            'segment_num': segment_counter
+        })
+        for i in range(start, end):
+            char_to_new_segment[i] = segment_counter
+        segment_counter += 1
+
+    # Map old segment numbers from merged chains
+    seg_votes = defaultdict(list)
+    for old_id, new_id in zip(merged_segment_ids, char_to_new_segment):
+        if old_id is not None:
+            seg_votes[old_id].append(new_id)
+
+    for old_id, new_ids in seg_votes.items():
+        most_common = Counter(new_ids).most_common(1)[0][0]
+        old_to_new_segment[old_id] = most_common
+
+    # Add merged chain
+    new_chains.append({
+        'sequence': merged_seq,
+        'structure': merged_struct,
+        'segments': merged_segments
+    })
+
+    segment_offset = segment_counter  # update offset for next chains
+
+    # Phase 2: Process unmerged chains and shift their segment numbers
+    for i, chain in enumerate(chains):
+        if i in merge_set:
+            continue  # already handled
+
+        new_segments = []
+        for seg in chain['segments']:
+            new_seg = seg.copy()
+            new_seg['segment_num'] = seg['segment_num'] + segment_offset
+            new_segments.append(new_seg)
+            old_to_new_segment[seg['segment_num']] = new_seg['segment_num']
+
+        new_chains.append({
+            'sequence': chain['sequence'],
+            'structure': chain['structure'],
+            'segments': new_segments
+        })
+
+        segment_offset += len(new_segments)  # accumulate for next chain
+
+    return new_chains, old_to_new_segment
+
+
+def update_modified_segments(old_segment_list, mapping):
+    return {mapping[s] for s in old_segment_list if s in mapping}
+
