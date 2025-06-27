@@ -1279,7 +1279,7 @@ def SAXS_fit_plotter(SAXS_file, fit_file, full_q=True):
     return fig
 
 def highlightVaryingSections(MolPath,PDB_fl,varyingSections,chain=1):
-    resids = getResIDs(PDB_fl)
+    resids = getResIDs_from_structure(PDB_fl, MolPath + '/fingerPrint1.dat')
     ss = get_sses(MolPath+'/fingerPrint1.dat')[chain-1]
     cols=[]
     varcols = []
@@ -1293,7 +1293,8 @@ def highlightVaryingSections(MolPath,PDB_fl,varyingSections,chain=1):
             else:
                 varcols.append('black')
     sscols = [sscoldict[i] for i in fp]
-    coords_chains = pull_structure_from_pdb(PDB_fl)[0]
+    coords_chains = getCoordsMatchingStructure(PDB_fl, MolPath + '/fingerPrint1.dat')
+    mol = coords_chains[chain - 1]
     for coords in coords_chains:
         breaking_indices = missing_ca_check(coords)
         if len(breaking_indices) > 0:
@@ -1365,6 +1366,7 @@ def highlightVaryingSections(MolPath,PDB_fl,varyingSections,chain=1):
                 showticklabels=False),),
     )
     return fig
+
 
 def getResIDs(pdb_fl):
     M = pdb_2_biobox(pdb_fl)
