@@ -1972,3 +1972,44 @@ def getResIDs_from_structure(pdb_fl, structure_file):
         idx += length
 
     return resid_tensor
+
+
+def possibleLinkerList(fp_fl, pdb_fl, chain=1):
+    """
+    Reads a secondary structure file (fp_fl) and PDB (pdb_fl),
+    and returns a list of dash-only ('-') segments for the given chain.
+
+    Works whether the structure file is merged or not, assuming correct chain index is used.
+
+    Returns:
+        numpy array of [segment_number, 'ResID: start-end']
+    """
+
+    # Parse residue IDs from the PDB
+    resid_tensor = getResIDs_from_structure(pdb_fl,fp_fl)
+    resids = resid_tensor[chain - 1]
+
+    # Read and parse the structure file
+    with open(fp_fl, 'r') as f:
+        lines = [line.strip() for line in f if line.strip()]
+    n_chains = int(lines[0])
+    structures = lines[2::2]
+
+    if chain > n_chains:
+        raise IndexError(f"Chain {chain} requested but only {n_chains} chains in file.")
+
+    structure = structures[chain - 1]
+    dash_segments = []
+    idx = 0
+    segment_number = 0
+
+    for match in re.finditer(r'(-+|S+|H+)', structure):
+        length = match.end() - match.start()
+        if match.group()[0] == '-':
+            res_start = resids[idx]
+            res_end = resids[idx + length - 1]
+            dash_segments.append([segment_number, f"ResID: {res_start}-{res_end}"])
+        idx += length
+        segment_number += 1
+
+    return np.array(dash_segments, dtype=object)
