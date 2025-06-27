@@ -2013,3 +2013,26 @@ def possibleLinkerList(fp_fl, pdb_fl, chain=1):
         segment_number += 1
 
     return np.array(dash_segments, dtype=object)
+
+def getCoordsMatchingStructure(pdb_fl, structure_file):
+    """
+    Returns list of coordinate chains split to match structure file chains.
+    Ignores PDB chain labels and assumes CA atoms in order.
+    """
+    M = pdb_2_biobox(pdb_fl)
+    ca_idx = (M.data['name'] == 'CA').values
+    coords = M.get_coord(indices=ca_idx)
+
+    with open(structure_file, 'r') as f:
+        lines = [line.strip() for line in f if line.strip()]
+    n = int(lines[0])
+    structures = lines[2::2]
+    lengths = [len(s) for s in structures]
+
+    coords_chains = []
+    idx = 0
+    for length in lengths:
+        coords_chains.append(coords[idx:idx+length])
+        idx += length
+
+    return coords_chains
