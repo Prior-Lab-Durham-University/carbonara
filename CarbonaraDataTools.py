@@ -1945,4 +1945,30 @@ def export_segment_list(segment_set, filename):
                 f.write(f"{seg}\n")
             else:
                 f.write(f"{seg}")  # last line, no newline
+def getResIDs_from_structure(pdb_fl, structure_file):
+    """
+    Returns resid_tensor split to match the chains in the structure file,
+    ignoring original PDB chain IDs.
+    """
+    import re
 
+    # Get all CA atoms
+    M = pdb_2_biobox(pdb_fl)
+    ca_idx = (M.data['name'] == 'CA').values
+    resids = M.get_data(indices=ca_idx)[:, 5]  # residue numbers
+
+    # Read structure file and get lengths of each structure line
+    with open(structure_file, 'r') as f:
+        lines = [line.strip() for line in f if line.strip()]
+    n = int(lines[0])
+    structures = lines[2::2]
+    lengths = [len(struct) for struct in structures]
+
+    # Split resids according to structure lengths
+    resid_tensor = []
+    idx = 0
+    for length in lengths:
+        resid_tensor.append(resids[idx:idx+length])
+        idx += length
+
+    return resid_tensor
