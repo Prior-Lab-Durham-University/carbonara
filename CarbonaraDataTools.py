@@ -1831,7 +1831,6 @@ def merge_chains_robust_all(chains, merge_indices):
         new_chains: list of updated chain dicts
         segment_map: dict of old segment number -> new segment number
     """
-    import re
     from collections import defaultdict, Counter
 
     merge_set = set(idx - 1 for idx in merge_indices)
@@ -1918,9 +1917,8 @@ def merge_chains_robust_all(chains, merge_indices):
     return new_chains, old_to_new_segment
 
 
-def update_modified_segments(old_segment_list, mapping):
-    return {mapping[s] for s in old_segment_list if s in mapping}
-
+def update_modified_segments(original_segment_list, mapping):
+    return {mapping.get(s, s) for s in original_segment_list}
 
 # If you are happy with this merging then set it in place
 
