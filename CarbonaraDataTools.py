@@ -1925,7 +1925,7 @@ def merge_chains_robust_all(chains, merge_indices):
             boundary_segments.add(chain['segments'][-1]['segment_num'])     # last
 
     # ⬅ rest of the function stays the same
-    return new_chains, old_to_new_segment, new_to_old_segment, boundary_segments
+    return new_chains, old_to_new_segment, boundary_segments
     
 def filter_boundary_segments(updated_segments, boundary_segments, reverse_map=None):
     """
