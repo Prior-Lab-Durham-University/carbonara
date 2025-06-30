@@ -1915,6 +1915,34 @@ def merge_chains_robust_all(chains, merge_indices):
         segment_offset += len(new_segments)  # accumulate for next chain
 
     return new_chains, old_to_new_segment
+    
+def filter_boundary_segments(updated_segments, boundary_segments, reverse_map=None):
+    """
+    Removes any segments that were originally the first or last in their chains.
+    
+    Args:
+        updated_segments (set of int): segments after merging.
+        boundary_segments (set of int): original boundary segment numbers.
+        reverse_map (dict): optional, maps new segment → original segment(s)
+        
+    Returns:
+        kept_segments (set): filtered updated_segments with boundaries removed
+        removal_reasons (list of str): explanation for each removed segment
+    """
+    kept = set()
+    reasons = []
+
+    for seg in updated_segments:
+        # If reverse_map is provided, check if *any* of the originals were boundaries
+        originals = reverse_map.get(seg, [seg]) if reverse_map else [seg]
+        if any(orig in boundary_segments for orig in originals):
+            reasons.append(
+                f"Removed segment {seg} (from original segment(s) {originals}) — at chain boundary"
+            )
+        else:
+            kept.add(seg)
+
+    return kept, reasons
 
 
 def update_modified_segments(original_segment_list, mapping):
