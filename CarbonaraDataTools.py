@@ -1824,6 +1824,8 @@ def print_structure_with_highlights(chains, highlight_segments):
         print("Sequence:")
         print(chain['sequence'])
 
+
+
 def merge_chains_robust_all(chains, merge_indices):
     """
     Merge specified chains, remap segment numbers globally across all chains.
@@ -1914,7 +1916,16 @@ def merge_chains_robust_all(chains, merge_indices):
 
         segment_offset += len(new_segments)  # accumulate for next chain
 
-    return new_chains, old_to_new_segment
+    boundary_segments = set()
+
+    # Identify boundary segments before any remapping
+    for chain in chains:
+        if chain['segments']:
+            boundary_segments.add(chain['segments'][0]['segment_num'])      # first
+            boundary_segments.add(chain['segments'][-1]['segment_num'])     # last
+
+    # ⬅ rest of the function stays the same
+    return new_chains, old_to_new_segment, new_to_old_segment, boundary_segments
     
 def filter_boundary_segments(updated_segments, boundary_segments, reverse_map=None):
     """
