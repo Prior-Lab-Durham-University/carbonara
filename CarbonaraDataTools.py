@@ -2075,3 +2075,172 @@ def getCoordsMatchingStructure(pdb_fl, structure_file):
         idx += length
 
     return coords_chains
+
+def mapFixedConstraints(filename, chain_lengths):
+    """
+    Parse a constraints file and convert local residue indices into global indices.
+
+    Args:
+        filename (str): Path to the input file. Each line contains:
+                        Chain1 Residue1 Chain2 Residue2 Value
+        chain_lengths (dict): Mapping from chain letters (e.g., 'A', 'B') to chain lengths.
+
+    Returns:
+        constraint_pairs: List of [global_index1, global_index2]
+        constraint_values: List of associated values (last number on each line)
+    """
+    chain_order = sorted(chain_lengths.keys())  # Assume alphabetical order
+    chain_offsets = {}
+    current_offset = 0
+
+    for ch in chain_order:
+        chain_offsets[ch] = current_offset
+        current_offset += chain_lengths[ch]
+
+    constraint_pairs = []
+    constraint_values = []
+
+    with open(filename, 'r') as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) != 5:
+                continue  # skip malformed lines
+
+            ch1, res1, ch2, res2, value = parts
+            global1 = chain_offsets[ch1] + int(res1)
+            global2 = chain_offsets[ch2] + int(res2)
+
+            constraint_pairs.append([global1, global2])
+            constraint_values.append(int(value))
+
+    return constraint_pairs, constraint_values
+
+def merge_chains_only_clean_consistent_segments(chains, merge_pair):
+    """
+    Merge two chains (1-based indices) by concatenating their sequence and structure.
+    If boundary segments are both '-', merge them into one.
+    Recalculate segment numbers, start, and end positions globally after all adjustments.
+    """
+    import copy
+
+    i, j = merge_pair[0] - 1, merge_pair[1] - 1
+    new_chains = []
+
+    for idx, chain in enumerate(chains):
+        if idx == i:
+            merged_chain = copy.deepcopy(chains[i])
+            other_chain = chains[j]
+
+            merged_sequence = merged_chain["sequence"] + other_chain["sequence"]
+            merged_structure = merged_chain["structure"] + other_chain["structure"]
+
+            merged_segments = copy.deepcopy(merged_chain["segments"])
+            segs_j = copy.deepcopy(other_chain["segments"])
+
+            if merged_segments[-1]["type"] == segs_j[0]["type"] == "-":
+                merged_segments[-1]["end"] = merged_segments[-1]["end"] + (segs_j[0]["end"] - segs_j[0]["start"])
+                segs_j = segs_j[1:]
+
+            merged_segments.extend(segs_j)
+
+            new_chains.append({
+                "sequence": merged_sequence,
+                "structure": merged_structure,
+                "segments": merged_segments
+            })
+        elif idx == j:
+            continue
+        else:
+            new_chains.append(copy.deepcopy(chain))
+
+    # Recalculate start, end, and segment_num globally across all chains
+    segment_num = 0
+    for chain in new_chains:
+        seq_idx = 0
+        new_segments = []
+        while seq_idx < len(chain["structure"]):
+            seg_type = chain["structure"][seq_idx]
+            start = seq_idx
+            while seq_idx < len(chain["structure"]) and chain["structure"][seq_idx] == seg_type:
+                seq_idx += 1
+            new_segments.append({
+                "start": start,
+                "end": seq_idx,
+                "type": seg_type,
+                "segment_num": segment_num
+            })
+            segment_num += 1
+        chain["segments"] = new_segments
+
+    return new_chains
+
+
+import copy
+
+def create_segment_label_arrays_with_merge_v4(chains, highlighted_segments, merge_pair):
+    """
+    Create original and editable segment label arrays per chain, and remap highlighted segments.
+    The chains themselves are not merged; only the labels and mapping are updated.
+
+    Args:
+        chains: list of chain dicts
+        highlighted_segments: numpy array of segment numbers to highlight
+        merge_pair: tuple (i, j) for 1-based chain indices to merge
+
+    Returns:
+        original_label_arrays: list of np.arrays of original segment labels per chain
+        editable_label_arrays: list of np.arrays of updated segment labels per chain
+        remapped_highlighted_segments: numpy array of updated highlighted segment numbers
+    """
+    import numpy as np
+    import copy
+
+    i, j = merge_pair[0] - 1, merge_pair[1] - 1  # Convert to 0-based indexing
+
+    # Step 1: Create original label arrays
+    original_label_arrays = []
+    for ch in chains:
+        segment_nums = [seg['segment_num'] for seg in ch['segments']]
+        original_label_arrays.append(np.array(segment_nums, dtype=int))
+
+    editable_label_arrays = copy.deepcopy(original_label_arrays)
+    updated_highlighted_segments = set(highlighted_segments.tolist())
+
+    # Step 2: Check if boundary segment should be removed
+    last_seg_i = original_label_arrays[i][-1]
+    first_seg_j = original_label_arrays[j][0]
+
+    last_type_i = chains[i]['segments'][-1]['type']
+    first_type_j = chains[j]['segments'][0]['type']
+
+    removed_boundary = False
+    if last_type_i == first_type_j == '-':
+        if last_seg_i in updated_highlighted_segments:
+            updated_highlighted_segments.remove(last_seg_i)
+            removed_boundary = True
+
+    # Step 3: Update labels in chain j (shifted to follow chain i)
+    li = editable_label_arrays[i][-1]
+    len_j = len(editable_label_arrays[j])
+    editable_label_arrays[j] = np.arange(li + 1, li + 1 + len_j)
+
+    # Step 4: Shift chains between i and j by len_j
+    for k in range(i + 1, j):
+        editable_label_arrays[k] += len_j
+
+    # Step 5: If boundary removed, shift all chains after i down by 1
+    if removed_boundary:
+        for k in range(i + 1, len(editable_label_arrays)):
+            editable_label_arrays[k] -= 1
+
+    # Step 6: Build old-to-new segment map and remap highlighted segments
+    old2new_segment_map = {}
+    for orig_arr, edit_arr in zip(original_label_arrays, editable_label_arrays):
+        for old, new in zip(orig_arr, edit_arr):
+            old2new_segment_map[old] = new
+
+    remapped_highlighted_segments = np.array(
+        sorted(old2new_segment_map[s] for s in updated_highlighted_segments if s in old2new_segment_map)
+    )
+
+    return original_label_arrays, editable_label_arrays, remapped_highlighted_segments
