@@ -263,7 +263,9 @@ def main():
 
         chain_lengths = parse_structure_lengths(refine_dir+"/fingerPrint1.dat")
         import pickle
-        
+        ##To save in file
+        with open(refine_dir+"/chainLengths.dat",'wb') as f:
+            pickle.dump(chain_lengths, f)
         # Updated output message
    
 
