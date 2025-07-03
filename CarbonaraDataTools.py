@@ -1504,7 +1504,7 @@ def translate_distance_constraints(contactPredsIn,coords,working_path,fixedDistL
         else:
             dist = np.linalg.norm(coords[contactPreds[i][1]-1]-coords[contactPreds[i][0]-1])
         # contactPredNara.append(pair1+pair2+[dist])
-        contactPredNara.append(pair1+pair2+[dist]+[0.1])
+        contactPredNara.append(pair1+pair2+[dist]+[0.5])
         dists.append(dist)
 
         # now write to file
