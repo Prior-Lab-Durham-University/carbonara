@@ -382,3 +382,39 @@ def CA2AA_secondary(filename, outputname, ss_list, iterations=1, stout=False):
         os.remove(j)
         
     sys.stdout = old_stdout
+
+
+import os
+import sys
+import re
+import numpy as np
+from os.path import basename
+from tempfile import mkstemp
+from modeller import *
+from modeller.automodel import *
+from modeller.scripts import complete_pdb
+
+def CA2AA_secondary_multimer(filename, outputname, ss_list, disulfides=None, iterations=1, stout=False):
+    _PIR_TEMPLATE = '\n'.join([
+        '>P1;%s',
+        'sequence:::::::::',
+        '%s',
+        '*',
+        '',
+        '>P1;model_ca',
+        'structure:%s:FIRST:@:END:@::::',
+        '*'
+    ])
+
+    # Suppress output if not requested
+    if not stout:
+        sys.stdout = open(os.devnull, 'w')
+
+    pdb = mkstemp(prefix='.', suffix='.pdb', dir='.', text=True)[1]
+    prefix = basename(pdb).rsplit('.', 1)[0]
+
+    # Reverse map residue names to 1-letter code
+    aa_names = {
+        'ALA': 'A', 'CYS': 'C', 'ASP': 'D', 'GLU': 'E',
+        'PHE': 'F', 'GLY': 'G', '
+
