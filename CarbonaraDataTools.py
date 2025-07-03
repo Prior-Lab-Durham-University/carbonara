@@ -1767,6 +1767,24 @@ def find_flexible_linker_sections(ss_string: str, pae_flags: List[int]) -> Set[i
     return flexible_linker_indices
 
 def getFlexibility(paeFile,fingerprint_file):
+    # if file is in noy format convert to json   
+    if argument.endswith('.npy'):
+        # Load the .npy file
+        pae_matrix = np.load('paerank_2.npy')
+        
+        # Convert to list of lists for JSON
+        pae_list = pae_matrix.tolist()
+        
+        # Define the JSON structure
+        pae_json = {
+            "predicted_aligned_error": pae_list,
+            "max_predicted_aligned_error": float(np.max(pae_matrix))
+        }
+        
+        # Save as JSON
+        with open('paerank_2_converted.json', 'w') as f:
+            json.dump(pae_json, f)
+    
     flexsec =getFlexibleSections(paeFile,pae_threshold = 1.2)
     fingerprint = get_secondary(fingerprint_file)
     return [list(find_flexible_linker_sections(np.concatenate(fingerprint), flexsec))]
