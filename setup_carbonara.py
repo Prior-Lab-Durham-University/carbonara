@@ -257,7 +257,30 @@ def main():
             pairedQ=args.pairedQ,
             rotation=args.rotation
         )
-        
+         # store chain lengths
+        def parse_structure_lengths(filename):
+            from string import ascii_uppercase
+
+            with open(filename, 'r') as f:
+              lines = f.read().splitlines()
+
+            # Filter out lines that look like secondary structure (contain only '-', 'S', 'H')
+            structure_lines = [line for line in lines if set(line.strip()).issubset({'-', 'S', 'H'}) and len(line)>2]
+
+            # Label them A, B, C, ... and count their lengths
+            result = {label: len(structure) for label, structure in zip(ascii_uppercase, structure_lines)}
+
+            return result
+
+        chain_lengths = parse_structure_lengths(refine_dir+"/fingerPrint1.dat")
+        import pickle
+        ##To save in file
+        with open(refine_dir+"/chainLengths.dat",'wb') as f:
+            pickle.dump(chain_lengths, f)
+        # Updated output message
+   
+
+        chain_lengths = parse_structure_lengths(fit_master_name+"/"+args.name+"/fingerPrint1.dat")
         # Updated output message
 
 
