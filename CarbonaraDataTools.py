@@ -1768,7 +1768,7 @@ def find_flexible_linker_sections(ss_string: str, pae_flags: List[int]) -> Set[i
 
 def getFlexibility(paeFile,fingerprint_file):
     # if file is in noy format convert to json   
-    if argument.endswith('.npy'):
+    if paeFile.endswith('.npy'):
         # Load the .npy file
         pae_matrix = np.load('paerank_2.npy')
         
