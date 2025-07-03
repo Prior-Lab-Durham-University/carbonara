@@ -2127,7 +2127,7 @@ def mapFixedConstraints(filename, chain_lengths):
             if len(parts) != 5:
                 continue  # skip malformed lines
 
-            ch1, res1, ch2, res2, value = parts
+            res1, ch1, res2, ch2, value = parts
             global1 = chain_offsets[ch1] + int(res1)
             global2 = chain_offsets[ch2] + int(res2)
 
