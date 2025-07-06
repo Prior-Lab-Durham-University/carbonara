@@ -269,7 +269,7 @@ def main():
         # Updated output message
    
 
-        chain_lengths = parse_structure_lengths(fit_master_name+"/"+args.name+"/fingerPrint1.dat")
+        chain_lengths = parse_structure_lengths(refine_dir+"/fingerPrint1.dat")
         new_data_dir = os.path.join(os.getcwd(), "carbonara_runs", args.name)
         print("\nSetup completed successfully!")
         print(f"Initial files were created in: {refine_dir}")
