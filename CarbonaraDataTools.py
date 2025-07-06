@@ -1293,7 +1293,7 @@ def highlightVaryingSections(MolPath,PDB_fl,varyingSections,chain=1):
             else:
                 varcols.append('black')
     sscols = [sscoldict[i] for i in fp]
-    coords_chains = getCoordsMatchingStructure(PDB_fl, MolPath + '/fingerPrint1.dat')
+    coords_chains = pull_structure_from_pdb(PDB_fl)[0]
     mol = coords_chains[chain - 1]
     for coords in coords_chains:
         breaking_indices = missing_ca_check(coords)
