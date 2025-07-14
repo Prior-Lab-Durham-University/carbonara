@@ -2320,7 +2320,5 @@ def get_segment_lengths_from_file(filepath: str, target_segments: List[int], min
     """
     ss_chains = read_secondary_structures_from_file(filepath)
     segments = parse_secondary_structure_chainwise(ss_chains)
-    print(segments)
     id_to_length = {seg_id: end - start for seg_id, symbol, start, end in segments}
-    print(id_to_length)
     return [seg_id for seg_id in target_segments if id_to_length.get(seg_id, 0) >= min_length]
