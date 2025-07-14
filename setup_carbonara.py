@@ -228,6 +228,10 @@ def main():
         
         # Copy SAXS file to Saxs.dat (this is the file that Carbonara will use)
         cdt.write_saxs(args.saxs,refine_dir)
+
+        # check the requested min q is not less than the minimum value in the saxs file
+
+        qmin = np.max([np.loadtxt(refine_dir+"/Saxs.dat")[0][0],args.min_q])
         
         # se alphaFold flexibility 
         varying_linker_chains = []
