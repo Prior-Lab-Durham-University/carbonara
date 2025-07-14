@@ -2265,3 +2265,62 @@ def create_segment_label_arrays_with_merge_v4(chains, highlighted_segments, merg
     )
 
     return original_label_arrays, editable_label_arrays, remapped_highlighted_segments
+
+from typing import List, Tuple
+
+def read_secondary_structures_from_file(filepath: str) -> List[str]:
+    """
+    Reads a file with the custom format:
+    <num_chains>
+    <empty line>
+    <sequence1>
+    <empty line>
+    <secondary1>
+    ...
+    Returns a list of secondary structure strings, one per chain.
+    """
+    with open(filepath, 'r') as f:
+        lines = [line.strip() for line in f if line.strip() != '']
+
+    num_chains = int(lines[0])
+    ss_chains = []
+
+    # Each chain consists of 2 lines (sequence, secondary), starting from index 1
+    for i in range(num_chains):
+        seq_index = 1 + i * 2
+        ss_index = seq_index + 1
+        ss_chains.append(lines[ss_index])
+
+    return ss_chains
+
+def parse_secondary_structure_chainwise(ss_chains: List[str]) -> List[Tuple[int, str, int, int]]:
+    """
+    Parses multiple secondary structure strings into segments across chains.
+    Each segment is (segment_id, symbol, start, end) where [start:end] is the local position in the chain.
+    Segment IDs are globally unique and increment continuously across chains.
+    """
+    segments = []
+    current_id = 0
+    for chain_ss in ss_chains:
+        i = 0
+        while i < len(chain_ss):
+            symbol = chain_ss[i]
+            start = i
+            while i < len(chain_ss) and chain_ss[i] == symbol:
+                i += 1
+            end = i
+            segments.append((current_id, symbol, start, end))
+            current_id += 1
+    return segments
+
+def get_segment_lengths_from_file(filepath: str, target_segments: List[int], min_length: int = 3) -> List[int]:
+    """
+    Reads secondary structures from a file, computes segment lengths, and filters by min_length.
+    Returns a list of segment IDs (from target_segments) that are >= min_length.
+    """
+    ss_chains = read_secondary_structures_from_file(filepath)
+    segments = parse_secondary_structure_chainwise(ss_chains)
+    print(segments)
+    id_to_length = {seg_id: end - start for seg_id, symbol, start, end in segments}
+    print(id_to_length)
+    return [seg_id for seg_id in target_segments if id_to_length.get(seg_id, 0) >= min_length]
