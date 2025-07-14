@@ -1784,11 +1784,11 @@ def getFlexibility(paeFile,fingerprint_file):
         # Save as JSON
         with open('paerank_2_converted.json', 'w') as f:
             json.dump(pae_json, f)
-        flexsec =getFlexibleSections('paerank_2_converted.json',pae_threshold = 1.2)
+        flexsec =getFlexibleSections('paerank_2_converted.json',pae_threshold = 0.7)
         fingerprint = get_secondary(fingerprint_file)
         return [list(find_flexible_linker_sections(np.concatenate(fingerprint), flexsec))]
     else:
-        flexsec =getFlexibleSections(paeFile,pae_threshold = 1.2)
+        flexsec =getFlexibleSections(paeFile,pae_threshold = 0.7)
         fingerprint = get_secondary(fingerprint_file)
         return [list(find_flexible_linker_sections(np.concatenate(fingerprint), flexsec))]
 
