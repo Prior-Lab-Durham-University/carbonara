@@ -2114,6 +2114,7 @@ def mapFixedConstraints(filename, chain_lengths):
     chain_offsets = {}
     current_offset = 0
 
+    print(chain_order)
     for ch in chain_order:
         chain_offsets[ch] = current_offset
         current_offset += chain_lengths[ch]
@@ -2124,18 +2125,19 @@ def mapFixedConstraints(filename, chain_lengths):
     with open(filename, 'r') as f:
         for line in f:
             parts = line.strip().split()
-            if len(parts) != 5:
-                continue  # skip malformed lines
-
-            res1, ch1, res2, ch2, value = parts
-            global1 = chain_offsets[ch1] + int(res1)
-            global2 = chain_offsets[ch2] + int(res2)
-
-            constraint_pairs.append([global1, global2])
-            constraint_values.append(int(value))
+            if len(parts) == 5:
+                res1, ch1, res2, ch2, value = parts
+                global1 = chain_offsets[ch1] + int(res1)
+                global2 = chain_offsets[ch2] + int(res2)
+                constraint_pairs.append([global1, global2])
+                constraint_values.append(int(value))
+            elif len(parts) == 4:
+                res1, ch1, res2, ch2 = parts
+                global1 = chain_offsets[ch1] + int(res1)
+                global2 = chain_offsets[ch2] + int(res2)
+                constraint_pairs.append([global1, global2])
 
     return constraint_pairs, constraint_values
-
 def merge_chains_only_clean_consistent_segments(chains, merge_pair):
     """
     Merge two chains (1-based indices) by concatenating their sequence and structure.
