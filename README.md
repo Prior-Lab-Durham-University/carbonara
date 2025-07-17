@@ -83,11 +83,24 @@ pip install biobox
 pip install plotly
 ```
 
-Setting up the RunMe
+Setting up the RunMe for a monomer:
 
 ```bash
 python setup_carbonara.py --pdb path/to/pdb --saxs path/to/saxs --name ProteinName 
 ```
+
+For a multimer to allow rotations:
+
+```bash
+python setup_carbonara.py --pdb path/to/pdb --saxs path/to/saxs --name ProteinName --rotation
+```
+
+If the user has a pae file and wants to use its uncertainties to specify the flexibility (should be a .json or .npy) (can also have rotation or not if its a monomer)
+
+```bash
+python setup_carbonara.py -p path/to/pdb -s path/to/saxs -f path/to/pae -n --name ProteinName --alphaFoldFlex --rotation
+```
+
 ```bash
 # Optional flags for customising refinement
 --fit_n_times INT     Number of times to run the fit (default: 5)
@@ -96,6 +109,7 @@ python setup_carbonara.py --pdb path/to/pdb --saxs path/to/saxs --name ProteinNa
 --max_fit_steps INT   Maximum number of fitting steps (default: 1000)
 --pairedQ             Use paired predictions
 --rotation            Apply affine rotations
+--alphaFoldFlex       Use a pae prediction to specify the flexibility of the molecule
 
 ```
 
