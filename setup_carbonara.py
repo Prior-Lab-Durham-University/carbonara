@@ -292,8 +292,7 @@ def main():
         # Updated output message
    
 
-        chain_lengths = parse_structure_lengths(fit_master_name+"/"+args.name+"/fingerPrint1.dat")
-        # Updated output message
+    
 
 
         new_data_dir = os.path.join(os.getcwd(), "carbonara_runs", args.name)
