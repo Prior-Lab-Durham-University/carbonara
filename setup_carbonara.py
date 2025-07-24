@@ -228,6 +228,10 @@ def main():
         
         # Copy SAXS file to Saxs.dat (this is the file that Carbonara will use)
         cdt.write_saxs(args.saxs,refine_dir)
+
+        # check the requested min q is not less than the minimum value in the saxs file
+
+        qmin = np.max([np.loadtxt(refine_dir+"/Saxs.dat")[0][0],args.min_q])
         
         # se alphaFold flexibility 
         varying_linker_chains = []
@@ -245,6 +249,14 @@ def main():
         varying_section_files = []
         for varying_linkers in varying_linker_chains:
             varying_section_files.append(cdt.write_varysections_file(varying_linkers, refine_dir))
+
+        # check for length 2 varying sections and filter them out
+        filepath = refine_dir+"/fingerPrint1.dat"
+        target_segments = np.loadtxt(refine_dir+"/varyingSectionSecondary1.dat",dtype ='int')
+        filtered_segments = cdt.get_segment_lengths_from_file(filepath, target_segments)
+        np.savetxt(refine_dir+"/varyingSectionSecondary1.dat",filtered_segments,fmt='%i')
+      
+
         # Write the RunMe_<name>.sh script
         run_script = write_runme(
             working_path=refine_dir,
