@@ -74,8 +74,27 @@ def sort_by_creation(file_lst):
 
 def pdb_2_biobox(pdb_file):
     M = bb.Molecule()
-    M.import_pdb(pdb_file)
+    ext = os.path.splitext(pdb_file)[1].lower()
+    if ext == ".pdb":
+        M.import_pdb(pdb_file)
+    elif ext == ".cif":
+        # Load with PDBFixer
+        fixer = PDBFixer(filename=pdb_file)
+        fixer.findMissingResidues()
+        fixer.findMissingAtoms()
+        fixer.addMissingAtoms()
+        fixer.addMissingHydrogens()
+
+        # Write to temporary PDB file and load with MDTraj
+        with NamedTemporaryFile(mode="w", suffix=".pdb", delete=False) as temp:
+           PDBFile.writeFile(fixer.topology, fixer.positions, temp)
+           temp_path = temp.name
+        M.import_pdb(temp_path)
+        os.remove(temp_path)  # clean up temporary file
+    else:
+        raise ValueError(f"Unsupported file extension: {ext}")
     return M
+
 
 
 def extract_CA_coordinates(M):
@@ -164,92 +183,49 @@ def extract_sequence_file(fingerprint_file):
 # > returning to PDB from Carbonara
 
 def Carbonara_2_PDB(coords_file, fp_file, output_file):
-    '''
-    Writes alpha carbon PDBs from Carbonara output, detecting chains from
-    'End chain X' lines in the .dat file.
 
-    Parameters:
-        coords_file : path to Carbonara .dat coordinate file
-        fp_file     : path to Carbonara fingerprint file
-        output_file : path to write resulting multichain CA-only PDB
     '''
-    import re
-    import numpy as np
-    import pandas as pd
-    import biobox as bb
+    Writes alpha carbon PDBs from Carbonara output
 
-    # Load sequence from fingerprint file
+    Input
+        coords_file      : coordinates of the carbon alpha chain
+        fingerprint_file : Carbonara specific format containing secondary structure and sequence
+        output_file      : define name of write output
+    '''
+
+    # read in coordinates and fingerprint
+    coords = extract_coords(coords_file)
+    size = coords.shape[0]
     seq = extract_sequence_file(fp_file)
+
+    # map the AA shorthand to 3 letter abr.
     aa_map = {
-        'A': 'ALA', 'C': 'CYS', 'D': 'ASP', 'E': 'GLU',
-        'F': 'PHE', 'G': 'GLY', 'H': 'HIS', 'I': 'ILE',
-        'K': 'LYS', 'L': 'LEU', 'M': 'MET', 'N': 'ASN',
-        'P': 'PRO', 'Q': 'GLN', 'R': 'ARG', 'S': 'SER',
-        'T': 'THR', 'V': 'VAL', 'W': 'TRP', 'Y': 'TYR'
-    }
-    seq_3 = [aa_map[a] for a in seq]
+            'A': 'ALA', 'C': 'CYS', 'D': 'ASP', 'E': 'GLU',
+            'F': 'PHE', 'G': 'GLY', 'H': 'HIS', 'I': 'ILE',
+            'K': 'LYS', 'L': 'LEU', 'M': 'MET', 'N': 'ASN',
+            'P': 'PRO', 'Q': 'GLN', 'R': 'ARG', 'S': 'SER',
+            'T': 'THR', 'V': 'VAL', 'W': 'TRP', 'Y': 'TYR'
+        }
 
-    # --- Step 1: Parse coords + detect chains
-    coords = []
-    chain_ids = []
-    chain_resids = []
-    segment_ids = []
-    ter_indices = []
+    # map sequence to 3 character abr.
+    seq_3 = []
+    for a in list(seq):
+        seq_3.append(aa_map[a])
 
-    current_chain = 0
-    resid_in_chain = 1
-    atom_index = 0
+    # create dataframe for biobox molecule type
+    df = pd.DataFrame({'atom':['ATOM']*size, 'index':np.arange(size), 'name':['CA']*size,
+                       'resname':seq_3, 'chain':['A']*size, 'resid':np.arange(size),
+                       'occupancy':[1]*size, 'beta':[50]*size, 'atomtype':['C']*size,
+                       'radius':[1.7]*size, 'charge':[0]*size})
 
-    with open(coords_file, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if re.match(r'End chain \d+', line, flags=re.IGNORECASE):
-                # Mark where to insert TER line
-                ter_indices.append(atom_index)
-                current_chain += 1
-                resid_in_chain = 1  # reset for next chain
-            elif line:
-                parts = line.split()
-                if len(parts) >= 3:
-                    coords.append([float(p) for p in parts[:3]])
-                    chain_id = chr(65 + current_chain)  # 'A', 'B', ...
-                    chain_ids.append(chain_id)
-                    chain_resids.append(resid_in_chain)
-                    segment_ids.append(f'{chain_id}')  # or use str(current_chain + 1)
-                    resid_in_chain += 1
-                    atom_index += 1
-
-    coords = np.array(coords)
-    if len(coords) != len(seq_3):
-        raise ValueError(f"Mismatch: {len(coords)} coords vs {len(seq_3)} residues in sequence")
-
-    # --- Step 2: Create PDB DataFrame
-    size = len(coords)
-    df = pd.DataFrame({
-        'atom': ['ATOM'] * size,
-        'index': np.arange(size),
-        'name': ['CA'] * size,
-        'resname': seq_3,
-        'chain': chain_ids,
-        'resid': chain_resids,
-        'occupancy': [1.0] * size,
-        'beta': [50.0] * size,
-        'atomtype': ['C'] * size,
-        'radius': [1.7] * size,
-        'charge': [0.0] * size,
-        'segment_id': segment_ids  # used by MODELLER
-    })
-
-    # --- Step 3: Insert TER lines using Biobox
+    # take full advantage of Matteo's lovely biobox library - manually 'create' a molecule
     molecule = bb.Molecule()
     molecule.data = df
     molecule.coordinates = np.expand_dims(coords, axis=0)
-    
-    # Define which atom indices to insert TER records after
-    molecule.ter_indices = ter_indices
 
-    # --- Step 4: Write out
+    # write out!
     molecule.write_pdb(output_file)
+
 
 # The meeet of extracting
 
@@ -1303,7 +1279,7 @@ def SAXS_fit_plotter(SAXS_file, fit_file, full_q=True):
     return fig
 
 def highlightVaryingSections(MolPath,PDB_fl,varyingSections,chain=1):
-    resids = getResIDs(PDB_fl)
+    resids = getResIDs_from_structure(PDB_fl, MolPath + '/fingerPrint1.dat')
     ss = get_sses(MolPath+'/fingerPrint1.dat')[chain-1]
     cols=[]
     varcols = []
@@ -1318,6 +1294,7 @@ def highlightVaryingSections(MolPath,PDB_fl,varyingSections,chain=1):
                 varcols.append('black')
     sscols = [sscoldict[i] for i in fp]
     coords_chains = pull_structure_from_pdb(PDB_fl)[0]
+    mol = coords_chains[chain - 1]
     for coords in coords_chains:
         breaking_indices = missing_ca_check(coords)
         if len(breaking_indices) > 0:
@@ -1389,6 +1366,7 @@ def highlightVaryingSections(MolPath,PDB_fl,varyingSections,chain=1):
                 showticklabels=False),),
     )
     return fig
+
 
 def getResIDs(pdb_fl):
     M = pdb_2_biobox(pdb_fl)
@@ -1526,7 +1504,7 @@ def translate_distance_constraints(contactPredsIn,coords,working_path,fixedDistL
         else:
             dist = np.linalg.norm(coords[contactPreds[i][1]-1]-coords[contactPreds[i][0]-1])
         # contactPredNara.append(pair1+pair2+[dist])
-        contactPredNara.append(pair1+pair2+[dist]+[0.1])
+        contactPredNara.append(pair1+pair2+[dist]+[0.5])
         dists.append(dist)
 
         # now write to file
@@ -1665,57 +1643,57 @@ def plotMolAndSAXS(RunPath,saxs_fl,mol_fl):
     return fig.show()
 
 
-def load_pae_matrix(path):
+def load_pae_matrix(json_path):
     """
-    Load a Predicted Aligned Error (PAE) matrix from a .json or .npy file.
-
-    Supports:
-    - .json: AlphaFold DB, AlphaFold v3, or custom formats.
-    - .npy: NumPy array saved to disk.
-
-    Parameters:
-        path (str): Path to the input .json or .npy file.
-
+    Load a Predicted Aligned Error (PAE) matrix from a JSON file.
+    
+    Supports AlphaFold DB format (list of dicts with 'predicted_aligned_error')
+    and AlphaFold v3/custom format (dict with 'pae' or 'predicted_aligned_error' key).
     Returns:
         numpy.ndarray: 2D array of PAE values.
-
     Raises:
-        ValueError: If the format or structure is unsupported.
+        ValueError: If no supported PAE format is found in the JSON.
     """
-    ext = os.path.splitext(path)[1].lower()
+    # Read the JSON file
+    with open(json_path, 'r') as f:
+        data = json.load(f)
     
-    if ext == '.npy':
-        matrix = np.load(path)
-        if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
-            raise ValueError("PAE matrix in .npy file must be a square 2D array.")
-        return matrix
-
-    elif ext == '.json':
-        with open(path, 'r') as f:
-            data = json.load(f)
-        
-        if isinstance(data, list):
-            if not data:
-                raise ValueError("PAE JSON list is empty.")
-            entry = data[0]
-            if not isinstance(entry, dict):
-                raise ValueError("PAE JSON list does not contain a dictionary object.")
-            for key in ['predicted_aligned_error', 'predicted_alignment_error', 'pae']:
-                if key in entry:
-                    return np.array(entry[key])
-            raise ValueError("No PAE matrix found under expected keys in JSON list entry.")
-
-        elif isinstance(data, dict):
-            for key in ['predicted_aligned_error', 'predicted_alignment_error', 'pae']:
-                if key in data:
-                    return np.array(data[key])
-            raise ValueError("No supported PAE key found in JSON dictionary.")
-
+    # Determine the format and extract the PAE matrix
+    if isinstance(data, list):
+        # Format 1: AlphaFold DB style (list containing dict with PAE data)
+        if not data:
+            raise ValueError("PAE JSON list is empty.")
+        entry = data[0]
+        if isinstance(entry, dict):
+            # Check known keys for PAE matrix
+            if 'predicted_aligned_error' in entry:
+                matrix = entry['predicted_aligned_error']
+            elif 'predicted_alignment_error' in entry:
+                matrix = entry['predicted_alignment_error']
+            elif 'pae' in entry:
+                matrix = entry['pae']
+            else:
+                raise ValueError("No PAE matrix found under expected keys in the JSON list entry.")
         else:
-            raise ValueError("Unsupported JSON format for PAE data.")
+            raise ValueError("PAE JSON list does not contain a dictionary object.")
+    
+    elif isinstance(data, dict):
+        # Format 2: AlphaFold v3 or custom style (PAE under top-level keys in a dict)
+        if 'predicted_aligned_error' in data:
+            matrix = data['predicted_aligned_error']
+        elif 'predicted_alignment_error' in data:
+            matrix = data['predicted_alignment_error']
+        elif 'pae' in data:
+            matrix = data['pae']
+        else:
+            raise ValueError("No supported PAE key ('predicted_aligned_error' or 'pae') found in the JSON file.")
     
     else:
-        raise ValueError("Unsupported file extension: expected .json or .npy")
+        # Unsupported JSON structure
+        raise ValueError("Unsupported JSON format for PAE data.")
+    
+    # Convert the matrix to a NumPy array and return
+    return np.array(matrix)
 
 def getFlexibleSections(file_path,pae_threshold = 1.0):
     pae_data = load_pae_matrix(file_path)
@@ -1789,6 +1767,560 @@ def find_flexible_linker_sections(ss_string: str, pae_flags: List[int]) -> Set[i
     return flexible_linker_indices
 
 def getFlexibility(paeFile,fingerprint_file):
-    flexsec =getFlexibleSections(paeFile,pae_threshold = 1.2)
-    fingerprint = get_secondary(fingerprint_file)
-    return [list(find_flexible_linker_sections(np.concatenate(fingerprint), flexsec))]
+    # if file is in noy format convert to json   
+    if paeFile.endswith('.npy'):
+        # Load the .npy file
+        pae_matrix = np.load('paerank_2.npy')
+        
+        # Convert to list of lists for JSON
+        pae_list = pae_matrix.tolist()
+        
+        # Define the JSON structure
+        pae_json = {
+            "predicted_aligned_error": pae_list,
+            "max_predicted_aligned_error": float(np.max(pae_matrix))
+        }
+        
+        # Save as JSON
+        with open('paerank_2_converted.json', 'w') as f:
+            json.dump(pae_json, f)
+        flexsec =getFlexibleSections('paerank_2_converted.json',pae_threshold = 0.7)
+        fingerprint = get_secondary(fingerprint_file)
+        return [list(find_flexible_linker_sections(np.concatenate(fingerprint), flexsec))]
+    else:
+        flexsec =getFlexibleSections(paeFile,pae_threshold = 0.7)
+        fingerprint = get_secondary(fingerprint_file)
+        return [list(find_flexible_linker_sections(np.concatenate(fingerprint), flexsec))]
+
+
+
+def parse_structures_with_segments(filename):
+    with open(filename, 'r') as f:
+        lines = [line.strip() for line in f if line.strip()]
+
+    n = int(lines[0])
+    sequences = lines[1::2]
+    structures = lines[2::2]
+
+    chains = []
+    segment_index = 0  # global segment counter
+
+    for seq, struct in zip(sequences, structures):
+        segments = []
+        for match in re.finditer(r'(-+|S+|H+)', struct):
+            start, end = match.start(), match.end()
+            label = match.group()
+            segments.append({
+                'start': start,
+                'end': end,
+                'type': label[0],
+                'segment_num': segment_index
+            })
+            segment_index += 1
+
+        chains.append({
+            'sequence': seq,
+            'structure': struct,
+            'segments': segments
+        })
+
+    return chains
+
+def colorize(text, color='red'):
+    # ANSI red for terminal; in Colab can also use HTML span + display(HTML(...))
+    return f"\033[91m{text}\033[0m"  # red
+
+def print_structure_with_highlights(chains, highlight_segments):
+    for i, chain in enumerate(chains):
+        print(f"\n=== Chain {i+1} ===")
+        struct_colored = list(chain['structure'])  # mutable char list
+
+        for segment in chain['segments']:
+            if segment['segment_num'] in highlight_segments:
+                for pos in range(segment['start'], segment['end']):
+                    struct_colored[pos] = colorize(struct_colored[pos])
+
+        print("Structure:")
+        print("".join(struct_colored))
+        print("Sequence:")
+        print(chain['sequence'])
+
+
+
+def merge_chains_robust_all(chains, merge_indices):
+    """
+    Merge specified chains, remap segment numbers globally across all chains.
+    Returns:
+        new_chains: list of updated chain dicts
+        segment_map: dict of old segment number -> new segment number
+    """
+    from collections import defaultdict, Counter
+
+    merge_set = set(idx - 1 for idx in merge_indices)
+    new_chains = []
+    old_to_new_segment = {}
+    merged_seq = ''
+    merged_struct = ''
+    merged_segment_ids = []
+    merged_original_segments = []
+
+    segment_counter = 0  # For assigning new segment numbers
+    segment_offset = 0   # How many segments we've added so far (to shift future chains)
+
+    # Phase 1: Process and build merged chain
+    for i, chain in enumerate(chains):
+        if i in merge_set:
+            struct = chain['structure']
+            segment_ids = [None] * len(struct)
+
+            for seg in chain['segments']:
+                for j in range(seg['start'], seg['end']):
+                    segment_ids[j] = seg['segment_num']
+
+            merged_seq += chain['sequence']
+            merged_struct += struct
+            merged_segment_ids.extend(segment_ids)
+            merged_original_segments.extend(chain['segments'])
+
+    # Recompute segments for merged chain
+    merged_segments = []
+    char_to_new_segment = [None] * len(merged_struct)
+    for match in re.finditer(r'(-+|S+|H+)', merged_struct):
+        start, end = match.start(), match.end()
+        type_char = match.group()[0]
+        merged_segments.append({
+            'start': start,
+            'end': end,
+            'type': type_char,
+            'segment_num': segment_counter
+        })
+        for i in range(start, end):
+            char_to_new_segment[i] = segment_counter
+        segment_counter += 1
+
+    # Map old segment numbers from merged chains
+    seg_votes = defaultdict(list)
+    for old_id, new_id in zip(merged_segment_ids, char_to_new_segment):
+        if old_id is not None:
+            seg_votes[old_id].append(new_id)
+
+    for old_id, new_ids in seg_votes.items():
+        most_common = Counter(new_ids).most_common(1)[0][0]
+        old_to_new_segment[old_id] = most_common
+
+    # Add merged chain
+    new_chains.append({
+        'sequence': merged_seq,
+        'structure': merged_struct,
+        'segments': merged_segments
+    })
+
+    segment_offset = segment_counter  # update offset for next chains
+
+    # Phase 2: Process unmerged chains and shift their segment numbers
+    for i, chain in enumerate(chains):
+        if i in merge_set:
+            continue  # already handled
+
+        new_segments = []
+        for seg in chain['segments']:
+            new_seg = seg.copy()
+            new_seg['segment_num'] = seg['segment_num'] + segment_offset
+            new_segments.append(new_seg)
+            old_to_new_segment[seg['segment_num']] = new_seg['segment_num']
+
+        new_chains.append({
+            'sequence': chain['sequence'],
+            'structure': chain['structure'],
+            'segments': new_segments
+        })
+
+        segment_offset += len(new_segments)  # accumulate for next chain
+
+    boundary_segments = set()
+
+    # Identify boundary segments before any remapping
+    for chain in chains:
+        if chain['segments']:
+            boundary_segments.add(chain['segments'][0]['segment_num'])      # first
+            boundary_segments.add(chain['segments'][-1]['segment_num'])     # last
+
+    # ⬅ rest of the function stays the same
+    return new_chains, old_to_new_segment, boundary_segments
+    
+def filter_boundary_segments(updated_segments, boundary_segments, reverse_map=None):
+    """
+    Removes any segments that were originally the first or last in their chains.
+    
+    Args:
+        updated_segments (set of int): segments after merging.
+        boundary_segments (set of int): original boundary segment numbers.
+        reverse_map (dict): optional, maps new segment → original segment(s)
+        
+    Returns:
+        kept_segments (set): filtered updated_segments with boundaries removed
+        removal_reasons (list of str): explanation for each removed segment
+    """
+    kept = set()
+    reasons = []
+
+    for seg in updated_segments:
+        # If reverse_map is provided, check if *any* of the originals were boundaries
+        originals = reverse_map.get(seg, [seg]) if reverse_map else [seg]
+        if any(orig in boundary_segments for orig in originals):
+            reasons.append(
+                f"Removed segment {seg} (from original segment(s) {originals}) — at chain boundary"
+            )
+        else:
+            kept.add(seg)
+
+    return kept, reasons
+
+
+def update_modified_segments(original_segment_list, mapping):
+    return {mapping.get(s, s) for s in original_segment_list}
+
+# If you are happy with this merging then set it in place
+
+def export_chains_to_file(chains, filename):
+    """
+    Export a list of chains (with 'sequence' and 'structure') to a file
+    in the original alternating format.
+    """
+    with open(filename, 'w') as f:
+        f.write(f"{len(chains)}\n\n")  # Write number of chains
+
+        for chain in chains:
+            f.write(f"{chain['sequence']}\n\n")
+            f.write(f"{chain['structure']}\n\n")
+
+def export_segment_list(segment_set, filename):
+    """
+    Write a set of segment numbers to a file, one per line, without trailing newline at the end.
+    """
+    segments = sorted(segment_set)
+    with open(filename, 'w') as f:
+        for i, seg in enumerate(segments):
+            if i < len(segments) - 1:
+                f.write(f"{seg}\n")
+            else:
+                f.write(f"{seg}")  # last line, no newline
+def getResIDs_from_structure(pdb_fl, structure_file):
+    """
+    Returns resid_tensor split to match the chains in the structure file,
+    ignoring original PDB chain IDs.
+    """
+    import re
+
+    # Get all CA atoms
+    M = pdb_2_biobox(pdb_fl)
+    ca_idx = (M.data['name'] == 'CA').values
+    resids = M.get_data(indices=ca_idx)[:, 5]  # residue numbers
+
+    # Read structure file and get lengths of each structure line
+    with open(structure_file, 'r') as f:
+        lines = [line.strip() for line in f if line.strip()]
+    n = int(lines[0])
+    structures = lines[2::2]
+    lengths = [len(struct) for struct in structures]
+
+    # Split resids according to structure lengths
+    resid_tensor = []
+    idx = 0
+    for length in lengths:
+        resid_tensor.append(resids[idx:idx+length])
+        idx += length
+
+    return resid_tensor
+
+
+def possibleLinkerList(fp_fl, pdb_fl, chain=1):
+    """
+    Reads a secondary structure file (fp_fl) and PDB (pdb_fl),
+    and returns a list of dash-only ('-') segments for the given chain.
+
+    Works whether the structure file is merged or not, assuming correct chain index is used.
+
+    Returns:
+        numpy array of [segment_number, 'ResID: start-end']
+    """
+
+    # Parse residue IDs from the PDB
+    resid_tensor = getResIDs_from_structure(pdb_fl,fp_fl)
+    resids = resid_tensor[chain - 1]
+
+    # Read and parse the structure file
+    with open(fp_fl, 'r') as f:
+        lines = [line.strip() for line in f if line.strip()]
+    n_chains = int(lines[0])
+    structures = lines[2::2]
+
+    if chain > n_chains:
+        raise IndexError(f"Chain {chain} requested but only {n_chains} chains in file.")
+
+    structure = structures[chain - 1]
+    dash_segments = []
+    idx = 0
+    segment_number = 0
+
+    for match in re.finditer(r'(-+|S+|H+)', structure):
+        length = match.end() - match.start()
+        if match.group()[0] == '-':
+            res_start = resids[idx]
+            res_end = resids[idx + length - 1]
+            dash_segments.append([segment_number, f"ResID: {res_start}-{res_end}"])
+        idx += length
+        segment_number += 1
+
+    return np.array(dash_segments, dtype=object)
+
+def getCoordsMatchingStructure(pdb_fl, structure_file):
+    """
+    Returns list of coordinate chains split to match structure file chains.
+    Ignores PDB chain labels and assumes CA atoms in order.
+    """
+    M = pdb_2_biobox(pdb_fl)
+    ca_idx = (M.data['name'] == 'CA').values
+    coords = M.get_coord(indices=ca_idx)
+
+    with open(structure_file, 'r') as f:
+        lines = [line.strip() for line in f if line.strip()]
+    n = int(lines[0])
+    structures = lines[2::2]
+    lengths = [len(s) for s in structures]
+
+    coords_chains = []
+    idx = 0
+    for length in lengths:
+        coords_chains.append(coords[idx:idx+length])
+        idx += length
+
+    return coords_chains
+
+def mapFixedConstraints(filename, chain_lengths):
+    """
+    Parse a constraints file and convert local residue indices into global indices.
+
+    Args:
+        filename (str): Path to the input file. Each line contains:
+                        Chain1 Residue1 Chain2 Residue2 Value
+        chain_lengths (dict): Mapping from chain letters (e.g., 'A', 'B') to chain lengths.
+
+    Returns:
+        constraint_pairs: List of [global_index1, global_index2]
+        constraint_values: List of associated values (last number on each line)
+    """
+    chain_order = sorted(chain_lengths.keys())  # Assume alphabetical order
+    chain_offsets = {}
+    current_offset = 0
+
+    print(chain_order)
+    for ch in chain_order:
+        chain_offsets[ch] = current_offset
+        current_offset += chain_lengths[ch]
+
+    constraint_pairs = []
+    constraint_values = []
+
+    with open(filename, 'r') as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) == 5:
+                res1, ch1, res2, ch2, value = parts
+                global1 = chain_offsets[ch1] + int(res1)
+                global2 = chain_offsets[ch2] + int(res2)
+                constraint_pairs.append([global1, global2])
+                constraint_values.append(int(value))
+            elif len(parts) == 4:
+                res1, ch1, res2, ch2 = parts
+                global1 = chain_offsets[ch1] + int(res1)
+                global2 = chain_offsets[ch2] + int(res2)
+                constraint_pairs.append([global1, global2])
+
+    return constraint_pairs, constraint_values
+def merge_chains_only_clean_consistent_segments(chains, merge_pair):
+    """
+    Merge two chains (1-based indices) by concatenating their sequence and structure.
+    If boundary segments are both '-', merge them into one.
+    Recalculate segment numbers, start, and end positions globally after all adjustments.
+    """
+    import copy
+
+    i, j = merge_pair[0] - 1, merge_pair[1] - 1
+    new_chains = []
+
+    for idx, chain in enumerate(chains):
+        if idx == i:
+            merged_chain = copy.deepcopy(chains[i])
+            other_chain = chains[j]
+
+            merged_sequence = merged_chain["sequence"] + other_chain["sequence"]
+            merged_structure = merged_chain["structure"] + other_chain["structure"]
+
+            merged_segments = copy.deepcopy(merged_chain["segments"])
+            segs_j = copy.deepcopy(other_chain["segments"])
+
+            if merged_segments[-1]["type"] == segs_j[0]["type"] == "-":
+                merged_segments[-1]["end"] = merged_segments[-1]["end"] + (segs_j[0]["end"] - segs_j[0]["start"])
+                segs_j = segs_j[1:]
+
+            merged_segments.extend(segs_j)
+
+            new_chains.append({
+                "sequence": merged_sequence,
+                "structure": merged_structure,
+                "segments": merged_segments
+            })
+        elif idx == j:
+            continue
+        else:
+            new_chains.append(copy.deepcopy(chain))
+
+    # Recalculate start, end, and segment_num globally across all chains
+    segment_num = 0
+    for chain in new_chains:
+        seq_idx = 0
+        new_segments = []
+        while seq_idx < len(chain["structure"]):
+            seg_type = chain["structure"][seq_idx]
+            start = seq_idx
+            while seq_idx < len(chain["structure"]) and chain["structure"][seq_idx] == seg_type:
+                seq_idx += 1
+            new_segments.append({
+                "start": start,
+                "end": seq_idx,
+                "type": seg_type,
+                "segment_num": segment_num
+            })
+            segment_num += 1
+        chain["segments"] = new_segments
+
+    return new_chains
+
+
+import copy
+
+def create_segment_label_arrays_with_merge_v4(chains, highlighted_segments, merge_pair):
+    """
+    Create original and editable segment label arrays per chain, and remap highlighted segments.
+    The chains themselves are not merged; only the labels and mapping are updated.
+
+    Args:
+        chains: list of chain dicts
+        highlighted_segments: numpy array of segment numbers to highlight
+        merge_pair: tuple (i, j) for 1-based chain indices to merge
+
+    Returns:
+        original_label_arrays: list of np.arrays of original segment labels per chain
+        editable_label_arrays: list of np.arrays of updated segment labels per chain
+        remapped_highlighted_segments: numpy array of updated highlighted segment numbers
+    """
+    import numpy as np
+    import copy
+
+    i, j = merge_pair[0] - 1, merge_pair[1] - 1  # Convert to 0-based indexing
+
+    # Step 1: Create original label arrays
+    original_label_arrays = []
+    for ch in chains:
+        segment_nums = [seg['segment_num'] for seg in ch['segments']]
+        original_label_arrays.append(np.array(segment_nums, dtype=int))
+
+    editable_label_arrays = copy.deepcopy(original_label_arrays)
+    updated_highlighted_segments = set(highlighted_segments.tolist())
+
+    # Step 2: Check if boundary segment should be removed
+    last_seg_i = original_label_arrays[i][-1]
+    first_seg_j = original_label_arrays[j][0]
+
+    last_type_i = chains[i]['segments'][-1]['type']
+    first_type_j = chains[j]['segments'][0]['type']
+
+    removed_boundary = False
+    if last_type_i == first_type_j == '-':
+        if last_seg_i in updated_highlighted_segments:
+            updated_highlighted_segments.remove(last_seg_i)
+            removed_boundary = True
+
+    # Step 3: Update labels in chain j (shifted to follow chain i)
+    li = editable_label_arrays[i][-1]
+    len_j = len(editable_label_arrays[j])
+    editable_label_arrays[j] = np.arange(li + 1, li + 1 + len_j)
+
+    # Step 4: Shift chains between i and j by len_j
+    for k in range(i + 1, j):
+        editable_label_arrays[k] += len_j
+
+    # Step 5: If boundary removed, shift all chains after i down by 1
+    if removed_boundary:
+        for k in range(i + 1, len(editable_label_arrays)):
+            editable_label_arrays[k] -= 1
+
+    # Step 6: Build old-to-new segment map and remap highlighted segments
+    old2new_segment_map = {}
+    for orig_arr, edit_arr in zip(original_label_arrays, editable_label_arrays):
+        for old, new in zip(orig_arr, edit_arr):
+            old2new_segment_map[old] = new
+
+    remapped_highlighted_segments = np.array(
+        sorted(old2new_segment_map[s] for s in updated_highlighted_segments if s in old2new_segment_map)
+    )
+
+    return original_label_arrays, editable_label_arrays, remapped_highlighted_segments
+
+from typing import List, Tuple
+
+def read_secondary_structures_from_file(filepath: str) -> List[str]:
+    """
+    Reads a file with the custom format:
+    <num_chains>
+    <empty line>
+    <sequence1>
+    <empty line>
+    <secondary1>
+    ...
+    Returns a list of secondary structure strings, one per chain.
+    """
+    with open(filepath, 'r') as f:
+        lines = [line.strip() for line in f if line.strip() != '']
+
+    num_chains = int(lines[0])
+    ss_chains = []
+
+    # Each chain consists of 2 lines (sequence, secondary), starting from index 1
+    for i in range(num_chains):
+        seq_index = 1 + i * 2
+        ss_index = seq_index + 1
+        ss_chains.append(lines[ss_index])
+
+    return ss_chains
+
+def parse_secondary_structure_chainwise(ss_chains: List[str]) -> List[Tuple[int, str, int, int]]:
+    """
+    Parses multiple secondary structure strings into segments across chains.
+    Each segment is (segment_id, symbol, start, end) where [start:end] is the local position in the chain.
+    Segment IDs are globally unique and increment continuously across chains.
+    """
+    segments = []
+    current_id = 0
+    for chain_ss in ss_chains:
+        i = 0
+        while i < len(chain_ss):
+            symbol = chain_ss[i]
+            start = i
+            while i < len(chain_ss) and chain_ss[i] == symbol:
+                i += 1
+            end = i
+            segments.append((current_id, symbol, start, end))
+            current_id += 1
+    return segments
+
+def get_segment_lengths_from_file(filepath: str, target_segments: List[int], min_length: int = 3) -> List[int]:
+    """
+    Reads secondary structures from a file, computes segment lengths, and filters by min_length.
+    Returns a list of segment IDs (from target_segments) that are >= min_length.
+    """
+    ss_chains = read_secondary_structures_from_file(filepath)
+    segments = parse_secondary_structure_chainwise(ss_chains)
+    id_to_length = {seg_id: end - start for seg_id, symbol, start, end in segments}
+    return [seg_id for seg_id in target_segments if id_to_length.get(seg_id, 0) >= min_length]
