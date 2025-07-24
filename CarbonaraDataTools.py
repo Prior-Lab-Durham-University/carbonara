@@ -1643,57 +1643,66 @@ def plotMolAndSAXS(RunPath,saxs_fl,mol_fl):
     return fig.show()
 
 
-def load_pae_matrix(json_path):
+import os
+import json
+import numpy as np
+
+def load_pae_matrix(path):
     """
-    Load a Predicted Aligned Error (PAE) matrix from a JSON file.
-    
-    Supports AlphaFold DB format (list of dicts with 'predicted_aligned_error')
-    and AlphaFold v3/custom format (dict with 'pae' or 'predicted_aligned_error' key).
+    Load a Predicted Aligned Error (PAE) matrix from a .json or .npy file.
+
+    - .npy: Assumes the file contains a 2D NumPy array.
+    - .json: Supports AlphaFold DB format and AlphaFold v3/custom formats.
+
+    Args:
+        path (str): Path to the .npy or .json file.
+
     Returns:
         numpy.ndarray: 2D array of PAE values.
+
     Raises:
-        ValueError: If no supported PAE format is found in the JSON.
+        ValueError: If the file is unreadable or not a supported format.
     """
-    # Read the JSON file
-    with open(json_path, 'r') as f:
-        data = json.load(f)
-    
-    # Determine the format and extract the PAE matrix
-    if isinstance(data, list):
-        # Format 1: AlphaFold DB style (list containing dict with PAE data)
-        if not data:
-            raise ValueError("PAE JSON list is empty.")
-        entry = data[0]
-        if isinstance(entry, dict):
-            # Check known keys for PAE matrix
-            if 'predicted_aligned_error' in entry:
-                matrix = entry['predicted_aligned_error']
-            elif 'predicted_alignment_error' in entry:
-                matrix = entry['predicted_alignment_error']
-            elif 'pae' in entry:
-                matrix = entry['pae']
-            else:
-                raise ValueError("No PAE matrix found under expected keys in the JSON list entry.")
+    ext = os.path.splitext(path)[-1].lower()
+
+    if ext == '.npy':
+        matrix = np.load(path)
+        if matrix.ndim != 2:
+            raise ValueError("PAE .npy file must contain a 2D array.")
+        return matrix
+
+    elif ext == '.json':
+        with open(path, 'r') as f:
+            data = json.load(f)
+
+        # JSON Format 1: list of dicts (AlphaFold DB style)
+        if isinstance(data, list):
+            if not data:
+                raise ValueError("PAE JSON list is empty.")
+            entry = data[0]
+            if not isinstance(entry, dict):
+                raise ValueError("PAE JSON list does not contain a dictionary.")
+            matrix = (entry.get('predicted_aligned_error') or
+                      entry.get('predicted_alignment_error') or
+                      entry.get('pae'))
+            if matrix is None:
+                raise ValueError("No PAE matrix found in JSON list entry.")
+
+        # JSON Format 2: top-level dict
+        elif isinstance(data, dict):
+            matrix = (data.get('predicted_aligned_error') or
+                      data.get('predicted_alignment_error') or
+                      data.get('pae'))
+            if matrix is None:
+                raise ValueError("No supported PAE key found in JSON dictionary.")
+
         else:
-            raise ValueError("PAE JSON list does not contain a dictionary object.")
-    
-    elif isinstance(data, dict):
-        # Format 2: AlphaFold v3 or custom style (PAE under top-level keys in a dict)
-        if 'predicted_aligned_error' in data:
-            matrix = data['predicted_aligned_error']
-        elif 'predicted_alignment_error' in data:
-            matrix = data['predicted_alignment_error']
-        elif 'pae' in data:
-            matrix = data['pae']
-        else:
-            raise ValueError("No supported PAE key ('predicted_aligned_error' or 'pae') found in the JSON file.")
-    
+            raise ValueError("Unsupported JSON structure for PAE data.")
+
+        return np.array(matrix)
+
     else:
-        # Unsupported JSON structure
-        raise ValueError("Unsupported JSON format for PAE data.")
-    
-    # Convert the matrix to a NumPy array and return
-    return np.array(matrix)
+        raise ValueError(f"Unsupported file type: {ext}. Must be '.json' or '.npy'.")
 
 def getFlexibleSections(file_path,pae_threshold = 1.0):
     pae_data = load_pae_matrix(file_path)
