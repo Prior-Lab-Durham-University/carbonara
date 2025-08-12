@@ -802,7 +802,7 @@ std::vector<double> experimentalData::calculate_intensity_at_experimental_q(std:
        // double logScatDif= std::log(Icomb[l]) - std::log(experimentalIntensity[l]);
        double logScatDif= std::log(Icomb[l]) - std::log(exprISubset[l]);
        logdifs.push_back(logScatDif);
-       if(exprQSubset[l]<kMin+0.01){
+       if(exprQSubset[l]<kMin+0.075){
 	 logDifMean =  logDifMean + logScatDif;
 	 noMean++;
        }
@@ -875,7 +875,7 @@ double experimentalData::calculateChiSquaredUpdate_Weighted(ktlMolecule& molNew,
        // double logScatDif= std::log(Icomb[l]) - std::log(experimentalIntensity[l]);
        double logScatDif= std::log(Icomb[l]) - std::log(exprISubset[l]);
        logdifs.push_back(logScatDif);
-       if(exprQSubset[l]<kMin+0.01){
+       if(exprQSubset[l]<kMin+0.075){
 	 logDifMean =  logDifMean + logScatDif;
 	 noMean++;
        }
@@ -929,7 +929,7 @@ void experimentalData::writeScatteringToFile_ChiSq(std::vector<std::vector<doubl
        // double logScatDif= std::log(Icomb[l]) - std::log(experimentalIntensity[l]);
        double logScatDif= std::log(Icomb[l]) - std::log(exprISubset[l]);
        logdifs.push_back(logScatDif);
-       if(exprQSubset[l]<kMin+0.01){
+       if(exprQSubset[l]<kMin+0.075){
 	 logDifMean =  logDifMean + logScatDif;
 	 noMean++;
        }
