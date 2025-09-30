@@ -901,51 +901,53 @@ def random_bond_finder(rand_file_dir, fingerprint_file, linker_indices):
 
 
 def find_non_varying_linkers(initial_coords_file, fingerprint_file):
+    """
+    Identify linkers that can be varied without breaking sheet hydrogen bonds.
+    Returns (allowed_linker, linker_indices), both in global section index space.
+    """
 
-    # initial_coords_file = 'Fitting/coordinates1.dat'
-    # fingerprint_file = 'Fitting/fingerPrint1.dat'
-
-    # Reference initial structure
-    sheet_coords = sheet_pipe(initial_coords_file,
-                              fingerprint_file)
+    # --- Reference sheet bonds for unperturbed structure ---
+    sheet_coords = sheet_pipe(initial_coords_file, fingerprint_file)
     ref_bonds = sheet_pairwise_bond_number(sheet_coords, thr=5.5)
 
-    # Generate the random structure changing each linker section
+    # --- Generate random structures per linker ---
     linker_indices = generate_random_structures(initial_coords_file, fingerprint_file)
 
-    # Calculate the number of inter-sheet bonds for each rand struct
-    linker_bond_arr_dict = random_bond_finder('rand_structures/',
-                                              fingerprint_file,
-                                              linker_indices)
+    # --- Compute sheet bonds for random structures ---
+    linker_bond_arr_dict = random_bond_finder(
+        'rand_structures/', fingerprint_file, linker_indices
+    )
 
-    # Find number of bond breaks relative to initial structure
+    # --- Evaluate bond breakage per linker ---
     bond_breaks_dict = {}
-
-
     for l in linker_indices:
-
         bond_break_lst = []
         for bond_arr in linker_bond_arr_dict[l]:
+            bond_break_lst.append((ref_bonds > bond_arr).sum())
+        bond_breaks_dict[l] = sum(bond_break_lst) / (len(linker_bond_arr_dict[l]) + 1)
 
-
-            bond_break_lst.append( (ref_bonds > bond_arr).sum() )
-
-        bond_breaks_dict[l] = sum(bond_break_lst)/(len(linker_bond_arr_dict[l])+1)
-
-    # Linker indices that cause no bond breaks
-    conds = np.asarray(list(bond_breaks_dict.values())) < 0.0000001
-
-
+    # --- Linkers that don't break bonds (safe to vary) ---
+    conds = np.asarray(list(bond_breaks_dict.values())) < 1e-7
     allowed_linker = linker_indices[conds]
 
-    if 0 in linker_indices:
-        linker_indices = np.delete(linker_indices, np.where(linker_indices==0)[0].item())
+    # --- Build robust global linker index list ---
+    secondary = get_secondary(fingerprint_file)
+    global_linker_indices = []
+    offset = 0
+    for sec in secondary:  # one chain's secondary structure
+        sections = section_finder(sec)                  # contiguous blocks
+        local_linkers = find_linker_indices(sections)   # '-' indices in this chain
+        global_linker_indices.extend(idx + offset for idx in local_linkers)
+        offset += len(sections)  # advance by all sections
 
+    global_linker_indices = np.array(global_linker_indices)
 
-    if 0 in allowed_linker:
-        allowed_linker = np.delete(allowed_linker, np.where(allowed_linker==0)[0].item())
+    # --- Ensure linker 0 is excluded if present ---
+    allowed_linker = np.array([i for i in allowed_linker if i != 0])
+    global_linker_indices = np.array([i for i in global_linker_indices if i != 0])
 
-    return allowed_linker, linker_indices
+    return allowed_linker, global_linker_indices
+
 
 
 
