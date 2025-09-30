@@ -122,16 +122,15 @@ sh RunMe_*ProteinName*.sh
 ```
 ## Colab implementation
 
-A colab implementation of the setup which features graphical interactivity and a guided walkthourgh of the setup can be found here for a monomer
+A Colab implementation of the setup which features graphical interactivity and a guided walkthrough of the setup can be found here:
 
-https://colab.research.google.com/drive/1Bw6M8QbQf7LXu04P6AFzwZPLSZ7XU4vt/copy
+- [Monomer version](https://colab.research.google.com/drive/1Bw6M8QbQf7LXu04P6AFzwZPLSZ7XU4vt)  
+- [Multimer version](https://colab.research.google.com/drive/1vscGPfSb6QK1LQiszUAClsOwue2ihSqU)
 
-and here for a multimer (which includes the ability to force chains to rotate as one (e.g. locking dimer structures in place)
-
-https://colab.research.google.com/drive/1vscGPfSb6QK1LQiszUAClsOwue2ihSqU/copy
-
-Please make a copy. You can run the code in colab but also download the fitting folders and script.
-
+> ⚠️ These notebooks are shared in **view-only mode**.  
+> To use them, click **“Copy to Drive”** at the top of the Colab page.  
+> This will create your own editable copy in your Google Drive.  
+> You can then run the code directly in Colab, or download the fitting folders and scripts if you prefer to work locally.
 
 ## Citation
 
