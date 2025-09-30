@@ -2335,3 +2335,86 @@ def get_segment_lengths_from_file(filepath: str, target_segments: List[int], min
     segments = parse_secondary_structure_chainwise(ss_chains)
     id_to_length = {seg_id: end - start for seg_id, symbol, start, end in segments}
     return [seg_id for seg_id in target_segments if id_to_length.get(seg_id, 0) >= min_length]
+
+
+def split_into_sections(ss):
+    """
+    Split a secondary structure sequence into contiguous sections.
+    Example: ['H','H','-','-','S'] -> [['H','H'], ['-','-'], ['S']]
+    """
+    sections = []
+    if len(ss) == 0:
+        return sections
+
+    current = [ss[0]]
+    for c in ss[1:]:
+        if c == current[-1]:
+            current.append(c)
+        else:
+            sections.append(current)
+            current = [c]
+    sections.append(current)
+    return sections
+
+
+def build_global_sections(secondary):
+    """
+    Take list of secondary-structure arrays (one per chain) and flatten
+    into a single global sections list across all chains.
+    """
+    global_sections = []
+    for sec in secondary:
+        global_sections.extend(split_into_sections(sec))
+    return global_sections
+
+
+def find_non_varying_linkers(initial_coords_file, fingerprint_file):
+    """
+    Identify linkers that can be varied without breaking sheet hydrogen bonds.
+    Returns (allowed_linker, linker_indices), both in global section index space.
+    """
+    sheet_coords = sheet_pipe(initial_coords_file, fingerprint_file)
+    ref_bonds = sheet_pairwise_bond_number(sheet_coords, thr=5.5)
+
+    linker_indices = generate_random_structures(initial_coords_file, fingerprint_file)
+    linker_bond_arr_dict = random_bond_finder(
+        'rand_structures/', fingerprint_file, linker_indices
+    )
+
+    bond_breaks_dict = {}
+    for l in linker_indices:
+        bond_break_lst = []
+        for bond_arr in linker_bond_arr_dict[l]:
+            bond_break_lst.append((ref_bonds > bond_arr).sum())
+        bond_breaks_dict[l] = sum(bond_break_lst) / (len(linker_bond_arr_dict[l]) + 1)
+
+    conds = np.asarray(list(bond_breaks_dict.values())) < 1e-7
+    allowed_linker = linker_indices[conds]
+
+    secondary = get_secondary(fingerprint_file)
+    global_sections = build_global_sections(secondary)
+    global_linker_indices = [i for i, sec in enumerate(global_sections) if sec[0] == '-']
+
+    allowed_linker = np.array([i for i in allowed_linker if i in global_linker_indices])
+    global_linker_indices = np.array([i for i in global_linker_indices if i != 0])
+
+    return allowed_linker, global_linker_indices
+
+
+def auto_select_varying_linker(coords_file, fingerprint_file):
+    """
+    Select varying linkers (longer coil regions that can vary without breaking sheets).
+    """
+    allowed_linker, linker_indices = find_non_varying_linkers(coords_file, fingerprint_file)
+
+    secondary = get_secondary(fingerprint_file)
+    sections = build_global_sections(secondary)
+
+    varying_linker_indices = []
+    for section_index in allowed_linker:
+        sec = sections[section_index]
+        if sec[0] == '-' and len(sec) > 3:
+            varying_linker_indices.append(section_index)
+
+    return varying_linker_indices
+
