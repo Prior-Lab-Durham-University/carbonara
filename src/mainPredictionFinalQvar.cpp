@@ -1,3 +1,5 @@
+
+
 /* Carbonara Version: 0.2.0 */
 
 #include "ktlMoleculeRandom.h"
@@ -7,16 +9,13 @@
 #include <cstring>
 #include <chrono>
 #include <tuple>
+#include <utility>   // std::swap
 
 #include "Logger.h"
 #include "helpers.h"
 
 using namespace std::chrono;
 
-// combination of all structures = moleculeStructures
-// each structure is
-
-// note: this version showing funky behaviour with getFit()'s - not always consistent when recalled!
 
 /* --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
 
@@ -41,6 +40,7 @@ using namespace std::chrono;
   argv[19] is true if the user wants to use error weightings
  --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- */
 
+
 int main(int argc, const char* argv[]) {
 
   /* initialise the log file */
@@ -49,19 +49,16 @@ int main(int argc, const char* argv[]) {
   /* Set up model parameters */
   ModelParameters params = loadParameters(argv);
 
-  /* Determine initial model: Two options no initial prediction, we must generate a structure
-   or some initial structure provided. Actually we need a half-half option */
-
   /* Initialise the molecule(s) vector */
-  std::vector<ktlMolecule> moleculeStructures;
-  readInStructures(argv, moleculeStructures, params);
+  std::vector<ktlMolecule> initialMolecules;
+  readInStructures(argv, initialMolecules, params);
 
   /* Determine which sections are being altered */
   std::vector<std::vector<int>> vary_sec_list_list;
   determineVaryingSections(argv, vary_sec_list_list);
 
   /* Read in any fixed distances constraints (contact predictions/sulfide bonds) */
-  readFixedDistancesConstraints(argv, moleculeStructures);
+  readFixedDistancesConstraints(argv, initialMolecules);
 
   /* Read in the permissible mixture list */
   readPermissibleMixtures(argv, params);
@@ -72,11 +69,10 @@ int main(int argc, const char* argv[]) {
   /* Random generator */
   RandomGenerator rng;
 
-  /* initialise the state of mol vector */
-  moleculeFitAndState molState(moleculeStructures, params);
+  /* initialise the state of mol vector (takes ownership of initialMolecules by copy) */
+  moleculeFitAndState molState(initialMolecules, params);
 
   int improvementIndex = 0;
-  // If we resume from previous run - argv[3] restart True/False
   if ((strcmp(argv[3], "True") == 0)) {
     improvementIndex = std::atoi(argv[17]);
   }
@@ -85,186 +81,172 @@ int main(int argc, const char* argv[]) {
   if (params.affineTrans == true) {
     if ((strcmp(argv[19], "True") == 0)) {
       overallFit = molState.getOverallFitForceConnection_ChiSq(ed, params.mixtureList, params.kmin, params.kmaxCurr);
-    }else{
+    } else {
       overallFit = molState.getOverallFitForceConnection(ed, params.mixtureList, params.kmin, params.kmaxCurr);
     }
   } else {
-     if ((strcmp(argv[19], "True") == 0)) {
+    if ((strcmp(argv[19], "True") == 0)) {
       overallFit = molState.getOverallFit_ChiSq(ed, params.mixtureList, params.kmin, params.kmaxCurr);
-    }else{
+    } else {
       overallFit = molState.getOverallFit(ed, params.mixtureList, params.kmin, params.kmaxCurr);
     }
   }
+
   logger.logMetadata(argv[16], params);
+
+  // Initial outputs (write from molState directly — no extra big vector copies)
   std::string scatterNameInitial;
-  if(strcmp(argv[19], "True") == 0) {
-    scatterNameInitial = write_scatter(argv[12], improvementIndex, molState, ed, params.kmin, params.kmaxCurr,params.mixtureList, "initial");
-    }else{
-    scatterNameInitial = write_scatter_ChiSq(argv[12], improvementIndex, molState, ed, params.kmin, params.kmaxCurr,params.mixtureList, "initial");
-    }
-  std::string xyzNameInitial = write_molecules(argv[12], improvementIndex, moleculeStructures, "initial");
-   // log starting point
+  if (strcmp(argv[19], "True") == 0) {
+    scatterNameInitial = write_scatter(argv[12], improvementIndex, molState, ed, params.kmin, params.kmaxCurr, params.mixtureList, "initial");
+  } else {
+    scatterNameInitial = write_scatter_ChiSq(argv[12], improvementIndex, molState, ed, params.kmin, params.kmaxCurr, params.mixtureList, "initial");
+  }
+  std::string xyzNameInitial = write_molecules(argv[12], improvementIndex, molState, "initial");
+
   logger.logEntry(0, 0, overallFit.first, molState.getWrithePenalty(), molState.getOverlapPenalty(),
                   molState.getDistanceConstraints(), params.kmaxCurr, scatterNameInitial, xyzNameInitial, molState.C2);
   logger.consoleInitial(overallFit.first, molState.getWrithePenalty(), molState.getOverlapPenalty(), molState.getDistanceConstraints());
-  /* Main algorithm */
 
-  // numberOfChainsInEachStructure vector tells us how many chains are in each structure
-  // e.g. for a monomer/dimer mixture numberOfChainsInEachStructure[0]=1, numberOfChainsInEachStructure[1]=2.
-  std::vector<int> numberOfChainsInEachStructure = findNumberSections(moleculeStructures);
+  // numberOfChainsInEachStructure
+  const std::vector<int> numberOfChainsInEachStructure = findNumberSections(molState.getMolecule());
 
-  /* initialise the set of historical states - currently basic, but used to save previous fit stages */
+  /* historical states */
   std::vector<moleculeFitAndState> molStateSet = makeHistoricalStateSet(molState, params);
 
-  // loop number
   int fitStep = 0;
 
-  // This is a monster while loop - strap in chaps
   while (fitStep < params.noScatterFitSteps) {
-    // Increasing the kmax if we have a good enough fit, consider a little more of the experimental data!
 
-//    if (overallFit.second < 0.0002 || (params.improvementIndexTest > std::round(params.noScatterFitSteps / 5) && overallFit.second < 0.0007)) {
-
-      if (overallFit.second < 0.0002) {
-
+    if (overallFit.second < 0.0002) {
       increaseKmax(overallFit, molStateSet, ed, params, logger);
     }
 
-    params.improvementIndexTest = params.improvementIndexTest + 1;
+    params.improvementIndexTest += 1;
 
-    // pick a 'random' molState from the historical molStateSet
-    // to become update function
+    // pick a historical state without copying the whole object
     int historicFitIndex = rng.getChangeIndexProbability(fitStep, params);
-    molState = molStateSet[historicFitIndex];
-    moleculeStructures = molState.getMolecule();
-    //overallFit = molState.getFit();
+    std::swap(molState, molStateSet[historicFitIndex]);
 
-    for (int structureIndex = 0; structureIndex < moleculeStructures.size(); structureIndex++) {
+    // Alias the current working molecule vector inside molState (no copy).
+    auto& molecules = const_cast<std::vector<ktlMolecule>&>(molState.getMolecule());
+
+    for (int structureIndex = 0; structureIndex < static_cast<int>(molecules.size()); ++structureIndex) {
       int netIndex = 0;
 
-      // loop over the sections of the given molecule (i.e. if its a monomer this loop is tivial, but not for a multimer
-      // another monster looooooop
-      for (int chainNumber = 1; chainNumber <= numberOfChainsInEachStructure[structureIndex]; chainNumber++) {
+      for (int chainNumber = 1; chainNumber <= numberOfChainsInEachStructure[structureIndex]; ++chainNumber) {
 
         // Selected transformation option?
         if (params.affineTrans == true) {
-          ktlMolecule molCopyR = moleculeStructures[structureIndex];
+          ktlMolecule molCopyR = molecules[structureIndex]; // copy only this sub-structure
 
           double angle = rng.getRotAng();
           double theta = rng.getTheAng();
-          double phi = rng.getPhiAng();
+          double phi   = rng.getPhiAng();
           point kv(std::sin(theta) * std::cos(phi), std::sin(theta) * std::sin(phi), std::cos(theta));
 
-          double xtran = rng.getDistTran();
-          double ytran = rng.getDistTran();
-          double ztran = rng.getDistTran();
-          point tranVec(xtran, ytran, ztran);
+          point tranVec(rng.getDistTran(), rng.getDistTran(), rng.getDistTran());
 
           molCopyR.changeMoleculeMultiRotate(angle, kv, chainNumber, tranVec);
-          bool cacaDist= molCopyR.checkCalphas(chainNumber,moleculeStructures[structureIndex]);
+          bool cacaDist = molCopyR.checkCalphas(chainNumber, molecules[structureIndex]);
           if (cacaDist == false) {
 
-            // calculate the new fit for this
+            // evaluate by copying the state (cheapest safe way with current API)
             moleculeFitAndState newMolState = molState;
             std::pair<double, double> newOverallFit;
             if ((strcmp(argv[19], "True") == 0)) {
-            newOverallFit = newMolState.getOverallFitForceConnection_ChiSq(ed, params.mixtureList, molCopyR, params.kmin, params.kmaxCurr, structureIndex);
-            }else{
+              newOverallFit = newMolState.getOverallFitForceConnection_ChiSq(ed, params.mixtureList, molCopyR, params.kmin, params.kmaxCurr, structureIndex);
+            } else {
               newOverallFit = newMolState.getOverallFitForceConnection(ed, params.mixtureList, molCopyR, params.kmin, params.kmaxCurr, structureIndex);
             }
+
             double uProb = rng.getDistributionR();
             if (checkTransition(newOverallFit.first, overallFit.first, uProb, fitStep, params.noScatterFitSteps)) {
               improvementIndex++;
-               if ((strcmp(argv[19], "True") == 0)) {
-                updateAndLog_ChiSq(improvementIndex, moleculeStructures, molCopyR, molState, newMolState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
-              }else{
-                updateAndLog(improvementIndex, moleculeStructures, molCopyR, molState, newMolState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
+              if ((strcmp(argv[19], "True") == 0)) {
+                updateAndLog_ChiSq(improvementIndex, molCopyR, molState, newMolState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
+              } else {
+                updateAndLog(improvementIndex, molCopyR, molState, newMolState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
               }
               logger.consoleChange("fitImprove", params);
               if ((strcmp(argv[19], "True") == 0)) {
-	         molState.updateScatteringFit_ChiSq(ed,params.mixtureList,params.kmin, params.kmaxCurr);
-               }else{
-                 molState.updateScatteringFit(ed,params.mixtureList,params.kmin, params.kmaxCurr);
-               }    
-            }
-          }
-        } // rotate/translate section ends
-
-        // net index tells us how far we are through the whole molecule
-        if (chainNumber > 1) {
-          netIndex = netIndex + moleculeStructures[structureIndex].getSubsecSize(chainNumber - 1);
-        }
-
-        bool doAll = false;
-
-        // Now loop over the secondary structures of the given unit or section
-        for (int secondarySectionIndex = 0; secondarySectionIndex < moleculeStructures[structureIndex].getSubsecSize(chainNumber) - 1; secondarySectionIndex++) {
-
-          int totalIndex = netIndex + secondarySectionIndex;
-          // in this if statement we check which secondary sections are being changed
-          if ((doAll == true) || (std::find(vary_sec_list_list[structureIndex].begin(), vary_sec_list_list[structureIndex].end(), totalIndex) != vary_sec_list_list[structureIndex].end())) {
-            int indexCh = totalIndex - netIndex;
-            ktlMolecule newMol = moleculeStructures[structureIndex];
-            bool cacaDist = modifyMolecule(newMol, moleculeStructures[structureIndex], indexCh, chainNumber);
-	    cacaDist= newMol.checkCalphas(chainNumber,moleculeStructures[structureIndex]);
-            if (cacaDist == false) {
-
-              moleculeFitAndState newmolState = molState;
-
-              // calculate the fitting of changed molecule
-              std::pair<double, double> newOverallFit;
-              if ((strcmp(argv[19], "True") == 0)) {
-               newOverallFit= newmolState.getOverallFit_ChiSq(ed, params.mixtureList, newMol, params.kmin, params.kmaxCurr, structureIndex);
-               }else{
-		newOverallFit= newmolState.getOverallFit(ed, params.mixtureList, newMol, params.kmin, params.kmaxCurr, structureIndex);
-               }
-	      //std::cout<<"improve ever ? "<<indexCh<<" "<<newOverallFit.second<<" "<<newOverallFit.first<<" "<<overallFit.first<<"\n";
-              double uProb = rng.getDistributionR();
-              if (checkTransition(newOverallFit.first, overallFit.first, uProb, fitStep, params.noScatterFitSteps)) {
-
-                // Success! Add to the update index
-                improvementIndex++;
-                if ((strcmp(argv[19], "True") == 0)) {
-                  updateAndLog_ChiSq(improvementIndex, moleculeStructures, newMol, molState, newmolState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
-                  }else{
-                    updateAndLog(improvementIndex, moleculeStructures, newMol, molState, newmolState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
-                  }
-                logger.consoleChange("fitImprove", params);
-                if ((strcmp(argv[19], "True") == 0)) {
-		   molState.updateScatteringFit_ChiSq(ed, params.mixtureList, params.kmin, params.kmaxCurr);     
-                }else{
-                   molState.updateScatteringFit(ed, params.mixtureList, params.kmin, params.kmaxCurr); 
-                }
-		// std::cout << "Hydration density parameter C2: " << newmolState.C2 << " \n";
-
+                molState.updateScatteringFit_ChiSq(ed, params.mixtureList, params.kmin, params.kmaxCurr);
+              } else {
+                molState.updateScatteringFit(ed, params.mixtureList, params.kmin, params.kmaxCurr);
               }
             }
+          }
+        } // affine
 
-          } // totalIndex an allowed varying section?
+        if (chainNumber > 1) {
+          netIndex += molecules[structureIndex].getSubsecSize(chainNumber - 1);
+        }
 
-        } // structureIndex
-      } // chainNumber
-    } // structureIndex
+        const bool doAll = false;
 
-    // Assign the new 'improved' molecule state to the historical tracker
-    molStateSet[historicFitIndex] = molState;
-    molStateSet[historicFitIndex].updateMolecule(moleculeStructures);
+        for (int secondarySectionIndex = 0; secondarySectionIndex < molecules[structureIndex].getSubsecSize(chainNumber) - 1; ++secondarySectionIndex) {
+
+          int totalIndex = netIndex + secondarySectionIndex;
+
+          if ((doAll == true) ||
+              (std::find(vary_sec_list_list[structureIndex].begin(),
+                         vary_sec_list_list[structureIndex].end(),
+                         totalIndex) != vary_sec_list_list[structureIndex].end())) {
+
+            int indexCh = totalIndex - netIndex;
+            ktlMolecule newMol = molecules[structureIndex]; // copy only this sub-structure
+            bool cacaDist = modifyMolecule(newMol, molecules[structureIndex], indexCh, chainNumber);
+            cacaDist = newMol.checkCalphas(chainNumber, molecules[structureIndex]);
+
+            if (cacaDist == false) {
+              moleculeFitAndState newmolState = molState;
+              std::pair<double, double> newOverallFit;
+              if ((strcmp(argv[19], "True") == 0)) {
+                newOverallFit = newmolState.getOverallFit_ChiSq(ed, params.mixtureList, newMol, params.kmin, params.kmaxCurr, structureIndex);
+              } else {
+                newOverallFit = newmolState.getOverallFit(ed, params.mixtureList, newMol, params.kmin, params.kmaxCurr, structureIndex);
+              }
+
+              double uProb = rng.getDistributionR();
+              if (checkTransition(newOverallFit.first, overallFit.first, uProb, fitStep, params.noScatterFitSteps)) {
+                improvementIndex++;
+                if ((strcmp(argv[19], "True") == 0)) {
+                  updateAndLog_ChiSq(improvementIndex, newMol, molState, newmolState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
+                } else {
+                  updateAndLog(improvementIndex, newMol, molState, newmolState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
+                }
+                logger.consoleChange("fitImprove", params);
+                if ((strcmp(argv[19], "True") == 0)) {
+                  molState.updateScatteringFit_ChiSq(ed, params.mixtureList, params.kmin, params.kmaxCurr);
+                } else {
+                  molState.updateScatteringFit(ed, params.mixtureList, params.kmin, params.kmaxCurr);
+                }
+              }
+            }
+          }
+        } // secondarySectionIndex
+      }   // chainNumber
+    }     // structureIndex
+
+    // Put the (possibly updated) state back without copying
+    std::swap(molState, molStateSet[historicFitIndex]);
     sortVec(molStateSet);
 
-    // Print out to terminal window
     logger.consoleFitAttempt(fitStep, improvementIndex, params, overallFit.first, overallFit.second);
-
     fitStep++;
   }
 
   improvementIndex++;
 
-  std::string moleculeNameEnd = write_molecules(argv[12], improvementIndex, moleculeStructures, "end");
+  // final outputs (from current best working state in molStateSet[0] after sort)
+  // The best is at index 0 after sort; if desired, you can std::swap into molState first.
+  std::swap(molState, molStateSet[0]);
+
+  std::string moleculeNameEnd = write_molecules(argv[12], improvementIndex, molState, "end");
   std::string scatterNameEnd;
   if ((strcmp(argv[19], "True") == 0)) {
-    scatterNameEnd = write_scatter_ChiSq(argv[12], improvementIndex, molState, ed, params.kmin, params.kmaxCurr,params.mixtureList, "end");
-  }else{
-    scatterNameEnd = write_scatter(argv[12], improvementIndex, molState, ed, params.kmin, params.kmaxCurr,params.mixtureList, "end");
+    scatterNameEnd = write_scatter_ChiSq(argv[12], improvementIndex, molState, ed, params.kmin, params.kmaxCurr, params.mixtureList, "end");
+  } else {
+    scatterNameEnd = write_scatter(argv[12], improvementIndex, molState, ed, params.kmin, params.kmaxCurr, params.mixtureList, "end");
   }
   std::cout << "\n best overall mol name: " << moleculeNameEnd << "\n";
   std::cout << " overallFitBest fit: " << overallFit.first << "\n";

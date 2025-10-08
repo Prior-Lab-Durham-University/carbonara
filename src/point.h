@@ -1,48 +1,64 @@
 #ifndef PNT_H
 #define PNT_H
-#include<iostream>
-#include<fstream>
+
+#include <iostream>
+#include <fstream>
 #include <sstream>
 #include <string>
-#include <stdlib.h>
+#include <cstdlib>
 #include <cmath>
 #include <vector>
 
+class point {
+public:
+    point(double x, double y, double z);
+    point();
+    explicit point(const std::string& triplet);
 
-class point{
-      public:
-            point(double x,double y,double z);
-	    point();
-            point(std::string& triplet);
-            double getX();
-            double getY();
-            double getZ();
-            void setX(double xv);
-            void setY(double yv);
-            void setZ(double zv);
-            double length();
-            point sum(point& b);
-            point dif(point& b);
-            point cross(point& p2);
-	    double scalarTriple(point& p1,point& p2,point& p3);
-            bool checkEqual(point& p2);
-            void scalarMult(double a);
-	    double pairDist(point &p);
-            void normalise();
-	    void znormalise();
-	    void printPoint();
-            double dotprod(point& p2);
-	    bool isNonzero();
-	     //point operator+(point &p);
-	    point operator+(point p);
-	    // point operator-(point &p);
-	    point operator-(point p);
-	    point operator*(double d);
-	    point operator/(double d);
-	    // point operator*(double d);
-	    double eDist(point &p2);
-      private:
-            double X,Y,Z,norm;
+    // getters
+    double getX() const;
+    double getY() const;
+    double getZ() const;
+
+    // setters (mutating)
+    void setX(double xv);
+    void setY(double yv);
+    void setZ(double zv);
+
+    // geometry
+    double length() const;
+    point  sum(const point& b) const;
+    point  dif(const point& b) const;
+    point  cross(const point& p2) const;
+    double dotprod(const point& p2) const;
+    static double scalarTriple(const point& p1, const point& p2, const point& p3);
+
+    // comparisons / checks
+    bool   checkEqual(const point& p2) const;
+    bool   isNonzero() const;
+
+    // mutating ops
+    void   scalarMult(double a);
+    void   normalise();
+    void   znormalise();
+
+    // misc
+    void   printPoint() const;
+
+    // operators (non-mutating)
+    point  operator+(const point& p) const;
+    point  operator-(const point& p) const;
+    point  operator*(double d) const;
+    point  operator/(double d) const;
+
+    // distances
+    double eDist(const point& p2) const;
+
+    // NOTE: legacy: returns 0.0/1.0 like before (true => 1.0)
+    double pairDist(const point& p) const;
+
+private:
+    double X, Y, Z, norm;
 };
 
 #endif
