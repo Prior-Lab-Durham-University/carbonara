@@ -185,25 +185,30 @@ bool modifyMolecule(ktlMolecule& newMol, const ktlMolecule& existingMol, int ind
     return newMol.checkCalphas(section, const_cast<ktlMolecule&>(existingMol));
 }
 
+
 void updateAndLog(int& improvementIndex, const ktlMolecule& newMol,
                   moleculeFitAndState& molState, moleculeFitAndState& newMolState,
                   std::pair<double,double>& overallFit, const std::pair<double,double>& newOverallFit,
                   Logger& logger, int l, int k, experimentalData& ed, ModelParameters& params) {
 
-    // Update the internal molecules of the working state directly (no external big vector).
-    auto& molVec = const_cast<std::vector<ktlMolecule>&>(molState.getMolecule());
-    molVec[l] = newMol;
+    // 1) Adopt the accepted state (penalties, caches, etc.)
+    molState = newMolState;
 
-    molState = newMolState;      // adopt the updated penalties/distances
+    molState = newMolState;
+    molState.replaceMoleculeAt(l, newMol);
+
+
+    // 3) Commit the accepted fit
     overallFit = newOverallFit;
-    molState.updateMolecule(molVec); // sync internal molecules to be safe
 
+    // 4) Output
     std::string moleculeNameMain = write_molecules(params.basePath, improvementIndex, molState, "default");
-    std::string scatterNameMain  = write_scatter(params.basePath, improvementIndex, molState, ed, params.kmin, params.kmaxCurr, params.mixtureList);
+    std::string scatterNameMain  = write_scatter(params.basePath, improvementIndex, molState, ed,
+                                                 params.kmin, params.kmaxCurr, params.mixtureList);
 
-    logger.logEntry(improvementIndex, k, overallFit.first, molState.getWrithePenalty(), molState.getOverlapPenalty(),
-                    molState.getDistanceConstraints(), params.kmaxCurr, scatterNameMain, moleculeNameMain,
-                    molState.C2);
+    logger.logEntry(improvementIndex, k, overallFit.first, molState.getWrithePenalty(),
+                    molState.getOverlapPenalty(), molState.getDistanceConstraints(),
+                    params.kmaxCurr, scatterNameMain, moleculeNameMain, molState.C2);
 }
 
 void updateAndLog_ChiSq(int& improvementIndex, const ktlMolecule& newMol,
@@ -211,19 +216,21 @@ void updateAndLog_ChiSq(int& improvementIndex, const ktlMolecule& newMol,
                   std::pair<double,double>& overallFit, const std::pair<double,double>& newOverallFit,
                   Logger& logger, int l, int k, experimentalData& ed, ModelParameters& params) {
 
-    auto& molVec = const_cast<std::vector<ktlMolecule>&>(molState.getMolecule());
-    molVec[l] = newMol;
+    molState = newMolState;
 
     molState = newMolState;
+    molState.replaceMoleculeAt(l, newMol);
     overallFit = newOverallFit;
-    molState.updateMolecule(molVec);
+
+    overallFit = newOverallFit;
 
     std::string moleculeNameMain = write_molecules(params.basePath, improvementIndex, molState, "default");
-    std::string scatterNameMain  = write_scatter_ChiSq(params.basePath, improvementIndex, molState, ed, params.kmin, params.kmaxCurr, params.mixtureList);
+    std::string scatterNameMain  = write_scatter_ChiSq(params.basePath, improvementIndex, molState, ed,
+                                                       params.kmin, params.kmaxCurr, params.mixtureList);
 
-    logger.logEntry(improvementIndex, k, overallFit.first, molState.getWrithePenalty(), molState.getOverlapPenalty(),
-                    molState.getDistanceConstraints(), params.kmaxCurr, scatterNameMain, moleculeNameMain,
-                    molState.C2);
+    logger.logEntry(improvementIndex, k, overallFit.first, molState.getWrithePenalty(),
+                    molState.getOverlapPenalty(), molState.getDistanceConstraints(),
+                    params.kmaxCurr, scatterNameMain, moleculeNameMain, molState.C2);
 }
 
 std::string constructMoleculeName(const std::string& basePath, const std::string& /*prefix*/, const std::string& extension,

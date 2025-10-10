@@ -25,7 +25,7 @@ public:
   moleculeFitAndState& operator=(moleculeFitAndState&&) noexcept = default;
 
   // molecule access
-  const std::vector<ktlMolecule>& getMolecule() const { return mol; }
+  //const std::vector<ktlMolecule>& getMolecule() const { return mol; }
   void updateMolecule(const std::vector<ktlMolecule>& molNew);  // copy
   void updateMolecule(std::vector<ktlMolecule>&& molNew);        // move
 
@@ -73,6 +73,10 @@ public:
 
   // memory hygiene (optional)
   void shrink_temporaries();
+  void replaceMoleculeAt(int idx, const ktlMolecule& m) {
+    if (idx >= 0 && idx < (int)mol.size()) mol[idx] = m;
+  };
+  const std::vector<ktlMolecule>& getMolecule() const { return mol; }; // keep const
 
 private:
   // cached per-molecule info

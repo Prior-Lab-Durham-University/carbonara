@@ -296,7 +296,7 @@ std::pair<double,double> moleculeFitAndState::getOverallFitForceConnection_ChiSq
 
 std::pair<double,double> moleculeFitAndState::getOverallFit(experimentalData& ed, std::vector<std::vector<double>>& mixtureList, ktlMolecule& molNew, double& kmin, double& kmax, int i) {
   calculateMoleculeDistances(molNew, i);
-  double scatter = ed.calculateChiSquaredUpdate(molNew, i, kmin, kmax, mixtureList);
+  double scatter = ed.calculateChiSquaredUpdate_FrozenGrid(molNew, i, kmin, kmax, mixtureList);
 
   const double overlapPenalty      = applyOverlapPenalty();
   const double distanceConstraints = applyDistanceConstraints(molNew, i);
@@ -307,22 +307,32 @@ std::pair<double,double> moleculeFitAndState::getOverallFit(experimentalData& ed
   return {curr, scatter};
 }
 
-std::pair<double,double> moleculeFitAndState::getOverallFit_ChiSq(experimentalData& ed, std::vector<std::vector<double>>& mixtureList, ktlMolecule& molNew, double& kmin, double& kmax, int i) {
+std::pair<double,double> moleculeFitAndState::getOverallFit_ChiSq(
+    experimentalData& ed, std::vector<std::vector<double>>& mixtureList,
+    ktlMolecule& molNew, double& kmin, double& kmax, int i)
+{
+  // keep your penalty cache updates:
   calculateMoleculeDistances(molNew, i);
-  double scatter = ed.calculateChiSquaredUpdate_Weighted(molNew, i, kmin, kmax, mixtureList);
-
-  const double overlapPenalty      = applyOverlapPenalty();
-  const double distanceConstraints = applyDistanceConstraints(molNew, i);
   alterWritheSet(molNew, i);
   applyWritheConstraint();
+
+  // *** NEW: proposal scatter on the same rebinning physics, sandboxed ***
+  // build a vector view: current mol with species i replaced by molNew
+  const auto& currMol = mol; // mol is your internal vector
+  double scatter = ed.scoreWeightedSandboxSingleReplace(currMol, i, molNew, kmin, kmax, mixtureList);
+
+  // penalties (unchanged)
+  const double overlapPenalty      = applyOverlapPenalty();
+  const double distanceConstraints = applyDistanceConstraints(molNew, i);
 
   const double curr = scatter + 100.0 * (overlapPenalty + distanceConstraints + writhePenalty);
   return {curr, scatter};
 }
 
+
 std::pair<double,double> moleculeFitAndState::getOverallFitForceConnection(experimentalData& ed, std::vector<std::vector<double>>& mixtureList, ktlMolecule& molNew, double& kmin, double& kmax, int i) {
   calculateMoleculeDistances(molNew, i);
-  double scatter = ed.calculateChiSquaredUpdate(molNew, i, kmin, kmax, mixtureList);
+  double scatter = ed.calculateChiSquaredUpdate_FrozenGrid(molNew, i, kmin, kmax, mixtureList);
 
   const double overlapPenalty      = applyOverlapPenalty();
   const double distanceConstraints = applyDistanceConstraints(molNew, i);
@@ -336,7 +346,7 @@ std::pair<double,double> moleculeFitAndState::getOverallFitForceConnection(exper
 
 std::pair<double,double> moleculeFitAndState::getOverallFitForceConnection_ChiSq(experimentalData& ed, std::vector<std::vector<double>>& mixtureList, ktlMolecule& molNew, double& kmin, double& kmax, int i) {
   calculateMoleculeDistances(molNew, i);
-  double scatter = ed.calculateChiSquaredUpdate_Weighted(molNew, i, kmin, kmax, mixtureList);
+  double scatter = ed.calculateChiSquaredUpdate_Weighted_FrozenGrid(molNew, i, kmin, kmax, mixtureList);
 
   const double overlapPenalty      = applyOverlapPenalty();
   const double distanceConstraints = applyDistanceConstraints(molNew, i);
@@ -357,22 +367,23 @@ void moleculeFitAndState::updateScatteringFit(experimentalData& ed, std::vector<
   std::cout << "double check baseLine " << dummyScatter << "\n";
 }
 
-void moleculeFitAndState::updateScatteringFit_ChiSq(experimentalData& ed, std::vector<std::vector<double>>& mixtureList, double& kmin, double& kmax) {
-  for (int i = 0; i < static_cast<int>(mol.size()); ++i) calculateMoleculeDistances(mol[i], i);
-  (void)ed.calculateChiSquared_Weighted(mol, kmin, kmax, mixtureList);
+void moleculeFitAndState::updateScatteringFit_ChiSq(
+    experimentalData& ed,
+    std::vector<std::vector<double>>& mixtureList,
+    double& kmin, double& kmax)
+{
+  // (Optional) keep your local caches (overlaps, etc.) up to date:
+  for (int i = 0; i < (int)mol.size(); ++i) calculateMoleculeDistances(mol[i], i);
+
+  // 1) Check on the SAME objective as proposal (sandboxed)
+  const double frozenCheck = ed.scoreWeightedSandbox(mol, kmin, kmax, mixtureList);
+  std::cout << "double check (same objective) " << frozenCheck << "\n";
+
+  // 2) Now COMMIT the new grid/caches for the next iteration
+  const double committed = ed.scoreWeightedCommit(mol, kmin, kmax, mixtureList);
+  (void)committed; // you can log this as the "new baseline" if you wish
 }
 
-// -----------------------------------------------------------------------------
-// beta sheet reward (unchanged math; minor cleanup)
-// -----------------------------------------------------------------------------
-double moleculeFitAndState::getBetaSheetReward() {
-  double sheetRewards = 0.0;
-  for (int i = 0; i < static_cast<int>(mol.size()); ++i) {
-    const double numSheets = mol[i].numBetaSheets;
-    sheetRewards += (numSheets > 0.0) ? (mol[i].getBetaSheetProximityReward() / numSheets) : 0.0;
-  }
-  return sheetRewards;
-}
 
 // -----------------------------------------------------------------------------
 // memory hygiene

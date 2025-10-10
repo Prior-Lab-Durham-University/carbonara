@@ -245,9 +245,9 @@ std::vector<std::vector<double> > experimentalData::calculate_distances(const st
                 distances[i][j] = 0.0;
             } else {
                 double dist = coordinates[i].eDist(coordinates[j]);
-                if (molIndex < static_cast<int>(maxDist.size())) {
-                    if(dist>maxDist[molIndex]) maxDist[molIndex] = dist;
-                }
+                if (molIndex >= 0 && static_cast<size_t>(molIndex) < maxDist.size()) {
+		  if (dist > maxDist[molIndex]) maxDist[molIndex] = dist;
+		}
                 distances[i][j] = dist;
                 distances[j][i] = dist;
             }
@@ -732,4 +732,193 @@ void experimentalData::writeScatteringToFile_ChiSq(std::vector<std::vector<doubl
     myfile << mixtureVals[best][i] << (i+1==mixtureVals[best].size() ? "\n" : " ");
   }
   myfile.close();
+}
+
+
+double experimentalData::calculateChiSquaredUpdate_FrozenGrid(const ktlMolecule& molNew, int k,
+                                                              double &qmin, double &qmax,
+                                                              const std::vector<std::vector<double>> &mixtureVals)
+{
+    // Keep these (used for the low-q centering threshold)
+    kMin = qmin; kMax = qmax;
+
+    // ---- Build local scattering centers WITHOUT touching ed state ----
+    // Avoid updating maxDist[...] by passing a sentinel index that fails the check.
+    int scratchMolIndex = -1;
+
+    // Flatten inputs
+    const auto coordsSections = molNew.getCoordinates();
+    const auto chainCoords    = flatten_coords(coordsSections);
+    const auto aminoList      = molNew.getAminoList();
+    const auto residues       = flatten_residueNames(aminoList);
+
+    // Local centers & intensity for the updated molecule only
+    ScatteringCenters sc_local = process_structure(chainCoords, residues, scratchMolIndex);
+    std::vector<double> I_local = calculate_saxs_implicit(sc_local);
+
+    // Interpolate this molecule onto the CURRENT, COMMITTED experimental grid.
+    // IMPORTANT: do NOT call setPhases here; just use exprQSubset as-is.
+    std::vector<double> I_onData_k = calculate_intensity_at_experimental_q(q, I_local, exprQSubset);
+
+    // We rely on the previously-committed experimental binning & centering.
+    // If exprIInterp is empty (e.g. first call didn’t build it), build it once without rebinning.
+    if (exprIInterp.empty()) {
+        exprIInterp = calculate_intensity_at_experimental_q(qvals, experimentalIntensity, exprQSubset);
+    }
+
+    // Size the combination vector to the current grid (not IvecOnData[0], which may be stale-sized)
+    const size_t N = exprQSubset.size();
+    std::vector<double> Icomb(N, 0.0);
+
+    // Combine mixtures using existing IvecOnData for j != k and local I_onData_k for j == k.
+    for (size_t row = 0; row < mixtureVals.size(); ++row) {
+        std::fill(Icomb.begin(), Icomb.end(), 0.0);
+
+        for (size_t j = 0; j < mixtureVals[row].size(); ++j) {
+            const double w = mixtureVals[row][j];
+
+            const std::vector<double> *src = nullptr;
+            if (static_cast<int>(j) == k) {
+                src = &I_onData_k;
+            } else if (j < IvecOnData.size()) {
+                src = &IvecOnData[j]; // committed, on the same grid after last full rebuild
+            }
+
+            if (src && !src->empty()) {
+                const size_t M = std::min(N, src->size()); // paranoia guard
+                for (size_t t = 0; t < M; ++t) Icomb[t] += (*src)[t] * w;
+            }
+        }
+
+        // Log-recentering vs experimental (same as your unweighted path)
+        double logDifMean = 0.0; int noMean = 0;
+        std::vector<double> logdifs; logdifs.reserve(N);
+        for (size_t t = 0; t < N; ++t) {
+            const double l = safe_log(Icomb[t]) - safe_log(exprIInterp[t]);
+            logdifs.push_back(l);
+            if (exprQSubset[t] < kMin + 0.01) { logDifMean += l; ++noMean; }
+        }
+        if (noMean > 0) logDifMean /= double(noMean);
+
+        double predTemp = 0.0;
+        for (size_t t = 0; t < N; ++t) {
+            const double d = logdifs[t] - logDifMean;
+            predTemp += d * d;
+        }
+
+        // Track best over mixture rows
+        // We return normalized chi-like value, as your full path does.
+        static thread_local double best = std::numeric_limits<double>::infinity();
+        if (row == 0) best = std::numeric_limits<double>::infinity();
+        if (predTemp < best) best = predTemp;
+        if (row + 1 == mixtureVals.size()) {
+            return best / std::max<size_t>(1, N - 1);
+        }
+    }
+    // Shouldn’t reach here
+    return std::numeric_limits<double>::infinity();
+}
+
+double experimentalData::calculateChiSquaredUpdate_Weighted_FrozenGrid(const ktlMolecule& molNew, int k,
+                                                                       double &qmin, double &qmax,
+                                                                       const std::vector<std::vector<double>> &mixtureVals)
+{
+    kMin = qmin; kMax = qmax;
+
+    int scratchMolIndex = -1;
+
+    const auto coordsSections = molNew.getCoordinates();
+    const auto chainCoords    = flatten_coords(coordsSections);
+    const auto aminoList      = molNew.getAminoList();
+    const auto residues       = flatten_residueNames(aminoList);
+
+    ScatteringCenters sc_local = process_structure(chainCoords, residues, scratchMolIndex);
+    std::vector<double> I_local = calculate_saxs_implicit(sc_local);
+    std::vector<double> I_onData_k = calculate_intensity_at_experimental_q(q, I_local, exprQSubset);
+
+    const size_t N = exprQSubset.size();
+    std::vector<double> Icomb(N, 0.0);
+
+    // Weighted path uses exprISubset/exprESubset (already subset to current grid by last full rebuild)
+    if (exprISubset.size() != N || exprESubset.size() != N) {
+        // If this ever trips, your program previously changed the grid without a full rebuild.
+        // Best effort: clamp to min size.
+    }
+
+    double best = std::numeric_limits<double>::infinity();
+
+    for (size_t row = 0; row < mixtureVals.size(); ++row) {
+        std::fill(Icomb.begin(), Icomb.end(), 0.0);
+
+        for (size_t j = 0; j < mixtureVals[row].size(); ++j) {
+            const double w = mixtureVals[row][j];
+            const std::vector<double> *src = nullptr;
+            if (static_cast<int>(j) == k) {
+                src = &I_onData_k;
+            } else if (j < IvecOnData.size()) {
+                src = &IvecOnData[j];
+            }
+            if (src && !src->empty()) {
+                const size_t M = std::min(N, src->size());
+                for (size_t t = 0; t < M; ++t) Icomb[t] += (*src)[t] * w;
+            }
+        }
+
+        // Low-q log centering → rescale model back to linear (as in your weighted code)
+        double logDifMean = 0.0; int noMean = 0;
+        for (size_t t = 0; t < N; ++t) {
+            const double l = safe_log(Icomb[t]) - safe_log(exprISubset[t]);
+            if (exprQSubset[t] < kMin + 0.075) { logDifMean += l; ++noMean; }
+        }
+        if (noMean > 0) logDifMean /= double(noMean);
+
+        for (size_t t = 0; t < N; ++t) {
+            Icomb[t] = std::exp(safe_log(Icomb[t]) - logDifMean);
+        }
+
+        // Classic chi^2 with errors
+        double chi = 0.0;
+        for (size_t t = 0; t < N; ++t) {
+            const double dif = Icomb[t] - exprISubset[t];
+            chi += dif * dif / (exprESubset[t] * exprESubset[t] + 1e-300);
+        }
+        chi = std::abs(chi / std::max<size_t>(1, N - 1) - 1.0);
+        best = std::min(best, chi);
+    }
+    return best;
+}
+
+double experimentalData::scoreWeightedSandbox(const std::vector<ktlMolecule>& mol,
+                                              double &kmin, double &kmax,
+                                              const std::vector<std::vector<double>>& mixtureVals)
+{
+  EDStateSnapshot snap = snapshot();
+  double chi = calculateChiSquared_Weighted(const_cast<std::vector<ktlMolecule>&>(mol),
+                                            kmin, kmax,
+                                            const_cast<std::vector<std::vector<double>>&>(mixtureVals));
+  restore(snap);
+  return chi;
+}
+
+double experimentalData::scoreWeightedCommit(const std::vector<ktlMolecule>& mol,
+                                             double &kmin, double &kmax,
+                                             const std::vector<std::vector<double>>& mixtureVals)
+{
+  // This is just the normal stateful path you already have:
+  return calculateChiSquared_Weighted(const_cast<std::vector<ktlMolecule>&>(mol),
+                                      kmin, kmax,
+                                      const_cast<std::vector<std::vector<double>>&>(mixtureVals));
+}
+
+double experimentalData::scoreWeightedSandboxSingleReplace(const std::vector<ktlMolecule>& current,
+                                                           int replaceIndex,
+                                                           const ktlMolecule& molNew,
+                                                           double &kmin, double &kmax,
+                                                           const std::vector<std::vector<double>>& mixtureVals)
+{
+  std::vector<ktlMolecule> molLike = current;   // shallow copy of handles; deep-enough for your API
+  if (replaceIndex >= 0 && replaceIndex < (int)molLike.size()) {
+    molLike[replaceIndex] = molNew;
+  }
+  return scoreWeightedSandbox(molLike, kmin, kmax, mixtureVals);
 }

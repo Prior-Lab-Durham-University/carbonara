@@ -97,9 +97,9 @@ int main(int argc, const char* argv[]) {
   // Initial outputs (write from molState directly — no extra big vector copies)
   std::string scatterNameInitial;
   if (strcmp(argv[19], "True") == 0) {
-    scatterNameInitial = write_scatter(argv[12], improvementIndex, molState, ed, params.kmin, params.kmaxCurr, params.mixtureList, "initial");
-  } else {
     scatterNameInitial = write_scatter_ChiSq(argv[12], improvementIndex, molState, ed, params.kmin, params.kmaxCurr, params.mixtureList, "initial");
+  } else {
+    scatterNameInitial = write_scatter(argv[12], improvementIndex, molState, ed, params.kmin, params.kmaxCurr, params.mixtureList, "initial");
   }
   std::string xyzNameInitial = write_molecules(argv[12], improvementIndex, molState, "initial");
 
@@ -214,6 +214,7 @@ int main(int argc, const char* argv[]) {
                 } else {
                   updateAndLog(improvementIndex, newMol, molState, newmolState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
                 }
+		 std::cout<<"here scatter is "<<newOverallFit.first<<"\n";
                 logger.consoleChange("fitImprove", params);
                 if ((strcmp(argv[19], "True") == 0)) {
                   molState.updateScatteringFit_ChiSq(ed, params.mixtureList, params.kmin, params.kmaxCurr);

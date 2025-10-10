@@ -66,6 +66,14 @@ class experimentalData{
   double calculateChiSquaredUpdate(ktlMolecule& molNew,int& k,double &qmin,double &qmax,std::vector<std::vector<double> > &mixtureVals);
   double calculateChiSquared_Weighted(std::vector<ktlMolecule> &mol,double &qmin,double &qmax,std::vector<std::vector<double> > &mixtureVals);
   double calculateChiSquaredUpdate_Weighted(ktlMolecule& molNew,int& k,double &qmin,double &qmax,std::vector<std::vector<double> > &mixtureVals);
+// New: frozen-grid, side-effect-free evaluators (do NOT call setPhases or mutate members)
+double calculateChiSquaredUpdate_FrozenGrid(const ktlMolecule& molNew, int k,
+                                            double &qmin, double &qmax,
+                                            const std::vector<std::vector<double>> &mixtureVals);
+
+double calculateChiSquaredUpdate_Weighted_FrozenGrid(const ktlMolecule& molNew, int k,
+                                                     double &qmin, double &qmax,
+                                                     const std::vector<std::vector<double>> &mixtureVals);
 
   // IO
   void writeScatteringToFile(std::vector<std::vector<double> > &mixtureVals,const char* filename);
@@ -79,6 +87,82 @@ class experimentalData{
   double calculateChiSquaredTest(std::vector<ktlMolecule> &mol,double &qmin,double &qmax,std::vector<std::vector<double> > &mixtureVals){
       return calculateChiSquared(mol,qmin,qmax,mixtureVals);
   }
+
+  // Stateless-as-seen-by-caller: does full rebinning but rolls state back.
+double scoreWeightedSandbox(const std::vector<ktlMolecule>& mol,
+                            double &kmin, double &kmax,
+                            const std::vector<std::vector<double>>& mixtureVals);
+
+// Same, but for convenience when you have one changed species:
+double scoreWeightedSandboxSingleReplace(const std::vector<ktlMolecule>& current,
+                                         int replaceIndex,
+                                         const ktlMolecule& molNew,
+                                         double &kmin, double &kmax,
+                                         const std::vector<std::vector<double>>& mixtureVals);
+
+// Commit version (updates internal bins/caches and keeps them)
+double scoreWeightedCommit(const std::vector<ktlMolecule>& mol,
+                           double &kmin, double &kmax,
+                           const std::vector<std::vector<double>>& mixtureVals);
+
+
+  struct EDStateSnapshot {
+  int noDistBins;
+  std::vector<double> qvals;
+  std::vector<double> experimentalIntensity;
+  std::vector<std::pair<double,double>> distBins;
+
+  // per-run containers that get mutated by calculateChiSquared_* paths
+  std::vector<ScatteringCenters> scs;
+  std::vector<std::vector<double>> Ivec;
+  std::vector<std::vector<double>> IvecOnData;
+  std::vector<double> exprIInterp;
+
+  std::vector<double> exprQSubset;
+  std::vector<double> exprISubset;
+  std::vector<double> exprESubset;
+
+  // If you ever mutate these in your scorer, include them too:
+  double kMin;
+  double kMax;
+};
+EDStateSnapshot snapshot() const {
+  EDStateSnapshot s;
+  s.noDistBins            = noDistBins;
+  s.qvals                 = qvals;
+  s.experimentalIntensity = experimentalIntensity;
+  s.distBins              = distBins;
+
+  s.scs        = scs;
+  s.Ivec       = Ivec;
+  s.IvecOnData = IvecOnData;
+  s.exprIInterp= exprIInterp;
+
+  s.exprQSubset= exprQSubset;
+  s.exprISubset= exprISubset;
+  s.exprESubset= exprESubset;
+
+  s.kMin = kMin; s.kMax = kMax;
+  return s;
+}
+
+void restore(const EDStateSnapshot& s) {
+  noDistBins            = s.noDistBins;
+  qvals                 = s.qvals;
+  experimentalIntensity = s.experimentalIntensity;
+  distBins              = s.distBins;
+
+  scs        = s.scs;
+  Ivec       = s.Ivec;
+  IvecOnData = s.IvecOnData;
+  exprIInterp= s.exprIInterp;
+
+  exprQSubset= s.exprQSubset;
+  exprISubset= s.exprISubset;
+  exprESubset= s.exprESubset;
+
+  kMin = s.kMin; kMax = s.kMax;
+}
 
 private:
   std::map<char, std::vector<double> > form_factors;
@@ -112,5 +196,7 @@ private:
   // model q grid (0.00 .. 0.20 by 0.01)
   std::vector<double> q;
 };
+
+
 
 #endif // EXP_DAT
