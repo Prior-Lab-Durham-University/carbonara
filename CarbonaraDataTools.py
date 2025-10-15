@@ -182,6 +182,126 @@ def extract_sequence_file(fingerprint_file):
 
 # > returning to PDB from Carbonara
 
+# --- Minimal patch: Carbonara_2_PDB that supports multiple chains ---
+
+import re
+import numpy as np
+import pandas as pd
+import biobox as bb  # assumes Matteo's biobox is installed
+
+def extract_coords_xyz_or_carbonara(coords_file):
+    """Read a 3-column XYZ-style coords file; ignore lines like 'End chain ...' (any case)."""
+    raw = []
+    with open(coords_file, "r") as f:
+        for ln in f:
+            if not ln.strip():
+                continue
+            if re.search(r'end\s+chain', ln, re.IGNORECASE):
+                continue
+            raw.append(ln.strip())
+    xyz = []
+    for ln in raw:
+        parts = ln.split()
+        if len(parts) < 3:
+            raise ValueError(f"Bad coordinate line (need 3 floats): {ln!r}")
+        x, y, z = map(float, parts[:3])
+        xyz.append((x, y, z))
+    return np.asarray(xyz, dtype=float)
+
+def Carbonara_2_PDB_multichain(coords_file, fp_file, output_file,
+                               segment_lengths, chain_ids=None):
+    """
+    Writes CA-only PDBs from Carbonara output with distinct chains.
+
+    coords_file   : 3-column XYZ coords; 'End chain ...' lines are allowed and ignored
+    fp_file       : Carbonara fingerprint (sequence); must match total length
+    output_file   : PDB to write
+    segment_lengths : list of ints, residues per chain (sum must equal #coords == len(seq))
+    chain_ids     : list like ['A','B','C',...]; defaults to 'A','B','C',... as needed
+    """
+    # --- read coords & sequence ---
+    coords = extract_coords_xyz_or_carbonara(coords_file)
+    size = coords.shape[0]
+
+    # you likely already have these helpers; keeping names from your code:
+    seq = extract_sequence_file(fp_file)  # returns 1-letter string
+    if len(seq) != size:
+        raise ValueError(f"Sequence length {len(seq)} != number of coordinates {size}")
+
+    if sum(segment_lengths) != size:
+        raise ValueError(f"sum(segment_lengths) {sum(segment_lengths)} != #coords {size}")
+
+    # --- chain ids ---
+    if chain_ids is None:
+        import string
+        letters = list(string.ascii_uppercase)
+        chain_ids = []
+        i = 0
+        while len(chain_ids) < len(segment_lengths):
+            if i < 26:
+                chain_ids.append(letters[i])
+            else:
+                n = i - 26
+                a, b = divmod(n, 26)
+                chain_ids.append(letters[a] + letters[b])  # AA, AB, ...
+            i += 1
+    if len(chain_ids) < len(segment_lengths):
+        raise ValueError("Not enough chain_ids for the given segment_lengths")
+
+    # --- 1-letter -> 3-letter ---
+    aa_map = {
+        'A':'ALA','C':'CYS','D':'ASP','E':'GLU','F':'PHE','G':'GLY','H':'HIS','I':'ILE',
+        'K':'LYS','L':'LEU','M':'MET','N':'ASN','P':'PRO','Q':'GLN','R':'ARG','S':'SER',
+        'T':'THR','V':'VAL','W':'TRP','Y':'TYR'
+    }
+    seq_3 = [aa_map[a] for a in seq]
+
+    # --- build per-residue chain labels and per-chain residue numbers ---
+    chains = []
+    resids = []
+    offset = 0
+    for L, cid in zip(segment_lengths, chain_ids):
+        chains.extend([cid] * L)
+        # per-chain residue numbers start at 1
+        resids.extend(list(range(1, L + 1)))
+        offset += L
+    chains = np.array(chains)
+    resids = np.array(resids, dtype=int)
+
+    # --- biobox molecule ---
+    df = pd.DataFrame({
+        'atom'     : ['ATOM'] * size,
+        'index'    : np.arange(1, size + 1),  # atom serial (1-based)
+        'name'     : ['CA'] * size,
+        'resname'  : seq_3,
+        'chain'    : chains,
+        'resid'    : resids,
+        'occupancy': [1.0] * size,
+        'beta'     : [50.0] * size,
+        'atomtype' : ['C'] * size,
+        'radius'   : [1.7] * size,
+        'charge'   : [0.0] * size,
+    })
+
+    molecule = bb.Molecule()
+    molecule.data = df
+    molecule.coordinates = np.expand_dims(coords, axis=0)  # (frames, atoms, 3)
+
+    # NOTE: many PDB readers infer chain breaks from chain ID changes;
+    # if you *need* explicit TER records, write directly instead of via biobox,
+    # or postprocess to insert TER lines. Most tools are fine with chain IDs.
+    molecule.write_pdb(output_file)
+
+# ---- example call (your case) ----
+# Carbonara_2_PDB_multichain(
+#     coords_file="mol1_sub_0_step_5_xyz.dat",
+#     fp_file="your_fingerprint.fp",
+#     output_file="mol1_sub_0_step_5_CA_chains_from_biobox.pdb",
+#     segment_lengths=[900, 900, 900, 900],
+#     chain_ids=list("ABCD"),
+# )
+
+
 def Carbonara_2_PDB(coords_file, fp_file, output_file):
 
     '''
