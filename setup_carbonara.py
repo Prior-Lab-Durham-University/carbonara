@@ -162,6 +162,9 @@ def main():
     parser.add_argument('--rotation', action='store_true', help='Apply affine rotations')
     #parser.add_argument('--errors', action='store_true', help='Use experimental erros in fitting protocol')
     parser.add_argument('--alphaFoldFlex', action='store_true', help='Use an alphaFold pae file to specify the flexibility of the molecule')
+    parser.add_argument('--breakUpLongLinkers', action='store_true', help='Replace long coil runs with periodic mini-helices (HHH)')
+
+    
     
     
     args = parser.parse_args()
@@ -223,6 +226,16 @@ def main():
             working_path=refine_dir
         )
 
+        if args.breakUpLongLinkers:
+            cdt.rewrite_fingerprint_with_min_helices(
+                os.path.join(refine_dir, "fingerPrint1.dat"),
+                min_coil=25,
+                spacing=8,
+                helix_len=3,
+                end_buffer=8,
+                fp_out=os.path.join(refine_dir, "fingerPrint1.dat"),
+            )
+    print("Applied --breakUpLongLinkers: inserted periodic 'HHH' islands into long coils.")
         # write mixture file - used for ensemble refinement, currently not used - writes 1 to mixture file
         mixture_file = cdt.write_mixture_file(working_path=refine_dir)
         
