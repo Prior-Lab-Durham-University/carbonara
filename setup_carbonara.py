@@ -235,7 +235,7 @@ def main():
                 end_buffer=8,
                 fp_out=os.path.join(refine_dir, "fingerPrint1.dat"),
             )
-    print("Applied --breakUpLongLinkers: inserted periodic 'HHH' islands into long coils.")
+            print("Applied --breakUpLongLinkers: inserted periodic 'HHH' islands into long coils.")
         # write mixture file - used for ensemble refinement, currently not used - writes 1 to mixture file
         mixture_file = cdt.write_mixture_file(working_path=refine_dir)
         
