@@ -2526,3 +2526,80 @@ def auto_select_varying_linker(coords_file, fingerprint_file):
 
     return varying_linker_indices
 
+import re
+import os
+
+def _insert_min_helices_into_coil(ss: str,
+                                  min_coil: int = 30,
+                                  spacing: int = 20,
+                                  helix_len: int = 3,
+                                  end_buffer: int = 6) -> str:
+    """
+    In any run of '-' of length >= min_coil, insert 'H'*helix_len every `spacing`
+    residues, staying at least `end_buffer` away from the run's ends.
+    Returns a new SS string of the same length + (#insertions * (helix_len - replaced_len)),
+    but because we REPLACE positions (not insert extra residues), total length is preserved.
+    We replace the positions that would have been coil with 'H'.
+    """
+    ss_list = list(ss)
+    for m in re.finditer(r'-+', ss):
+        start, end = m.start(), m.end()
+        run_len = end - start
+        if run_len < min_coil:
+            continue
+
+        # safe window inside the coil
+        inner_start = start + end_buffer
+        inner_end   = end   - end_buffer
+        if inner_end - inner_start < helix_len:
+            continue
+
+        # place helix centers every `spacing` in the inner region
+        p = inner_start
+        while p + helix_len <= inner_end:
+            # paint HHH over coil
+            for k in range(helix_len):
+                ss_list[p + k] = 'H'
+            p += spacing
+
+    return ''.join(ss_list)
+
+def rewrite_fingerprint_with_min_helices(fp_in: str,
+                                         fp_out: str = None,
+                                         *,
+                                         min_coil: int = 30,
+                                         spacing: int = 20,
+                                         helix_len: int = 3,
+                                         end_buffer: int = 6):
+    """
+    Read Carbonara fingerprint (sequence/SS per chain), replace long coil runs
+    with periodic minimal helices, and write a new fingerprint.
+    """
+    # Parse exactly like CDT.parse_structures_with_segments does
+    with open(fp_in, 'r') as f:
+        raw = [ln.strip() for ln in f if ln.strip()]
+
+    n = int(raw[0])
+    sequences = raw[1::2]
+    structures = raw[2::2]
+
+    new_structs = [
+        _insert_min_helices_into_coil(ss, min_coil, spacing, helix_len, end_buffer)
+        for ss in structures
+    ]
+
+    if fp_out is None:
+        root, ext = os.path.splitext(fp_in)
+        fp_out = root + "_withMinHelix" + (ext if ext else ".dat")
+
+    # Write back in Carbonara format (matches write_fingerprint_file)
+    with open(fp_out, 'w') as f:
+        f.write(str(n))
+        for seq, ss_new in zip(sequences, new_structs):
+            f.write("\n \n")
+            f.write(seq)
+            f.write("\n \n")
+            f.write(ss_new)
+
+    return fp_out
+
