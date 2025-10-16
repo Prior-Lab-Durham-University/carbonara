@@ -61,7 +61,7 @@ experimentalData::experimentalData(const char* scatterFile){
 
   // model q grid (0.00 .. 0.20 step 0.01)
   q.clear();
-  for (int i = 0; i <= 20; i++) { q.push_back(0.01 * i); }
+  for (int i = 0; i <= 19; i++) { q.push_back(0.2/19.0 * i); }
 }
 
 void experimentalData::calculate_spline_coefficients(const std::vector<double>& x, const std::vector<double>& y,
