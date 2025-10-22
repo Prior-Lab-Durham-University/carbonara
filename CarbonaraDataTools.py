@@ -602,23 +602,59 @@ def find_missing_residues(resIDs):
 
     return np.asarray( missing_residues )
 
+def get_residue_map():
+    # Canonical three-letter to one-letter
+    base = {
+        "ALA":"A","ARG":"R","ASN":"N","ASP":"D","CYS":"C","GLN":"Q","GLU":"E",
+        "GLY":"G","HIS":"H","ILE":"I","LEU":"L","LYS":"K","MET":"M","PHE":"F",
+        "PRO":"P","SER":"S","THR":"T","TRP":"W","TYR":"Y","VAL":"V",
+        # Rare canonical
+        "SEC":"U","PYL":"O",
+        # Ambiguity codes (keep if you want IUPAC; else map to X)
+        "ASX":"B",  # Asn/Asp
+        "GLX":"Z",  # Gln/Glu
+        "XLE":"J",  # Leu/Ile
+        "UNK":"X"
+    }
 
-def get_residue_map(direction='321'):
-    
-    aa_names = {
-                'A': 'ALA', 'C': 'CYS', 'D': 'ASP', 'E': 'GLU',
-                'F': 'PHE', 'G': 'GLY', 'H': 'HIS', 'I': 'ILE',
-                'K': 'LYS', 'L': 'LEU', 'M': 'MET', 'N': 'ASN',
-                'P': 'PRO', 'Q': 'GLN', 'R': 'ARG', 'S': 'SER',
-                'T': 'THR', 'V': 'VAL', 'W': 'TRP', 'Y': 'TYR'
-                }
+    # Common protonation/alt-names
+    variants = {
+        "HID":"H","HIE":"H","HIP":"H","HSD":"H","HSE":"H","HSP":"H",
+        "CYX":"C","CYM":"C",     # disulfide-bonded / deprotonated Cys
+        "MSE":"M","FME":"M","MHO":"M",  # selenomethionine, N-formyl-Met, Met sulfoxide
+        "MLY":"K","M3L":"K","M2L":"K",  # methyl-lysines → Lys
+        "MLZ":"K",
+        "HYP":"P",               # hydroxyproline
+        # Common phosphorylations → parent AA (strip PTM for sequence)
+        "SEP":"S","TPO":"T","PTR":"Y",
+        # Cys mods often seen in PDBs
+        "CME":"C","CSO":"C","CSS":"C","SCY":"C","SMC":"C","OCS":"C",
+        # Other frequent small mods
+        "ALY":"K","ORN":"A",     # ornithine → (often mapped to K or X; choose to A/K/X as you prefer)
+        "DPR":"P","DAR":"R","DLY":"K","DVA":"V","DLE":"L","DTH":"T","DPN":"F"  # D-forms → parent
+    }
 
-    names_aa = {y: x for x, y in aa_names.items()}
+    # Merge (prefer explicit variants over base if collisions)
+    mapping = {**base, **variants}
+    # Uppercase keys for safety
+    return {k.upper(): v for k, v in mapping.items()}
 
-    if direction == '123':
-        return aa_names
-    else:
-        return names_aa
+#def get_residue_map(direction='321'):
+#    
+#   aa_names = {
+#                'A': 'ALA', 'C': 'CYS', 'D': 'ASP', 'E': 'GLU',
+#                'F': 'PHE', 'G': 'GLY', 'H': 'HIS', 'I': 'ILE',
+#                'K': 'LYS', 'L': 'LEU', 'M': 'MET', 'N': 'ASN',
+#                'P': 'PRO', 'Q': 'GLN', 'R': 'ARG', 'S': 'SER',
+#                'T': 'THR', 'V': 'VAL', 'W': 'TRP', 'Y': 'TYR'
+#                }
+#
+#    names_aa = {y: x for x, y in aa_names.items()}
+#
+#   if direction == '123':
+#        return aa_names
+#    else:
+#        return names_aa
 
 
 
