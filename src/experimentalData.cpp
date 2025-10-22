@@ -64,8 +64,8 @@ experimentalData::experimentalData(const char* scatterFile){
     
     // set up "idealised q values for Josh's coefficients (to change maybe)"
 
-    for (int i = 0; i <= 20; i++) {
-        q.push_back(0.01 * i);
+    for (int i = 0; i < 20; i++) {
+        q.push_back(0.2/19.0 * i);
     }
     
 }
