@@ -446,9 +446,14 @@ def pull_structure_from_pdb(file_path):
         seq = []
 
         for res in residues:
+            if not res.is_protein:
+                continue  # skip waters/ligands/ions
             resids.append(res.resSeq)
-            seq.append(three_to_one.get(res.name, 'X'))
 
+            resname = res.name.upper().strip()
+            seq.append(three_to_one.get(resname, 'X'))
+
+    # CA index (skip if missing, e.g., unresolved residues)
             for atom in res.atoms:
                 if atom.name == 'CA':
                     ca_atoms_indices.append(atom.index)
