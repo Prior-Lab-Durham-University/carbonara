@@ -958,6 +958,7 @@ void experimentalData::writeScatteringToFile_ChiSq(std::vector<std::vector<doubl
     if(predTemp<pred){
       pred = predTemp;
       IcombBest= Imodel;
+	  best = i;	
     }
   }
   // write to file
