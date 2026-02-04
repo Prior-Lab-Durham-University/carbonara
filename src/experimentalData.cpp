@@ -577,7 +577,7 @@ std::vector<double> experimentalData::calculate_intensity_at_experimental_q(std:
      std::vector<double> Icomb(IvecOnData[0].size(),0.0);
      for(int j =0;j<mixtureVals[i].size();j++){
        for(int k =0;k<IvecOnData[j].size();k++){
-	 Icomb[k] = IvecOnData[j][k]*mixtureVals[i][j];
+	 Icomb[k] = Icomb[k] + IvecOnData[j][k]*mixtureVals[i][j];
        }
      }
      // calculate the "chi squared fit" first calculae all the distances and work out the scale factor
@@ -644,7 +644,7 @@ double experimentalData::calculateChiSquaredUpdate(ktlMolecule& molNew,int& k,do
      std::vector<double> Icomb(IvecOnData[0].size(),0.0);
      for(int j =0;j<mixtureVals[i].size();j++){
        for(int k =0;k<IvecOnData[j].size();k++){
-	 Icomb[k] = IvecOnData[j][k]*mixtureVals[i][j];
+	 Icomb[k] =  Icomb[k] +  IvecOnData[j][k]*mixtureVals[i][j];
        }
      }
      // calculate the "chi squared fit" first calculae all the distances and work out the scale factor
@@ -686,7 +686,7 @@ void experimentalData::writeScatteringToFile(std::vector<std::vector<double> > &
     std::vector<double> Icomb(IvecOnData[0].size(),0.0);
     for(int j =0;j<mixtureVals[i].size();j++){
       for(int k =0;k<IvecOnData[j].size();k++){
-	Icomb[k] = IvecOnData[j][k]*mixtureVals[i][j];
+	Icomb[k] =  Icomb[k] + IvecOnData[j][k]*mixtureVals[i][j];
       }
     }
      // calculate the "chi squared fit" first calculae all the distances and work out the scale factor
@@ -793,7 +793,7 @@ std::vector<double> experimentalData::calculate_intensity_at_experimental_q(std:
      std::vector<double> Icomb(IvecOnData[0].size(),0.0);
      for(int j =0;j<mixtureVals[i].size();j++){
        for(int k =0;k<IvecOnData[j].size();k++){
-	 Icomb[k] = IvecOnData[j][k]*mixtureVals[i][j];
+	 Icomb[k] =  Icomb[k] + IvecOnData[j][k]*mixtureVals[i][j];
        }
      }
      // calculate the "chi squared fit" first calculae all the distances and work out the scale factor
@@ -867,7 +867,7 @@ double experimentalData::calculateChiSquaredUpdate_Weighted(ktlMolecule& molNew,
      std::vector<double> Icomb(IvecOnData[0].size(),0.0);
      for(int j =0;j<mixtureVals[i].size();j++){
        for(int k =0;k<IvecOnData[j].size();k++){
-	 Icomb[k] = IvecOnData[j][k]*mixtureVals[i][j];
+	 Icomb[k] =  Icomb[k] + IvecOnData[j][k]*mixtureVals[i][j];
        }
      }
      // calculate the "chi squared fit" first calculae all the distances and work out the scale factor
@@ -923,7 +923,7 @@ void experimentalData::writeScatteringToFile_ChiSq(std::vector<std::vector<doubl
     std::vector<double> Icomb(IvecOnData[0].size(),0.0);
     for(int j =0;j<mixtureVals[i].size();j++){
       for(int k =0;k<IvecOnData[j].size();k++){
-	Icomb[k] = IvecOnData[j][k]*mixtureVals[i][j];
+	Icomb[k] =  Icomb[k] + IvecOnData[j][k]*mixtureVals[i][j];
       }
     }
      double logDifMean=0;
