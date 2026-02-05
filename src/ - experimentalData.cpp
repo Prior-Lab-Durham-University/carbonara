@@ -946,8 +946,7 @@ void experimentalData::writeScatteringToFile_ChiSq(std::vector<std::vector<doubl
      }
      // now (spline interpolate)
      std::vector<double> Imodel = Icomb;
-    // finally calculate the "chi squared value "
-    pred=100000.0;
+    // finally calculate the "chi squared value 
     double predTemp =0.0;
     for(int l =0;l<exprQSubset.size();l++){
       double scatInterp = Imodel[l];
