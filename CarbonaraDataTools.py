@@ -446,14 +446,9 @@ def pull_structure_from_pdb(file_path):
         seq = []
 
         for res in residues:
-            if not res.is_protein:
-                continue  # skip waters/ligands/ions
             resids.append(res.resSeq)
+            seq.append(three_to_one.get(res.name, 'X'))
 
-            resname = res.name.upper().strip()
-            seq.append(three_to_one.get(resname, 'X'))
-
-    # CA index (skip if missing, e.g., unresolved residues)
             for atom in res.atoms:
                 if atom.name == 'CA':
                     ca_atoms_indices.append(atom.index)
@@ -602,59 +597,23 @@ def find_missing_residues(resIDs):
 
     return np.asarray( missing_residues )
 
-def get_residue_map():
-    # Canonical three-letter to one-letter
-    base = {
-        "ALA":"A","ARG":"R","ASN":"N","ASP":"D","CYS":"C","GLN":"Q","GLU":"E",
-        "GLY":"G","HIS":"H","ILE":"I","LEU":"L","LYS":"K","MET":"M","PHE":"F",
-        "PRO":"P","SER":"S","THR":"T","TRP":"W","TYR":"Y","VAL":"V",
-        # Rare canonical
-        "SEC":"U","PYL":"O",
-        # Ambiguity codes (keep if you want IUPAC; else map to X)
-        "ASX":"B",  # Asn/Asp
-        "GLX":"Z",  # Gln/Glu
-        "XLE":"J",  # Leu/Ile
-        "UNK":"X"
-    }
 
-    # Common protonation/alt-names
-    variants = {
-        "HID":"H","HIE":"H","HIP":"H","HSD":"H","HSE":"H","HSP":"H",
-        "CYX":"C","CYM":"C",     # disulfide-bonded / deprotonated Cys
-        "MSE":"M","FME":"M","MHO":"M",  # selenomethionine, N-formyl-Met, Met sulfoxide
-        "MLY":"K","M3L":"K","M2L":"K",  # methyl-lysines → Lys
-        "MLZ":"K",
-        "HYP":"P",               # hydroxyproline
-        # Common phosphorylations → parent AA (strip PTM for sequence)
-        "SEP":"S","TPO":"T","PTR":"Y",
-        # Cys mods often seen in PDBs
-        "CME":"C","CSO":"C","CSS":"C","SCY":"C","SMC":"C","OCS":"C",
-        # Other frequent small mods
-        "ALY":"K","ORN":"A",     # ornithine → (often mapped to K or X; choose to A/K/X as you prefer)
-        "DPR":"P","DAR":"R","DLY":"K","DVA":"V","DLE":"L","DTH":"T","DPN":"F"  # D-forms → parent
-    }
+def get_residue_map(direction='321'):
+    
+    aa_names = {
+                'A': 'ALA', 'C': 'CYS', 'D': 'ASP', 'E': 'GLU',
+                'F': 'PHE', 'G': 'GLY', 'H': 'HIS', 'I': 'ILE',
+                'K': 'LYS', 'L': 'LEU', 'M': 'MET', 'N': 'ASN',
+                'P': 'PRO', 'Q': 'GLN', 'R': 'ARG', 'S': 'SER',
+                'T': 'THR', 'V': 'VAL', 'W': 'TRP', 'Y': 'TYR'
+                }
 
-    # Merge (prefer explicit variants over base if collisions)
-    mapping = {**base, **variants}
-    # Uppercase keys for safety
-    return {k.upper(): v for k, v in mapping.items()}
+    names_aa = {y: x for x, y in aa_names.items()}
 
-#def get_residue_map(direction='321'):
-#    
-#   aa_names = {
-#                'A': 'ALA', 'C': 'CYS', 'D': 'ASP', 'E': 'GLU',
-#                'F': 'PHE', 'G': 'GLY', 'H': 'HIS', 'I': 'ILE',
-#                'K': 'LYS', 'L': 'LEU', 'M': 'MET', 'N': 'ASN',
-#                'P': 'PRO', 'Q': 'GLN', 'R': 'ARG', 'S': 'SER',
-#                'T': 'THR', 'V': 'VAL', 'W': 'TRP', 'Y': 'TYR'
-#                }
-#
-#    names_aa = {y: x for x, y in aa_names.items()}
-#
-#   if direction == '123':
-#        return aa_names
-#    else:
-#        return names_aa
+    if direction == '123':
+        return aa_names
+    else:
+        return names_aa
 
 
 
@@ -1671,11 +1630,17 @@ def translate_distance_constraints(contactPredsIn,coords,working_path,fixedDistL
         # now write to file
     np.savetxt(working_path+"/fixedDistanceConstraints1.dat",contactPredNara,fmt="%i %i %i %i %1.10f %1.10f")
 
-def get_secondary(fingerprint_file):
-    fplst=np.loadtxt(fingerprint_file, str)
-    fplstout= [np.asarray(list(fplst[i])) for i in range(2,len(fplst),2)]
-    return fplstout
 
+def get_secondary(fingerprint_file):
+    # Read as plain text; stable across all NumPy versions
+    with open(fingerprint_file, "r") as f:
+        # Drop empty / whitespace-only lines (these are what break np.loadtxt)
+        fplst = [ln.strip() for ln in f if ln.strip() != ""]
+    print("new read")
+    # Now fplst is a simple Python list of lines, always iterable
+    # Preserve your original indexing logic: 2,4,6,... (0-based)
+    fplstout = [np.asarray(list(fplst[i])) for i in range(2, len(fplst), 2)]
+    return fplstout
 
 def flatten_extend(matrix):
      flat_list = []
@@ -1856,7 +1821,7 @@ def load_pae_matrix(json_path):
     # Convert the matrix to a NumPy array and return
     return np.array(matrix)
 
-def getFlexibleSections(file_path,pae_threshold = 1.0):
+def getFlexibleSections(file_path,pae_threshold = 1.5):
     pae_data = load_pae_matrix(file_path)
     if len(pae_data)==0:
         print("No 'pae' data found in the JSON file.")
@@ -1868,6 +1833,7 @@ def getFlexibleSections(file_path,pae_threshold = 1.0):
         for i in range(len(pae_array) - window_size + 1):
             window = pae_array[i:i + window_size, i:i + window_size]
             avg_pae = np.mean(window)
+            print(avg_pae)
             if avg_pae > pae_threshold:
                 #print(f"Residue range {i}-{i + window_size} exceeds threshold with avg PAE {avg_pae}")
                 high_pae_residues.extend(range(i, i + window_size))
@@ -1901,7 +1867,112 @@ def getFlexibleSections(file_path,pae_threshold = 1.0):
         plt.show()
         return np.array([1 if i in high_pae_residues else 0 for i in range(len(pae_array))])
 
-from typing import List, Set
+
+import numpy as np
+
+def getFlexibleSections(file_path, pae_threshold=0.7):
+    """
+    Returns: np.array of 0/1, length L.
+
+    pae_threshold kept for compatibility:
+      - if <= 1.0: treated as a fraction -> base percentile (0.7 => 70th)
+      - if 1..100: treated as percentile
+      - if >100: treated as absolute Å score threshold (rarely recommended)
+
+    New behavior:
+      - adaptively relaxes percentile until it finds a "reasonable" number of linker sections
+    """
+    pae = np.asarray(load_pae_matrix(file_path), dtype=float)
+    if pae.ndim != 2 or pae.shape[0] != pae.shape[1]:
+        raise ValueError(f"PAE matrix is not square: {pae.shape}")
+    L = pae.shape[0]
+
+    # Off-diagonal score per residue
+    exclude_diag = 12
+    score = np.zeros(L, dtype=float)
+    for i in range(L):
+        far = np.ones(L, dtype=bool)
+        far[max(0, i-exclude_diag):min(L, i+exclude_diag+1)] = False
+        score[i] = float(pae[i, far].mean()) if far.any() else float(pae[i].mean())
+
+    # smooth
+    smooth_w = 9
+    if smooth_w > 1:
+        score = np.convolve(score, np.ones(smooth_w)/smooth_w, mode="same")
+
+    # Segment extraction helpers
+    def runs(mask):
+        out = []
+        start = None
+        for k in range(len(mask) + 1):
+            if k < len(mask) and mask[k] and start is None:
+                start = k
+            if (k == len(mask) or not mask[k]) and start is not None:
+                out.append((start, k))
+                start = None
+        return out
+
+    def merge(runs_list, gap):
+        if not runs_list:
+            return []
+        runs_list = sorted(runs_list)
+        merged = [[runs_list[0][0], runs_list[0][1]]]
+        for s, e in runs_list[1:]:
+            ps, pe = merged[-1]
+            if s - pe <= gap:
+                merged[-1][1] = e
+            else:
+                merged.append([s, e])
+        return [(s, e) for s, e in merged]
+
+    # Reasonable defaults
+    min_len = 8
+    max_len = 60
+    merge_gap = 4
+
+    # We want multiple *sections* reasonably often, but not forced
+    min_segments = 3
+    max_segments = max(4, min(12, (L // 100) + 4))  # gentle scaling with length
+
+    # Interpret pae_threshold into a starting percentile
+    if pae_threshold <= 1.0:
+        start_pct = pae_threshold * 100.0
+    elif pae_threshold <= 100.0:
+        start_pct = pae_threshold
+    else:
+        # absolute threshold escape hatch: no adaptive relaxation here
+        thr = float(pae_threshold)
+        mask = (score >= thr)
+        segs = merge(runs(mask), merge_gap)
+        segs = [(s, e) for s, e in segs if (e-s) >= min_len and (e-s) <= max_len]
+        out = np.zeros(L, dtype=int)
+        for s, e in segs[:max_segments]:
+            out[s:e] = 1
+        return out
+
+    # Adaptive relaxation loop
+    # (Try stricter to looser until we get enough segments)
+    for pct in [start_pct, 80, 75, 70, 65, 60]:
+        pct = float(np.clip(pct, 1, 99))
+        thr = np.percentile(score, pct)
+        mask = score >= thr
+
+        segs = merge(runs(mask), merge_gap)
+        segs = [(s, e) for s, e in segs if (e-s) >= min_len and (e-s) <= max_len]
+
+        if len(segs) >= min_segments:
+            break
+
+    # Rank segments by mean score, keep up to max_segments
+    segs_scored = [(float(score[s:e].mean()), s, e) for (s, e) in segs]
+    segs_scored.sort(reverse=True)
+    segs_scored = segs_scored[:max_segments]
+
+    out = np.zeros(L, dtype=int)
+    for _, s, e in segs_scored:
+        out[s:e] = 1
+    return out
+
 
 def find_flexible_linker_sections(ss_string: str, pae_flags: List[int]) -> Set[int]:
     assert len(ss_string) == len(pae_flags), "Length of sequence and PAE list must match"
@@ -1927,6 +1998,50 @@ def find_flexible_linker_sections(ss_string: str, pae_flags: List[int]) -> Set[i
 
     return flexible_linker_indices
 
+from typing import List, Set, Union
+
+def find_flexible_linker_sections(ss_string: str, pae_flags: Union[List[int], np.ndarray]) -> Set[int]:
+    # Force pae_flags into a 1-D numpy array of ints (0/1)
+    pae_flags = np.asarray(pae_flags).astype(int)
+
+    # If it came in as a scalar, fail loudly with a helpful message
+    if pae_flags.ndim == 0:
+        raise ValueError(
+            f"pae_flags is a scalar (shape {pae_flags.shape}); expected 1-D length {len(ss_string)}. "
+            "This usually means getFlexibleSections returned the wrong shape."
+        )
+
+    # Ensure 1-D
+    pae_flags = np.atleast_1d(pae_flags)
+
+    if len(ss_string) != pae_flags.shape[0]:
+        raise ValueError(
+            f"Length mismatch: ss_string={len(ss_string)} vs pae_flags={pae_flags.shape[0]}"
+        )
+
+    
+    flexible_linker_indices: Set[int] = set()
+    i = 0
+    section_index = 0
+
+    while i < len(ss_string):
+        current_char = ss_string[i]
+
+        start = i
+        while i < len(ss_string) and ss_string[i] == current_char:
+            i += 1
+        end = i
+
+        # For linker sections, check if any flags are 1 in that range.
+        if current_char == '-':
+            # Use numpy reduction (robust and fast)
+            if pae_flags[start:end].any():
+                flexible_linker_indices.add(section_index)
+
+        section_index += 1
+
+    return flexible_linker_indices
+
 def getFlexibility(paeFile,fingerprint_file):
     # if file is in noy format convert to json   
     if paeFile.endswith('.npy'):
@@ -1945,15 +2060,17 @@ def getFlexibility(paeFile,fingerprint_file):
         # Save as JSON
         with open('paerank_2_converted.json', 'w') as f:
             json.dump(pae_json, f)
-        flexsec =getFlexibleSections('paerank_2_converted.json',pae_threshold = 0.7)
+        flexsec =getFlexibleSections('paerank_2_converted.json',pae_threshold = 75)
         fingerprint = get_secondary(fingerprint_file)
         return [list(find_flexible_linker_sections(np.concatenate(fingerprint), flexsec))]
     else:
-        flexsec =getFlexibleSections(paeFile,pae_threshold = 0.7)
+        flexsec =getFlexibleSections(paeFile,pae_threshold = 75)
         fingerprint = get_secondary(fingerprint_file)
+        ss = np.concatenate(fingerprint)
         return [list(find_flexible_linker_sections(np.concatenate(fingerprint), flexsec))]
 
 
+    
 
 def parse_structures_with_segments(filename):
     with open(filename, 'r') as f:
