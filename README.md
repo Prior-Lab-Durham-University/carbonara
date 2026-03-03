@@ -98,7 +98,7 @@ python setup_carbonara.py --pdb path/to/pdb --saxs path/to/saxs --name ProteinNa
 If the user has a pae file and wants to use its uncertainties to specify the flexibility (should be a .json or .npy) (can also have rotation or not if its a monomer)
 
 ```bash
-python setup_carbonara.py -p path/to/pdb -s path/to/saxs -f path/to/pae -n --name ProteinName --alphaFoldFlex --rotation
+python setup_carbonara.py -p path/to/pdb -s path/to/saxs -f path/to/pae --name ProteinName --alphaFoldFlex --rotation
 ```
 
 ```bash
