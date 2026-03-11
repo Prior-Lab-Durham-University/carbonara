@@ -371,15 +371,88 @@ def _chains_present_in_pdb(pdb_text: str):
     # Sort with A,B,C... first if present
     return sorted(chains, key=lambda c: (c not in string.ascii_uppercase, c))
 
-def visualisePrediction(directory, runNo, predNo, subNo=0):
+def _resolve_latest_prediction(directory, runNo, subNo=0,subRun=False):
+    """
+    Resolve the latest prediction for a given runNo and subNo.
+
+    Priority:
+    1. use *_end__AA.pdb / *_end__CA.pdb if present
+    2. otherwise use the largest numeric step_<predNo>
+
+    Returns
+    -------
+    pred_tag : str or int
+        Either "end" or an integer predNo
+    aa_path : str
+    ca_path : str
+    """
+    if subRun:
+        run_dir = os.path.join(directory, f"allAtomRun{runNo}")
+    else:
+        run_dir =directory
+
+    # First check for explicit "end" files
+    aa_end = os.path.join(run_dir, f"mol{runNo}_sub_{subNo}_end__AA.pdb")
+    ca_end = os.path.join(run_dir, f"mol{runNo}_sub_{subNo}_end__CA.pdb")
+    if os.path.exists(aa_end) and os.path.exists(ca_end):
+        return "end", aa_end, ca_end
+
+    # Otherwise scan numeric step files
+    aa_pattern = os.path.join(run_dir, f"mol{runNo}_sub_{subNo}_step_*__AA.pdb")
+    aa_files = glob.glob(aa_pattern)
+
+    step_re = re.compile(
+        rf"mol{re.escape(str(runNo))}_sub_{re.escape(str(subNo))}_step_(\d+)__AA\.pdb$"
+    )
+
+    step_nums = []
+    for aa_path in aa_files:
+        fname = os.path.basename(aa_path)
+        m = step_re.match(fname)
+        if not m:
+            continue
+
+        predNo = int(m.group(1))
+        ca_path = os.path.join(run_dir, f"mol{runNo}_sub_{subNo}_step_{predNo}__CA.pdb")
+        if os.path.exists(ca_path):
+            step_nums.append(predNo)
+
+    if not step_nums:
+        raise FileNotFoundError(
+            f"No matching prediction files found for runNo={runNo}, subNo={subNo} in {run_dir}"
+        )
+
+    predNo = max(step_nums)
+    aa_path = os.path.join(run_dir, f"mol{runNo}_sub_{subNo}_step_{predNo}__AA.pdb")
+    ca_path = os.path.join(run_dir, f"mol{runNo}_sub_{subNo}_step_{predNo}__CA.pdb")
+    return predNo, aa_path, ca_path
+
+
+def visualisePrediction(directory, runNo, predNo=None, subNo=0,subRun=False):
     view = py3Dmol.view(width=800, height=600)
+    if subRun:
+        run_dir = os.path.join(directory, f"allAtomRun{runNo}")
+    else:
+        run_dir =directory
+    # Resolve file names
+    if predNo is None:
+        pred_tag, aa_path, ca_path = _resolve_latest_prediction(directory, runNo, subNo=subNo)
+        print(f"Using latest prediction: {pred_tag}")
+    else:
+        if predNo == "end":
+            aa_fname = f"mol{runNo}_sub_{subNo}_end__AA.pdb"
+            ca_fname = f"mol{runNo}_sub_{subNo}_end__CA.pdb"
+        else:
+            aa_fname = f"mol{runNo}_sub_{subNo}_step_{predNo}__AA.pdb"
+            ca_fname = f"mol{runNo}_sub_{subNo}_step_{predNo}__CA.pdb"
 
-    # ---- build filenames (edit these patterns to match your actual outputs) ----
-    aa_fname = f"mol{runNo}_sub_{subNo}_step_{predNo}__AA.pdb"
-    ca_fname = f"mol{runNo}_sub_{subNo}_step_{predNo}__CA.pdb"
+        aa_path = os.path.join(run_dir, aa_fname)
+        ca_path = os.path.join(run_dir, ca_fname)
 
-    aa_path = os.path.join(directory, "allAtomRun"+str(runNo), aa_fname)
-    ca_path = os.path.join(directory, "allAtomRun"+str(runNo), ca_fname)   # <-- change "caRun" if needed
+        if not os.path.exists(aa_path):
+            raise FileNotFoundError(f"AA file not found: {aa_path}")
+        if not os.path.exists(ca_path):
+            raise FileNotFoundError(f"CA file not found: {ca_path}")
 
     # ---- load AA model ----
     with open(aa_path, "r") as f:
@@ -393,15 +466,16 @@ def visualisePrediction(directory, runNo, predNo, subNo=0):
     view.addModel(pdb_data_ca, "pdb")   # model 1
     ca_chains = _chains_present_in_pdb(pdb_data_ca)
 
-    # ---- choose colors (cycles if N > len(list)) ----
-    palette = ["blue", "green", "red", "yellow", "cyan", "magenta", "orange", "purple", "lime", "gray"]
+    # ---- choose colors ----
+    palette = ["blue", "green", "red", "yellow", "cyan", "magenta",
+               "orange", "purple", "lime", "gray"]
 
     # Style AA chains (cartoon)
     for i, ch in enumerate(aa_chains):
         color = palette[i % len(palette)]
         view.setStyle({"model": 0, "chain": ch}, {"cartoon": {"color": color}})
 
-    # Style CA chains (spheres) – only for chains actually present in the CA model
+    # Style CA chains (spheres)
     for i, ch in enumerate(ca_chains):
         color = palette[i % len(palette)]
         view.setStyle({"model": 1, "chain": ch}, {"sphere": {"color": color, "opacity": 0.5}})
@@ -409,8 +483,6 @@ def visualisePrediction(directory, runNo, predNo, subNo=0):
     view.zoomTo()
     view.show()
     return view
-
-
 
 def _structure_from_pdb_string(pdb_str, struct_id="X"):
     parser = PDBParser(QUIET=True)
@@ -703,6 +775,79 @@ def compare_structures_vals(pdb1, pdb2, max_abs_offset=10):
     return np.array([rmsd, tm_score, gdt_ts])
 
 
+
+def read_ca_carbonara(dat_file):
+    """
+    Read Carbonara backbone coordinates from a plain text file
+    with one xyz triplet per line.
+
+    Returns
+    -------
+    coords : (N, 3) np.ndarray
+    """
+    coords = np.loadtxt(dat_file, dtype=float)
+
+    if coords.ndim != 2 or coords.shape[1] != 3:
+        raise ValueError(
+            f"Expected an Nx3 coordinate file, got shape {coords.shape} from {dat_file}"
+        )
+
+    return coords
+
+
+def compare_structures_vals_carbonara(aa_pdb, carbonara_dat):
+    """
+    Compare an AA prediction PDB against a Carbonara backbone coordinate file.
+
+    Assumptions
+    -----------
+    - The AA PDB residue order is the reference order
+    - The Carbonara coordinate file contains one CA-like backbone point per residue
+      in the same order as the AA model
+    - No residue-number offset search is needed
+
+    Parameters
+    ----------
+    aa_pdb : str
+        Path to all-atom prediction PDB.
+    carbonara_dat : str
+        Path to Carbonara backbone coordinates file.
+
+    Returns
+    -------
+    np.ndarray
+        [rmsd, tm_score, gdt_ts]
+    """
+    P, keysP = read_ca_coords(aa_pdb)      # AA model CA coordinates + keys
+    Q = read_ca_carbonara(carbonara_dat)   # Carbonara backbone coordinates only
+
+    if len(P) != len(Q):
+        raise ValueError(
+            f"Length mismatch: AA model has {len(P)} CA atoms but "
+            f"Carbonara file has {len(Q)} coordinates."
+        )
+
+    N = len(P)
+
+    # Align Carbonara coords onto AA coords
+    Q_aln = kabsch_align_Q_to_P(P, Q)
+
+    diff = P - Q_aln
+    per = np.linalg.norm(diff, axis=1)
+    rmsd = np.sqrt((diff**2).sum() / N)
+
+    # safer d0 for short structures
+    d0 = 1.24 * max(N - 15, 1)**(1/3) - 1.8
+    d0 = max(d0, 0.5)
+
+    tm_score = (1.0 / N) * np.sum(1.0 / (1.0 + (per / d0)**2))
+
+    cutoffs = [1.0, 2.0, 4.0, 8.0]
+    gdt = [np.mean(per <= c) for c in cutoffs]
+    gdt_ts = 100.0 * np.mean(gdt)
+
+    return np.array([rmsd, tm_score, gdt_ts])
+
 def collect_allatom_end_pdbs(directory):
     """
     Find all mol<runNo>_sub_<i>_end__AA.pdb files inside allAtomRun<runNo> folders.
@@ -734,6 +879,69 @@ def collect_allatom_end_pdbs(directory):
         paths.extend(sorted(glob.glob(pattern)))
 
     return paths
+
+def collect_final_predictions_test(directory):
+    """
+    Find the final AA prediction for each (runNo, subNo) found directly in `directory`.
+
+    Priority
+    --------
+    1. *_end__AA.pdb if present
+    2. otherwise largest step_<N>
+
+    Returns
+    -------
+    paths : list of str
+        Full paths to selected AA PDB files, one per (runNo, subNo).
+    """
+
+    best = {}
+
+    for fname in os.listdir(directory):
+
+        if not fname.endswith("__AA.pdb"):
+            continue
+
+        parts = fname.split("_")
+
+        # expected:
+        # molX_sub_Y_step_N__AA.pdb
+        # molX_sub_Y_end__AA.pdb
+
+        if len(parts) < 5:
+            continue
+        if not parts[0].startswith("mol"):
+            continue
+        if parts[1] != "sub":
+            continue
+
+        try:
+            runNo = int(parts[0][3:])   # from "molX"
+            subNo = int(parts[2])       # from "..._sub_Y_..."
+        except ValueError:
+            continue
+
+        key = (runNo, subNo)
+        fullpath = os.path.join(directory, fname)
+
+        if parts[3] == "end":
+            best[key] = ("end", fullpath)
+
+        elif parts[3] == "step":
+            if len(parts) < 6:
+                continue
+            try:
+                step = int(parts[4])
+            except ValueError:
+                continue
+
+            if key in best and best[key][0] == "end":
+                continue
+
+            if key not in best or step > best[key][0]:
+                best[key] = (step, fullpath)
+
+    return [best[k][1] for k in sorted(best)]
 
 
 def collect_allatom_end_pdb_sets(directory):
@@ -862,7 +1070,7 @@ def collect_end_scatter_mixtures_ordered(directory, min_run=None, max_run=None):
 
 def plot_overlaid_histograms(
     data_list,
-    value_index,
+    metric,
     labels,
     xlabel,
     title,
@@ -909,7 +1117,7 @@ def plot_overlaid_histograms(
 
     # Extract values
     values = [
-        np.array([entry[2][value_index] for entry in data], dtype=float)
+        np.array([entry[metric] for entry in data], dtype=float)
         for data in data_list
     ]
 
@@ -1058,6 +1266,92 @@ def pairwise_structure_metrics(pdb_files, compare_func):
 
     return results
 
+def structure_metrics_vs_reference(pdb_files, ref_pdb, compare_func):
+    """
+    Compute RMSD / TM / GDT for each structure in `pdb_files`
+    against a single reference structure `ref_pdb`.
+
+    Parameters
+    ----------
+    pdb_files : list of str
+        Paths to PDB files to compare.
+    ref_pdb : str
+        Path to the reference PDB file.
+    compare_func : callable
+        Function like compare_structures_vals(pdb1, pdb2),
+        returning (rmsd, tm, gdt).
+
+    Returns
+    -------
+    results : list of dict
+        Each entry contains index, filenames, and metrics.
+    """
+    results = []
+
+    with tqdm(total=len(pdb_files), desc="Comparisons vs reference", unit="pdb") as pbar:
+        for i, pdb in enumerate(pdb_files):
+            rmsd, tm, gdt = compare_func(pdb, ref_pdb)
+
+            results.append({
+                "i": i,
+                "pdb": pdb,
+                "ref_pdb": ref_pdb,
+                "rmsd": float(rmsd),
+                "tm": float(tm),
+                "gdt_ts": float(gdt),
+            })
+
+            pbar.update(1)
+
+    return results
+
+def structure_metrics_vs_carbonara(pdb_files, carbonara_dir, compare_func):
+    """
+    Compare each PDB in `pdb_files` against Carbonara coordinate files
+    found in `carbonara_dir`.
+
+    Parameters
+    ----------
+    pdb_files : list of str
+        Paths to PDB files to compare.
+    carbonara_dir : str
+        Directory containing coordinates*.dat files.
+    compare_func : callable
+        Function like compare_structures_vals_carbonara(pdb, dat).
+
+    Returns
+    -------
+    results : list of dict
+    """
+
+    coord_files = sorted(glob.glob(os.path.join(carbonara_dir, "coordinates*.dat")))
+
+    if not coord_files:
+        raise ValueError(f"No coordinates*.dat files found in {carbonara_dir}")
+
+    total = len(pdb_files) * len(coord_files)
+    results = []
+
+    with tqdm(total=total, desc="Comparisons vs Carbonara", unit="pair") as pbar:
+
+        for dat in coord_files:
+            for i, pdb in enumerate(pdb_files):
+
+                rmsd, tm, gdt = compare_func(pdb, dat)
+
+                results.append({
+                    "i": i,
+                    "pdb": pdb,
+                    "carbonara_dat": dat,
+                    "rmsd": float(rmsd),
+                    "tm": float(tm),
+                    "gdt_ts": float(gdt),
+                })
+
+                pbar.update(1)
+
+    return results
+    
 import os
 import multiprocessing as mp
 from tqdm import tqdm
@@ -1191,4 +1485,169 @@ def bucket_rg_differences_by_mixture(
         buckets[key].append(value)
 
     return dict(buckets)
+
+
+def calc_rg_distribution(
+    pdb_files,
+    rg_func,
+    weighted=False,
+    mixtures=None,
+    keep_components=True,
+):
+    """
+    Calculate radius of gyration values from a flat list of PDB files.
+
+    Parameters
+    ----------
+    pdb_files : list of str
+        Flat list of PDB paths. These may include multiple sub-structures
+        per prediction, e.g.
+            mol5_sub_0_step_10__AA.pdb
+            mol5_sub_1_step_10__AA.pdb
+            mol5_sub_2_step_10__AA.pdb
+    rg_func : callable
+        Function like radius_of_gyration(pdb_path) -> float
+    weighted : bool, optional
+        If False, return one result per pdb file.
+        If True, group pdbs by (runNo, predTag) and return one weighted
+        result per prediction.
+    mixtures : dict or list, optional
+        Required if weighted=True.
+
+        Supported forms:
+        - dict keyed by (runNo, predTag)
+        - dict keyed by runNo
+        - list aligned with sorted grouped predictions
+
+    keep_components : bool, optional
+        If weighted=True, include component pdbs, component Rg values,
+        and weights in the returned records.
+
+    Returns
+    -------
+    results : list of dict
+        Unweighted mode:
+            {
+                "i": i,
+                "pdb": pdb,
+                "rg": float(...)
+            }
+
+        Weighted mode:
+            {
+                "i": i,
+                "runNo": runNo,
+                "predTag": predTag,
+                "rg": float(weighted_rg),
+                ...
+            }
+
+        In both cases, the plottable quantity is always under key "rg".
+    """
+
+    pat_step = re.compile(r"mol(\d+)_sub_(\d+)_step_(\d+)__AA\.pdb$")
+    pat_end  = re.compile(r"mol(\d+)_sub_(\d+)_end__AA\.pdb$")
+
+    def parse_pdb_name(path):
+        fname = os.path.basename(path)
+
+        m = pat_step.match(fname)
+        if m:
+            runNo = int(m.group(1))
+            subNo = int(m.group(2))
+            predTag = f"step_{int(m.group(3))}"
+            return runNo, subNo, predTag
+
+        m = pat_end.match(fname)
+        if m:
+            runNo = int(m.group(1))
+            subNo = int(m.group(2))
+            predTag = "end"
+            return runNo, subNo, predTag
+
+        raise ValueError(f"Filename does not match expected pattern: {fname}")
+
+    results = []
+
+    # --------------------------------------------------
+    # Unweighted mode: one output per pdb
+    # --------------------------------------------------
+    if not weighted:
+        with tqdm(total=len(pdb_files), desc="Calculating Rg", unit="pdb") as pbar:
+            for i, pdb in enumerate(pdb_files):
+                rg = float(rg_func(pdb))
+
+                results.append({
+                    "i": i,
+                    "pdb": pdb,
+                    "rg": rg,
+                })
+
+                pbar.update(1)
+
+        return results
+
+    # --------------------------------------------------
+    # Weighted mode: one output per grouped prediction
+    # --------------------------------------------------
+    if mixtures is None:
+        raise ValueError("mixtures must be provided when weighted=True")
+
+    grouped = defaultdict(list)
+    for pdb in pdb_files:
+        runNo, subNo, predTag = parse_pdb_name(pdb)
+        grouped[(runNo, predTag)].append((subNo, pdb))
+
+    grouped_sorted = {}
+    for key, vals in grouped.items():
+        grouped_sorted[key] = [pdb for subNo, pdb in sorted(vals, key=lambda x: x[0])]
+
+    group_keys = sorted(grouped_sorted.keys(), key=lambda x: (x[0], x[1]))
+
+    with tqdm(total=len(group_keys), desc="Calculating weighted Rg", unit="pred") as pbar:
+        for i, key in enumerate(group_keys):
+            runNo, predTag = key
+            pdb_group = grouped_sorted[key]
+
+            rg_components = [float(rg_func(pdb)) for pdb in pdb_group]
+
+            if isinstance(mixtures, dict):
+                if key in mixtures:
+                    weights = mixtures[key]
+                elif runNo in mixtures:
+                    weights = mixtures[runNo]
+                else:
+                    raise KeyError(f"No mixture weights found for group {key}")
+            else:
+                try:
+                    weights = mixtures[i]
+                except IndexError:
+                    raise IndexError(f"No mixture weights supplied for group {key}")
+
+            if len(weights) != len(rg_components):
+                raise ValueError(
+                    f"Weight length mismatch for group {key}: "
+                    f"{len(weights)} weights but {len(rg_components)} pdbs"
+                )
+
+            weighted_rg = float(sum(r * w for r, w in zip(rg_components, weights)))
+
+            rec = {
+                "i": i,
+                "runNo": runNo,
+                "predTag": predTag,
+                "rg": weighted_rg,   # <- crucial: histogram can use "rg"
+            }
+
+            if keep_components:
+                rec.update({
+                    "pdbs": pdb_group,
+                    "rg_components": rg_components,
+                    "weights": list(weights),
+                })
+
+            results.append(rec)
+            pbar.update(1)
+
+    return results
 
