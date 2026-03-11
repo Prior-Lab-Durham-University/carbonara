@@ -48,14 +48,24 @@ def write_sparse_mixture_file(
     """
     Write mixture weights to `outpath`.
 
-    - n=1: writes a minimal single-species mixture (one row: 1.0)
-    - n=2: writes a grid from 0..1 in steps of `step_2`
-    - n>=3: sparse simplex sampling (corners + uniform + Dirichlet), capped at `max_combos`
+    Special case:
+      - If max_combos == 1 and include_uniform is True, write ONLY the uniform mixture:
+        [1/n, 1/n, ..., 1/n]
     """
     if n < 1:
         raise ValueError("mixture_n must be >= 1")
     if max_combos < 1:
         raise ValueError("max_mixture_combos must be >= 1")
+
+    # --- FIX: enforce "one combo => uniform" (when requested) ---
+    if max_combos == 1 and include_uniform:
+        row = np.ones(n, dtype=float) / float(n)
+        os.makedirs(os.path.dirname(outpath) or ".", exist_ok=True)
+        fmt = f"{{:.{decimals}f}}"
+        with open(outpath, "w") as f:
+            f.write(" ".join(fmt.format(x) for x in row) + "\n")
+        return outpath
+    # -----------------------------------------------------------
 
     rows: List[np.ndarray] = []
 
@@ -80,20 +90,21 @@ def write_sparse_mixture_file(
     else:
         rng = np.random.default_rng(seed)
 
+        # If you prefer uniform to appear first even when max_combos>1,
+        # you can append it before corners. (Optional.)
+        if include_uniform:
+            rows.append(np.ones(n, dtype=float) / float(n))
+
         if include_corners:
             for i in range(n):
                 e = np.zeros(n, dtype=float)
                 e[i] = 1.0
                 rows.append(e)
 
-        if include_uniform:
-            rows.append(np.ones(n, dtype=float) / n)
-
         alpha_vec = np.full(n, float(dirichlet_alpha), dtype=float)
         if np.any(alpha_vec <= 0):
             raise ValueError("mixture_dirichlet_alpha must be > 0")
 
-        # generate extra to survive de-dup after snapping
         attempts = 0
         max_attempts = max(200, 20 * max_combos)
         while len(rows) < max_combos and attempts < max_attempts:
@@ -121,7 +132,6 @@ def write_sparse_mixture_file(
             f.write(" ".join(fmt.format(x) for x in r) + "\n")
 
     return outpath
-
 
 def replicate_numbered_files(refine_dir: str, n: int) -> None:
     """
@@ -375,6 +385,8 @@ def main():
         action="store_true",
         help="Use an alphaFold pae file to specify the flexibility of the molecule",
     )
+    parser.add_argument('--pae_flex_threshold', type=float, default=16.0,
+                    help="Absolute Å threshold if --pae_flex_mode=absolute (default: 16).")
 
     # Ensemble / mixture controls (replicating setup)
     parser.add_argument(
@@ -407,6 +419,7 @@ def main():
         default=0.05,
         help="Snap sampled mixtures to multiples of this (0 disables). Default: 0.05",
     )
+    
 
     args = parser.parse_args()
 
@@ -477,7 +490,10 @@ def main():
         varying_linker_chains = []
         if args.alphaFoldFlex:
             # use pae scores to specify flexibility
-            varying_linker_chains = cdt.getFlexibility(args.pae, fingerprint_file)
+            varying_linker_chains = cdt.getFlexibility(
+                args.pae, fingerprint_file,
+                abs_thr=args.pae_flex_threshold
+            )
         else:
             # auto select flexible linker chains that dont break inter-beta sheets
             for coord_file in coords_files:
