@@ -89,7 +89,7 @@ Setting up the RunMe for a monomer:
 python setup_carbonara.py --pdb path/to/pdb --saxs path/to/saxs --name ProteinName 
 ```
 
-For a multimer to allow rotations:
+Setting up the RunMe for a multimer to allow rotations:
 
 ```bash
 python setup_carbonara.py --pdb path/to/pdb --saxs path/to/saxs --name ProteinName --rotation
@@ -101,16 +101,24 @@ If the user has a pae file and wants to use its uncertainties to specify the fle
 python setup_carbonara.py -p path/to/pdb -s path/to/saxs -f path/to/pae --name ProteinName --alphaFoldFlex --rotation
 ```
 
+If the user expects the molecule to occupy multiple states in solution, or suspects significant variation in Rg,
+they can run mixture refinements 
+```bash
+python setup_carbonara.py -p path/to/pdb -s path/to/saxs -f path/to/pae --name ProteinName --alphaFoldFlex --rotation
+```
+
 ```bash
 # Optional flags for customising refinement
---fit_n_times INT     Number of times to run the fit (default: 5)
+--fit_n_times INT     Number of times to run the fit (default: 20), i.e the batch size of the proposed seeding
 --min_q FLOAT         Minimum q-value (default: 0.01)
---max_q FLOAT         Maximum q-value (default: 0.2)
---max_fit_steps INT   Maximum number of fitting steps (default: 1000)
+--max_q FLOAT         Maximum q-value (default: 0.2)   - NOTE YOU CANNOT GO HIGHER THAN 0.2.
+--max_fit_steps INT   Maximum number of fitting steps (default: 10000) 10000 might take of order a day, 1000 a few hours
 --pairedQ             Use paired predictions
 --rotation            Apply affine rotations
 --alphaFoldFlex       Use a pae prediction to specify the flexibility of the molecule
-
+--pae_flex_threshold  Alter the default pae flexibility threshold (above which linkers are considered open for variation)- Default 16, increase to be more permissive.
+--mixture_n           Number of structures to consider in a single refinement, default 1, if you are unsure but suspect variation 2/3 will find significant strucutal variability
+--max_mixture_combos  Number of mixture combinations to try (e.g for 2 {0,1},{0.1,0.9},{0.2,0.8} e.t.c., default is 30, recommend 10 for 2, 15 for 3 e.t.c (only meaninful if mixture_n>1)
 ```
 
 Then run:
