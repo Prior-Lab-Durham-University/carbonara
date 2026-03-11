@@ -951,3 +951,190 @@ def count_c_alpha_atoms(pdb_filename):
     return ca_count
 
 
+def backmap_ca_chain(coords_file, fingerprint_file, write_directory, name,
+                     ss_constraint=True, rate='fast'):
+    ca_pdb_output_name = os.path.join(write_directory, f"{name}_CA.pdb")
+    cdt.Carbonara_2_PDB(coords_file, fingerprint_file, ca_pdb_output_name)
+    print("Alpha Coordinates pdb written to:", ca_pdb_output_name)
+
+    # Normalize rate to avoid surprises like ' Slow ' or 'SLOW'
+    rate_norm = str(rate).strip().lower()
+
+    # Build base output name
+    aa_base = os.path.join(write_directory, f"{name}_AA_")
+
+    ss_list = list(np.genfromtxt(fingerprint_file, dtype=str)[2])
+
+    if ss_constraint:
+        if rate_norm == 'slow':
+            aa_pdb_output_name = aa_base + "_slow.pdb"
+            print("Running CA2AA_secondary_slow …")
+            CA2AA_secondary_slow(ca_pdb_output_name, aa_pdb_output_name, ss_list,
+                                 iterations=1, stout=False)
+        else:
+            aa_pdb_output_name = aa_base + "_fast.pdb"
+            print("Running CA2AA_secondary_fast …")
+            CA2AA_secondary_fast(ca_pdb_output_name, aa_pdb_output_name, ss_list,
+                                 iterations=1, stout=False)
+    else:
+        aa_pdb_output_name = aa_base + ".pdb"  # ensure extension
+        print("Running unconstrained CA2AA … (rate ignored)")
+        CA2AA(ca_pdb_output_name, aa_pdb_output_name, iterations=3, stout=False)
+
+    print("All Atomistic pdb written to:", aa_pdb_output_name)
+
+def backmap_ca_chain_multimer(coords_file, fingerprint_file, write_directory, name,lengths,disulfides=None):
+
+    # write the CA chain into pdb format - note this won't work if non-standard residues are present!
+    split_coords_into_chains(coords_file,coords_file, lengths)
+    
+    ca_pdb_output_name = os.path.join(write_directory, name+'_CA.pdb')
+    cdt.Carbonara_2_PDB_multichain(coords_file, fingerprint_file, ca_pdb_output_name,lengths)
+    print('Alpha Coordinates pdb written to: ', ca_pdb_output_name)
+
+    aa_pdb_output_name = os.path.join(write_directory, name+'_AA.pdb')
+
+    ss_list = list(np.genfromtxt(fingerprint_file, dtype=str)[2])
+
+    CA2AA_secondary_multimer(ca_pdb_output_name, aa_pdb_output_name, ss_list, disulfides,iterations=1,stout=False)
+
+    print('All Atomistic pdb written to: ', aa_pdb_output_name)
+
+def read_json_from_file(file_path):
+    with open(file_path, 'r') as f:
+        log_data = f.read()
+    return log_data
+
+def split_coords_into_chains(input_path, output_path, segment_lengths):
+    """
+    Re-splits a .dat coordinate file with 'End chain ...' lines into new chains
+    using the given segment_lengths. Always writes 'End chain' after each block.
+    """
+    import re
+
+    with open(input_path, 'r') as infile:
+        raw_lines = [line.strip() for line in infile if line.strip()]
+    
+    # Ignore lines that contain 'End chain' (in any form)
+    coord_lines = [line for line in raw_lines if not re.search(r'end\s+chain', line, re.IGNORECASE)]
+
+    total_input = len(coord_lines)
+    total_expected = sum(segment_lengths)
+
+    print(f"🔍 Found {total_input} coordinates, expecting {total_expected} from segment_lengths")
+
+    if total_input != total_expected:
+        raise ValueError(f"Mismatch: {total_input} coords vs {total_expected} expected")
+
+    idx = 0
+    with open(output_path, 'w') as outfile:
+        for i, L in enumerate(segment_lengths):
+            for _ in range(L):
+                outfile.write(coord_lines[idx] + '\n')
+                idx += 1
+            outfile.write(f"End chain {i+1}\n")
+
+    print(f"✅ Wrote {output_path} with {len(segment_lengths)} chains.")
+
+
+def getFitFiles(directory, threshold="last"):
+    # List all files in the directory that contain "fitLog" in their filename
+    fitlog_files = [f for f in os.listdir(directory) if 'fitLog' in f]
+    fitlog_paths = [os.path.join(directory, f) for f in fitlog_files]
+    
+    molecule_paths = []
+    for fitlog in fitlog_paths:
+        log_data = read_json_from_file(fitlog)
+        lines = log_data.strip().split('\n')
+
+        if threshold == "last":
+            data = json.loads(lines[-1])
+            mol_path = data.get("MoleculePath")
+            scat_path = data.get("ScatterPath")
+            molecule_paths.append([
+                _relativize_path(mol_path, directory),
+                _relativize_path(scat_path, directory)
+            ])
+        else:
+            for line in lines:
+                if not line or line.startswith('{"Run"'):
+                    continue
+                data = json.loads(line)
+                if data.get("ScatterFitFirst", float('inf')) < threshold:
+                    mol_path = data.get("MoleculePath")
+                    scat_path = data.get("ScatterPath")
+                    molecule_paths.append([
+                        _relativize_path(mol_path, directory),
+                        _relativize_path(scat_path, directory)
+                    ])
+    return molecule_paths
+
+def _relativize_path(full_path, directory):
+    """
+    Strips everything before the directory and returns the relative file path from 'directory'.
+    If the file is not in 'directory', return the filename joined with directory.
+    """
+    if not full_path:
+        return None
+    filename = os.path.basename(full_path)
+    return os.path.join(directory, filename)
+
+#warning put in temp fix for this
+
+
+def generateAllAtomisticFits(directory,run,threshold="last",rateIn= "fast"):
+    moleculePaths =getFitFiles(directory+run,threshold)
+    [backmap_ca_chain(moleculePaths[i][0], directory+"fingerPrint1.dat", directory+run,moleculePaths[i][0].strip().split('/')[-1].strip().split('xyz.dat')[0], ss_constraint=True,rate=rateIn) for i in range(len(moleculePaths)) ]
+
+def generateAllAtomisticFitsList(directory,run,moleculePaths):
+    [bmbackmap_ca_chain(moleculePaths[i][0], directory+"fingerPrint1.dat", directory+run,moleculePaths[i][0].strip().split('/')[-1].strip().split('xyz.dat')[0], ss_constraint=True) for i in range(len(moleculePaths)) ]
+
+def generateAllAtomisticFitsMultimter(directory,run,lengths,threshold="last",disulfides=None):
+    moleculePaths =getFitFiles(directory+run,threshold)
+    [backmap_ca_chain_multimer(moleculePaths[i][0], directory+"fingerPrint1.dat", directory+run,moleculePaths[i][0].strip().split('/')[-1].strip().split('xyz.dat')[0],lengths,disulfides) for i in range(len(moleculePaths)) ]
+
+
+##  
+
+def getFitFilesForRun(directory,logNo):
+    # List all files in the directory that contain "fitlog" in their filename
+    log_data = read_json_from_file(directory+'/fitLog'+str(logNo)+'.dat')
+    molecule_paths = []
+    for line in log_data.strip().split('\n'):
+        if not line.startswith('{"Run"'):
+            data = json.loads(line)
+            molecule_path = [data.get("MoleculePath"),data.get("ScatterPath")]
+            molecule_paths.append(molecule_path)
+    return molecule_paths
+
+def read_json_from_file(file_path):
+    with open(file_path, 'r') as f:
+        log_data = f.read()
+    return log_data
+
+def generateAllAtomisticFitsRun(directory,run,logNo):
+    directoryNew =  directory+run+"/allAtomRun"+str(logNo)
+    # Create the directory only if it doesn't exist
+    if not os.path.exists(directoryNew):
+        os.makedirs(directoryNew)
+        print(f"Directory '{directoryNew}' created.")
+    else:
+        print(f"Directory '{directoryNew}' already exists.")
+    moleculePaths =getFitFilesForRun(directory+run,logNo)
+    [backmap_ca_chain(moleculePaths[i][0], directory+"fingerPrint1.dat", directory+run+"/allAtomRun"+str(logNo)+"/",moleculePaths[i][0].strip().split('/')[-1].strip().split('xyz.dat')[0], ss_constraint=True) for i in range(len(moleculePaths)) ]
+
+
+def generateAllAtomisticFitsRunMultimer(directory,run,logNo,lengths,disulfides=None):
+    directoryNew =  directory+run+"/allAtomRun"+str(i)
+    # Create the directory only if it doesn't exist
+    if not os.path.exists(directoryNew):
+        os.makedirs(directoryNew)
+        print(f"Directory '{directoryNew}' created.")
+    else:
+        print(f"Directory '{directoryNew}' already exists.")
+    moleculePaths =getFitFilesForRun(directory+run,logNo)
+    [backmap_ca_chain_multimer(moleculePaths[i][0], directory+"fingerPrint1.dat", directory+run,moleculePaths[i][0].strip().split('/')[-1].strip().split('xyz.dat')[0],lengths,disulfides) for i in range(len(moleculePaths)) ]
+
+
+
+    
