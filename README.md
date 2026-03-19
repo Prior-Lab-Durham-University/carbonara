@@ -89,22 +89,36 @@ Setting up the RunMe for a monomer:
 python setup_carbonara.py --pdb path/to/pdb --saxs path/to/saxs --name ProteinName 
 ```
 
-Setting up the RunMe for a multimer to allow rotations:
+Or, if you trust all the default settings the following will run the fitting script atomatically
+
+```bash
+run_carbonara_oneshot.py --pdb path/to/pdb --saxs path/to/saxs --name ProteinName 
+```
+
+Setting up (or oneshot run) the RunMe for a multimer to allow rotations:
 
 ```bash
 python setup_carbonara.py --pdb path/to/pdb --saxs path/to/saxs --name ProteinName --rotation
+
+run_carbonara_oneshot.py --pdb path/to/pdb --saxs path/to/saxs --name ProteinName --rotation
+
 ```
 
 If the user has a pae file and wants to use its uncertainties to specify the flexibility (should be a .json or .npy) (can also have rotation or not if its a monomer)
 
 ```bash
 python setup_carbonara.py -p path/to/pdb -s path/to/saxs -f path/to/pae --name ProteinName --alphaFoldFlex --rotation
+
+run_carbonara_oneshot.py -p path/to/pdb -s path/to/saxs -f path/to/pae --name ProteinName --alphaFoldFlex --rotation
 ```
 
 If the user expects the molecule to occupy multiple states in solution, or suspects significant variation in Rg,
-they can run mixture refinements 
+they can run mixture refinements e.g.
 ```bash
-python setup_carbonara.py -p path/to/pdb -s path/to/saxs -f path/to/pae --name ProteinName --alphaFoldFlex --rotation
+python setup_carbonara.py -p path/to/pdb -s path/to/saxs -f path/to/pae --name ProteinName --alphaFoldFlex --rotation --mixture_n 2 --max_mixture_combos 10
+
+run_carbonara_oneshot.py -p path/to/pdb -s path/to/saxs -f path/to/pae --name ProteinName --alphaFoldFlex --rotation --mixture_n 2 --max_mixture_combos 10
+
 ```
 
 ```bash
@@ -121,13 +135,15 @@ python setup_carbonara.py -p path/to/pdb -s path/to/saxs -f path/to/pae --name P
 --max_mixture_combos  Number of mixture combinations to try (e.g for 2 {0,1},{0.1,0.9},{0.2,0.8} e.t.c., default is 30, recommend 10 for 2, 15 for 3 e.t.c (only meaninful if mixture_n>1)
 ```
 
-Then run:
+Then (if not using the oneshot command) run:
 
 ```bash
 
 sh RunMe_*ProteinName*.sh
 
 ```
+
+
 ## Colab implementation
 
 A Colab implementation of the setup which features graphical interactivity and a guided walkthrough of the setup can be found here:
