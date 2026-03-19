@@ -144,9 +144,12 @@ sh RunMe_*ProteinName*.sh
 ```
 
 
-## Colab implementation
+## Colab implementation to facilitiae specialised setup
 
-A Colab implementation of the setup which features graphical interactivity and a guided walkthrough of the setup can be found here:
+Carbonara’s key strength is its flexibility: users can specify as little or as much of the structure to vary, enforce rigid-body motions of subdomains, and apply a wide range of distance constraints. We strongly recommend tailoring the fitting and constraint parameters to reflect prior structural knowledge, as each system is unique. While the “out-of-the-box” one-shot workflow can yield informative results, careful refinement of these parameters can substantially improve both the quality of the fit and the physical realism of the resulting models.
+
+To aid the user in making these decisions a Colab implementation of the setup which features graphical interactivity and a guided walkthrough of the setup. The follwing are basic versions for both 
+monomer and multimer cases.
 
 - [Monomer version](https://colab.research.google.com/drive/1Bw6M8QbQf7LXu04P6AFzwZPLSZ7XU4vt)  
 - [Multimer version](https://colab.research.google.com/drive/1vscGPfSb6QK1LQiszUAClsOwue2ihSqU)
