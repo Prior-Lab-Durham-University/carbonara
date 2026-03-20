@@ -144,7 +144,7 @@ sh RunMe_*ProteinName*.sh
 ```
 
 
-## Colab implementation to facilitiae specialised setup
+## Colab implementation to facilitate specialised setup
 
 Carbonara’s key strength is its flexibility: users can specify as little or as much of the structure to vary, enforce rigid-body motions of subdomains, and apply a wide range of distance constraints. We strongly recommend tailoring the fitting and constraint parameters to reflect prior structural knowledge, as each system is unique. While the “out-of-the-box” one-shot workflow can yield informative results, careful refinement of these parameters can substantially improve both the quality of the fit and the physical realism of the resulting models.
 
