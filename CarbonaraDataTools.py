@@ -1636,7 +1636,6 @@ def get_secondary(fingerprint_file):
     with open(fingerprint_file, "r") as f:
         # Drop empty / whitespace-only lines (these are what break np.loadtxt)
         fplst = [ln.strip() for ln in f if ln.strip() != ""]
-    print("new read")
     # Now fplst is a simple Python list of lines, always iterable
     # Preserve your original indexing logic: 2,4,6,... (0-based)
     fplstout = [np.asarray(list(fplst[i])) for i in range(2, len(fplst), 2)]
