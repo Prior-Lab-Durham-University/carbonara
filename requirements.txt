@@ -1,0 +1,12 @@
+numpy
+scipy
+matplotlib
+pandas
+biopython
+ipython
+ipywidgets
+tqdm
+plotly
+networkx
+scikit-learn
+numba
