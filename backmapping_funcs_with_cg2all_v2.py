@@ -1,0 +1,1834 @@
+import os
+import glob
+import re
+import sys
+
+from tempfile import mkstemp
+from os.path import basename
+
+import numpy as np
+try:
+    from modeller import *
+    from modeller.automodel import *
+    from modeller.scripts import complete_pdb
+    MODELLER_AVAILABLE = True
+    MODELLER_IMPORT_ERROR = None
+except Exception as _modeller_exc:
+    MODELLER_AVAILABLE = False
+    MODELLER_IMPORT_ERROR = _modeller_exc
+
+    # Keep names defined so this module can still be imported when MODELLER is absent.
+    complete_pdb = None
+
+
+def _require_modeller():
+    if not MODELLER_AVAILABLE:
+        raise ImportError(
+            "MODELLER is required for method='modeller' but could not be imported. "
+            f"Original import error: {MODELLER_IMPORT_ERROR}"
+        )
+
+
+from Bio.PDB import PDBParser, PDBIO
+from Bio.PDB.Polypeptide import is_aa
+
+import CarbonaraDataTools as cdt
+import numpy as np
+import json
+import pickle
+
+def renumber_pdb_chains_start_from_1(input_pdb, output_pdb):
+    """
+    Renumber each chain in a PDB file so residues start from 1.
+
+    Parameters:
+        input_pdb (str): Path to the original PDB file
+        output_pdb (str): Path to write the renumbered PDB
+    """
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("protein", input_pdb)
+
+    for model in structure:
+        for chain in model:
+            new_resnum = 1
+            for res in chain:
+                if is_aa(res, standard=True) or res.id[0] == ' ':
+                    res.id = (' ', new_resnum, ' ')
+                    new_resnum += 1
+
+    io = PDBIO()
+    io.set_structure(structure)
+    io.save(output_pdb)
+
+def CA2AA(filename, outputname, iterations=1, stout=False):
+    _require_modeller()
+    # output=None
+
+    # 
+
+    # template for pir file format (shitty format but modeller likes it and I want him to be happy)
+    _PIR_TEMPLATE = '\n'.join(['>P1;%s', 'sequence:::::::::', '%s', '*', '', '>P1;model_ca', 'structure:%s:FIRST:@:END:@::::', '*'])
+
+   
+    # printing is slowing us down/bogging up the output - preventing output
+    old_stdout = sys.stdout
+    if stout != True:
+        sys.stdout = open(os.devnull, 'w')
+
+    # need a name for a loads of temporary files - naming doesn't matter as they'll be deleted later
+    pdb = mkstemp(prefix='.', suffix='.pdb', dir='.', text=True)[1]
+    prefix = basename(pdb).rsplit('.', 1)[0]
+
+    # dictionary for mapping residues names to letter representation
+    aa_names = {
+        'A': 'ALA', 'C': 'CYS', 'D': 'ASP', 'E': 'GLU',
+        'F': 'PHE', 'G': 'GLY', 'H': 'HIS', 'I': 'ILE',
+        'K': 'LYS', 'L': 'LEU', 'M': 'MET', 'N': 'ASN',
+        'P': 'PRO', 'Q': 'GLN', 'R': 'ARG', 'S': 'SER',
+        'T': 'THR', 'V': 'VAL', 'W': 'TRP', 'Y': 'TYR'
+    }
+    # The ol' revers-a-roo - didn't want to rewrite ^
+    aa_names = {v: k for k, v in aa_names.items()}
+
+    # Initialise the list where all CA info will be appended
+    atoms = []
+
+    # Template for finding the CA lines in PDB format
+    pattern = re.compile('ATOM.{9}CA .([A-Z]{3}) ([A-Z ])(.{5}).{27}(.{12}).*')
+
+    # reading the pdb + writing new tmp PDB file
+    with open(filename, 'r') as f, open(pdb, 'w') as tmp:
+
+        for line in f:
+
+            # stop at end of PDB
+            if line.startswith('ENDMDL'):
+                break
+
+            else:
+                # find matches to 'ATOM CA ...' format (lines in PDB containing CA backbone positions)
+                match = re.match(pattern, line)
+
+                # Skipping lines that dont match (return None)
+                if match:
+                    # append to list of CA atom positions + write to tmp PDB
+                    atoms.append(match.groups())
+                    tmp.write(line)
+
+        # Quick error check - just in case no CA atoms are present in PDB
+        if not len(atoms):
+            raise Exception('File %s contains no CA atoms' % filename)
+
+        # # Setup for multiple/broken chains check in PDB
+        # chains = [atoms[0][1]]
+        # seq = ''
+        # rr = int(atoms[0][2]) - 1
+        #
+        # for a in atoms:
+        #     s, c, r = a[:3]
+        #
+        #     # check for broken chain
+        #     if int(r) != int(rr) + 1:
+        #         seq += '/'
+        #
+        #     # move along sequence + update the sequence text representation
+        #     rr = r
+        #     seq += aa_names[s]
+        #
+        #     if c not in chains:
+        #         chains += c
+
+
+    atoms_array = np.array(atoms)
+    chains_lst = atoms_array[:,1]
+
+    chains = list(np.unique(chains_lst))
+
+    current_chain = chains_lst[0]
+    seq = ''
+    rr = int(atoms[0][2]) - 1
+
+    for a in atoms:
+        s, c, r = a[:3]
+
+        # check for broken chain
+        if c != current_chain:
+            current_chain = c
+            seq += '/'
+
+        # move along sequence + update the sequence text representation
+        rr = r
+        seq += aa_names[s]
+
+        # if c not in chains:
+        #     chains += c
+
+    # temp PIR file
+    pir = prefix + '.pir'
+    with open(pir, 'w') as f:
+        f.write(_PIR_TEMPLATE % (prefix, seq, pdb))
+
+    # Modeller bit - documented standard usage
+    env = Environ()
+    env.io.atom_files_directory = ['.']
+    env.libs.topology.read(file='$(LIB)/top_allh.lib')
+    env.libs.parameters.read(file='$(LIB)/par.lib')
+
+
+    class MyModel(automodel):
+
+        def special_patches(self, aln):
+            self.rename_segments(segment_ids=chains)
+
+    # **NEXT*** - adding secondary structure constraints:
+    # https://salilab.org/modeller/manual/node28.html
+
+
+    mdl = MyModel(
+        env,
+        alnfile=pir,
+        knowns='model_ca',
+        sequence=prefix,
+        assess_methods=assess.DOPE
+    )
+
+    mdl.md_level = refine.fast
+    mdl.auto_align(matrix_file=prefix + '.mat')
+    mdl.starting_model = 1
+    mdl.ending_model = int(iterations)
+    mdl.final_malign3d = True
+    mdl.make()
+
+    # selecting successful models
+    models = [m for m in mdl.outputs if m['failure'] is None]
+
+    # Sorting by best to worst model (out of iteration)
+    sorted_models = sorted(models, key=lambda d: d['DOPE score'])
+    final = sorted_models[0]['name'].rsplit('.', 1)[0] + '_fit.pdb'
+
+    # outputname = filename.split('.')[0] + '_AA.pdb'
+
+    sss = complete_pdb(env, final)
+    sss.write(file=outputname, model_format='PDB')
+
+    outfile = sys.stdout
+
+    with open(final) as f:
+        a = iter(atoms)
+        current = ch = r = t = nl = None
+        for line in f:
+            if line.startswith('ATOM'):
+                res = line[21:27]
+                if not current or current != res:
+                    current = res
+                    ch, r, t = a.__next__()[1:]
+                nl = line[:21] + ch + r + line[27:54] + t
+                if len(line) > 66:
+                    nl += line[66:]
+                outfile.write(nl)
+            elif line.startswith('TER '):
+                outfile.write(line[:22] + nl[22:27] + '\n')
+            else:
+                outfile.write(line)
+
+    # clean up (theres tonnes of shit modeller has created)
+    junk = glob.glob(prefix + '*')
+    for j in junk:
+        os.remove(j)
+        
+    sys.stdout = old_stdout
+
+
+
+def CA2AA_secondary_slow(filename, outputname, ss_list, iterations=1, stout=False):
+    _require_modeller()
+    # output=None
+
+    # template for pir file format (shitty format but modeller likes it and I want him to be happy)
+    _PIR_TEMPLATE = '\n'.join(['>P1;%s', 'sequence:::::::::', '%s', '*', '', '>P1;model_ca', 'structure:%s:FIRST:@:END:@::::', '*'])
+
+   
+    # printing is slowing us down/bogging up the output - preventing output
+    old_stdout = sys.stdout
+    if stout != True:
+        sys.stdout = open(os.devnull, 'w')
+
+    # need a name for a loads of temporary files - naming doesn't matter as they'll be deleted later
+    pdb = mkstemp(prefix='.', suffix='.pdb', dir='.', text=True)[1]
+    prefix = basename(pdb).rsplit('.', 1)[0]
+
+    # dictionary for mapping residues names to letter representation
+    aa_names = {
+        'A': 'ALA', 'C': 'CYS', 'D': 'ASP', 'E': 'GLU',
+        'F': 'PHE', 'G': 'GLY', 'H': 'HIS', 'I': 'ILE',
+        'K': 'LYS', 'L': 'LEU', 'M': 'MET', 'N': 'ASN',
+        'P': 'PRO', 'Q': 'GLN', 'R': 'ARG', 'S': 'SER',
+        'T': 'THR', 'V': 'VAL', 'W': 'TRP', 'Y': 'TYR'
+    }
+    # The ol' revers-a-roo - didn't want to rewrite ^
+    aa_names = {v: k for k, v in aa_names.items()}
+
+    # Initialise the list where all CA info will be appended
+    atoms = []
+
+    # Template for finding the CA lines in PDB format
+    pattern = re.compile('ATOM.{9}CA .([A-Z]{3}) ([A-Z ])(.{5}).{27}(.{12}).*')
+
+    # reading the pdb + writing new tmp PDB file
+    with open(filename, 'r') as f, open(pdb, 'w') as tmp:
+
+        for line in f:
+
+            # stop at end of PDB
+            if line.startswith('ENDMDL'):
+                break
+
+            else:
+                # find matches to 'ATOM CA ...' format (lines in PDB containing CA backbone positions)
+                match = re.match(pattern, line)
+
+                # Skipping lines that dont match (return None)
+                if match:
+                    # append to list of CA atom positions + write to tmp PDB
+                    atoms.append(match.groups())
+                    tmp.write(line)
+
+        # Quick error check - just in case no CA atoms are present in PDB
+        if not len(atoms):
+            raise Exception('File %s contains no CA atoms' % filename)
+
+    atoms_array = np.array(atoms)
+    chains_lst = atoms_array[:,1]
+
+    chains = list(np.unique(chains_lst))
+
+    current_chain = chains_lst[0]
+    seq = ''
+    rr = int(atoms[0][2]) - 1
+
+    for a in atoms:
+        s, c, r = a[:3]
+
+        # check for broken chain
+        if c != current_chain:
+            current_chain = c
+            seq += '/'
+
+        # move along sequence + update the sequence text representation
+        rr = r
+        seq += aa_names[s]
+
+        # if c not in chains:
+        #     chains += c
+
+    # temp PIR file
+    pir = prefix + '.pir'
+    with open(pir, 'w') as f:
+        f.write(_PIR_TEMPLATE % (prefix, seq, pdb))
+
+    # Modeller bit - documented standard usage
+    env = Environ()
+    env.io.atom_files_directory = ['.']
+    env.libs.topology.read(file='$(LIB)/top_allh.lib')
+    env.libs.parameters.read(file='$(LIB)/par.lib')
+
+
+    # class MyModel(automodel):
+
+    #     def special_patches(self, aln):
+    #         self.rename_segments(segment_ids=chains)
+
+    # **NEXT*** - adding secondary structure constraints:
+    # https://salilab.org/modeller/manual/node28.html
+
+    class MyModel(automodel):
+        def __init__(self, env, alnfile, knowns, sequence, assess_methods, ss_list):
+            super().__init__(env, alnfile=alnfile, knowns=knowns, sequence=sequence, assess_methods=assess_methods)
+            self.ss_list = ss_list
+
+        def special_patches(self, aln):
+            self.rename_segments(segment_ids=chains)
+
+        def special_restraints(self, aln):
+            rsr = self.restraints
+            at = self.atoms
+
+            if self.ss_list is not None and len(self.ss_list) > 0:
+                self.add_secondary_structure_restraints()
+
+        def add_secondary_structure_restraints(self):
+            rsr = self.restraints
+            current_element = self.ss_list[0]
+            start = 1
+            for i, ss in enumerate(self.ss_list[1:], start=2):
+                if ss != current_element:
+                    end = i - 1
+                    if current_element == 'H':
+                        rsr.add(secondary_structure.alpha(self.residue_range(f'{start}:A', f'{end}:A')))
+                    elif current_element == 'S':
+                        rsr.add(secondary_structure.strand(self.residue_range(f'{start}:A', f'{end}:A')))
+                    start = i
+                    current_element = ss
+            
+            # Add the last element
+            end = len(self.ss_list)
+            if current_element == 'H':
+                rsr.add(secondary_structure.alpha(self.residue_range(f'{start}:A', f'{end}:A')))
+            elif current_element == 'S':
+                rsr.add(secondary_structure.strand(self.residue_range(f'{start}:A', f'{end}:A')))
+
+
+
+    mdl = MyModel(
+        env,
+        alnfile=pir,
+        knowns='model_ca',
+        sequence=prefix,
+        assess_methods=assess.DOPE,
+        ss_list=ss_list
+    )
+
+    mdl.md_level = refine.slow
+    mdl.auto_align(matrix_file=prefix + '.mat')
+    mdl.starting_model = 1
+    mdl.ending_model = int(iterations)
+    mdl.final_malign3d = True
+    mdl.make()
+
+    # selecting successful models
+    models = [m for m in mdl.outputs if m['failure'] is None]
+
+    # Sorting by best to worst model (out of iteration)
+    sorted_models = sorted(models, key=lambda d: d['DOPE score'])
+    final = sorted_models[0]['name'].rsplit('.', 1)[0] + '_fit.pdb'
+
+    # outputname = filename.split('.')[0] + '_AA.pdb'
+
+    sss = complete_pdb(env, final)
+    sss.write(file=outputname, model_format='PDB')
+
+    outfile = sys.stdout
+
+    with open(final) as f:
+        a = iter(atoms)
+        current = ch = r = t = nl = None
+        for line in f:
+            if line.startswith('ATOM'):
+                res = line[21:27]
+                if not current or current != res:
+                    current = res
+                    ch, r, t = a.__next__()[1:]
+                nl = line[:21] + ch + r + line[27:54] + t
+                if len(line) > 66:
+                    nl += line[66:]
+                outfile.write(nl)
+            elif line.startswith('TER '):
+                outfile.write(line[:22] + nl[22:27] + '\n')
+            else:
+                outfile.write(line)
+
+    # clean up (theres tonnes of shit modeller has created)
+    junk = glob.glob(prefix + '*')
+    for j in junk:
+        os.remove(j)
+        
+    sys.stdout = old_stdout
+
+
+def CA2AA_secondary_fast(filename, outputname, ss_list, iterations=1, stout=False):
+    _require_modeller()
+    # output=None
+
+    # template for pir file format (shitty format but modeller likes it and I want him to be happy)
+    _PIR_TEMPLATE = '\n'.join(['>P1;%s', 'sequence:::::::::', '%s', '*', '', '>P1;model_ca', 'structure:%s:FIRST:@:END:@::::', '*'])
+
+   
+    # printing is slowing us down/bogging up the output - preventing output
+    old_stdout = sys.stdout
+    if stout != True:
+        sys.stdout = open(os.devnull, 'w')
+
+    # need a name for a loads of temporary files - naming doesn't matter as they'll be deleted later
+    pdb = mkstemp(prefix='.', suffix='.pdb', dir='.', text=True)[1]
+    prefix = basename(pdb).rsplit('.', 1)[0]
+
+    # dictionary for mapping residues names to letter representation
+    aa_names = {
+        'A': 'ALA', 'C': 'CYS', 'D': 'ASP', 'E': 'GLU',
+        'F': 'PHE', 'G': 'GLY', 'H': 'HIS', 'I': 'ILE',
+        'K': 'LYS', 'L': 'LEU', 'M': 'MET', 'N': 'ASN',
+        'P': 'PRO', 'Q': 'GLN', 'R': 'ARG', 'S': 'SER',
+        'T': 'THR', 'V': 'VAL', 'W': 'TRP', 'Y': 'TYR'
+    }
+    # The ol' revers-a-roo - didn't want to rewrite ^
+    aa_names = {v: k for k, v in aa_names.items()}
+
+    # Initialise the list where all CA info will be appended
+    atoms = []
+
+    # Template for finding the CA lines in PDB format
+    pattern = re.compile('ATOM.{9}CA .([A-Z]{3}) ([A-Z ])(.{5}).{27}(.{12}).*')
+
+    # reading the pdb + writing new tmp PDB file
+    with open(filename, 'r') as f, open(pdb, 'w') as tmp:
+
+        for line in f:
+
+            # stop at end of PDB
+            if line.startswith('ENDMDL'):
+                break
+
+            else:
+                # find matches to 'ATOM CA ...' format (lines in PDB containing CA backbone positions)
+                match = re.match(pattern, line)
+
+                # Skipping lines that dont match (return None)
+                if match:
+                    # append to list of CA atom positions + write to tmp PDB
+                    atoms.append(match.groups())
+                    tmp.write(line)
+
+        # Quick error check - just in case no CA atoms are present in PDB
+        if not len(atoms):
+            raise Exception('File %s contains no CA atoms' % filename)
+
+    atoms_array = np.array(atoms)
+    chains_lst = atoms_array[:,1]
+
+    chains = list(np.unique(chains_lst))
+
+    current_chain = chains_lst[0]
+    seq = ''
+    rr = int(atoms[0][2]) - 1
+
+    for a in atoms:
+        s, c, r = a[:3]
+
+        # check for broken chain
+        if c != current_chain:
+            current_chain = c
+            seq += '/'
+
+        # move along sequence + update the sequence text representation
+        rr = r
+        seq += aa_names[s]
+
+        # if c not in chains:
+        #     chains += c
+
+    # temp PIR file
+    pir = prefix + '.pir'
+    with open(pir, 'w') as f:
+        f.write(_PIR_TEMPLATE % (prefix, seq, pdb))
+
+    # Modeller bit - documented standard usage
+    env = Environ()
+    env.io.atom_files_directory = ['.']
+    env.libs.topology.read(file='$(LIB)/top_allh.lib')
+    env.libs.parameters.read(file='$(LIB)/par.lib')
+
+
+    # class MyModel(automodel):
+
+    #     def special_patches(self, aln):
+    #         self.rename_segments(segment_ids=chains)
+
+    # **NEXT*** - adding secondary structure constraints:
+    # https://salilab.org/modeller/manual/node28.html
+
+    class MyModel(automodel):
+        def __init__(self, env, alnfile, knowns, sequence, assess_methods, ss_list):
+            super().__init__(env, alnfile=alnfile, knowns=knowns, sequence=sequence, assess_methods=assess_methods)
+            self.ss_list = ss_list
+
+        def special_patches(self, aln):
+            self.rename_segments(segment_ids=chains)
+
+        def special_restraints(self, aln):
+            rsr = self.restraints
+            at = self.atoms
+
+            if self.ss_list is not None and len(self.ss_list) > 0:
+                self.add_secondary_structure_restraints()
+
+        def add_secondary_structure_restraints(self):
+            rsr = self.restraints
+            current_element = self.ss_list[0]
+            start = 1
+            for i, ss in enumerate(self.ss_list[1:], start=2):
+                if ss != current_element:
+                    end = i - 1
+                    if current_element == 'H':
+                        rsr.add(secondary_structure.alpha(self.residue_range(f'{start}:A', f'{end}:A')))
+                    elif current_element == 'S':
+                        rsr.add(secondary_structure.strand(self.residue_range(f'{start}:A', f'{end}:A')))
+                    start = i
+                    current_element = ss
+            
+            # Add the last element
+            end = len(self.ss_list)
+            if current_element == 'H':
+                rsr.add(secondary_structure.alpha(self.residue_range(f'{start}:A', f'{end}:A')))
+            elif current_element == 'S':
+                rsr.add(secondary_structure.strand(self.residue_range(f'{start}:A', f'{end}:A')))
+
+
+
+    mdl = MyModel(
+        env,
+        alnfile=pir,
+        knowns='model_ca',
+        sequence=prefix,
+        assess_methods=assess.DOPE,
+        ss_list=ss_list
+    )
+
+    mdl.md_level = refine.fast
+    mdl.auto_align(matrix_file=prefix + '.mat')
+    mdl.starting_model = 1
+    mdl.ending_model = int(iterations)
+    mdl.final_malign3d = True
+    mdl.make()
+
+    # selecting successful models
+    models = [m for m in mdl.outputs if m['failure'] is None]
+
+    # Sorting by best to worst model (out of iteration)
+    sorted_models = sorted(models, key=lambda d: d['DOPE score'])
+    final = sorted_models[0]['name'].rsplit('.', 1)[0] + '_fit.pdb'
+
+    # outputname = filename.split('.')[0] + '_AA.pdb'
+
+    sss = complete_pdb(env, final)
+    sss.write(file=outputname, model_format='PDB')
+
+    outfile = sys.stdout
+
+    with open(final) as f:
+        a = iter(atoms)
+        current = ch = r = t = nl = None
+        for line in f:
+            if line.startswith('ATOM'):
+                res = line[21:27]
+                if not current or current != res:
+                    current = res
+                    ch, r, t = a.__next__()[1:]
+                nl = line[:21] + ch + r + line[27:54] + t
+                if len(line) > 66:
+                    nl += line[66:]
+                outfile.write(nl)
+            elif line.startswith('TER '):
+                outfile.write(line[:22] + nl[22:27] + '\n')
+            else:
+                outfile.write(line)
+
+    # clean up (theres tonnes of shit modeller has created)
+    junk = glob.glob(prefix + '*')
+    for j in junk:
+        os.remove(j)
+        
+    sys.stdout = old_stdout
+
+
+def CA2AA_secondary_multimer(filename, outputname, ss_list, disulfides=None, iterations=1, stout=False):
+    _require_modeller()
+    _PIR_TEMPLATE = '\n'.join([
+        '>P1;%s',
+        'sequence:::::::::',
+        '%s',
+        '*',
+        '',
+        '>P1;model_ca',
+        'structure:%s:FIRST:@:END:@::::',
+        '*'
+    ])
+
+    # Suppress output if not requested
+    if not stout:
+        sys.stdout = open(os.devnull, 'w')
+
+    pdb = mkstemp(prefix='.', suffix='.pdb', dir='.', text=True)[1]
+    prefix = basename(pdb).rsplit('.', 1)[0]
+
+    # Reverse map residue names to 1-letter code
+    aa_names = {
+        'ALA': 'A', 'CYS': 'C', 'ASP': 'D', 'GLU': 'E',
+        'PHE': 'F', 'GLY': 'G', 'HIS': 'H', 'ILE': 'I',
+        'LYS': 'K', 'LEU': 'L', 'MET': 'M', 'ASN': 'N',
+        'PRO': 'P', 'GLN': 'Q', 'ARG': 'R', 'SER': 'S',
+        'THR': 'T', 'VAL': 'V', 'TRP': 'W', 'TYR': 'Y'
+    }
+
+    atoms = []
+    pattern = re.compile(r'^ATOM.{9}CA\s+([A-Z]{3})\s([A-Z])\s+(\d+).{27}(.{12}).*')
+
+    # Read and write filtered CA-only PDB
+    with open(filename, 'r') as f, open(pdb, 'w') as tmp:
+        for line in f:
+            if line.startswith('ENDMDL'):
+                break
+            match = re.match(pattern, line)
+            if match:
+                atoms.append(match.groups())
+                tmp.write(line)
+
+    if not atoms:
+        raise Exception(f'File {filename} contains no CA atoms')
+
+    atoms_array = np.array(atoms)
+    chains_lst = atoms_array[:,1]
+    unique_chains = list(np.unique(chains_lst))
+
+    seq = ''
+    current_chain = chains_lst[0]
+
+    for i, a in enumerate(atoms):
+        resname, chain, resnum = a[:3]
+        if chain != current_chain:
+            seq += '/'
+            current_chain = chain
+        seq += aa_names.get(resname.strip(), 'X')
+
+    pir = prefix + '.pir'
+    with open(pir, 'w') as f:
+        f.write(_PIR_TEMPLATE % (prefix, seq, pdb))
+
+    env = Environ()
+    env.io.atom_files_directory = ['.']
+    env.libs.topology.read(file='$(LIB)/top_allh.lib')
+    env.libs.parameters.read(file='$(LIB)/par.lib')
+
+    class MyModel(automodel):
+        def __init__(self, env, alnfile, knowns, sequence, assess_methods, ss_list, disulfides):
+            super().__init__(env, alnfile=alnfile, knowns=knowns, sequence=sequence, assess_methods=assess_methods)
+            self.ss_list = ss_list
+            self.disulfides = disulfides or []
+
+        def special_patches(self, aln):
+            # FIX: Extract string names from chains
+            seen_chain_ids = sorted({str(res.chain.name) for res in self.residues})
+            self.rename_segments(segment_ids=seen_chain_ids)
+            
+            for res1_str, res2_str in self.disulfides:
+                res1_num, chain1 = res1_str.split(':')
+                res2_num, chain2 = res2_str.split(':')
+                try:
+                    res1 = self.residues[f'{int(res1_num)}:{chain1}']
+                    res2 = self.residues[f'{int(res2_num)}:{chain2}']
+                    self.patch(residue_type='DISU', residues=(res1, res2))
+                except KeyError:
+                    print(f"Warning: could not find residues {res1_str} or {res2_str} for disulfide bond")
+            
+
+        def special_restraints(self, aln):
+            if not self.ss_list:
+                return
+            self.add_secondary_structure_restraints()
+
+        def add_secondary_structure_restraints(self):
+            rsr = self.restraints
+            i = 1
+            start = 1
+            current_ss = self.ss_list[0]
+            chain = chains_lst[0]
+
+            for i in range(1, len(self.ss_list)):
+                if self.ss_list[i] != current_ss or chains_lst[i] != chains_lst[i-1]:
+                    end = i
+                    if current_ss == 'H':
+                        rsr.add(secondary_structure.alpha(self.residue_range(f'{start}:{chain}', f'{end}:{chain}')))
+                    elif current_ss == 'S':
+                        rsr.add(secondary_structure.strand(self.residue_range(f'{start}:{chain}', f'{end}:{chain}')))
+                    start = i + 1
+                    current_ss = self.ss_list[i]
+                    chain = chains_lst[i]
+            # Final stretch
+            if current_ss == 'H':
+                rsr.add(secondary_structure.alpha(self.residue_range(f'{start}:{chain}', f'{len(self.ss_list)}:{chain}')))
+            elif current_ss == 'S':
+                rsr.add(secondary_structure.strand(self.residue_range(f'{start}:{chain}', f'{len(self.ss_list)}:{chain}')))
+
+    mdl = MyModel(
+        env,
+        alnfile=pir,
+        knowns='model_ca',
+        sequence=prefix,
+        assess_methods=assess.DOPE,
+        ss_list=ss_list,
+        disulfides=disulfides
+    )
+
+    mdl.md_level = refine.fast
+    mdl.auto_align(matrix_file=prefix + '.mat')
+    mdl.starting_model = 1
+    mdl.ending_model = int(iterations)
+    mdl.final_malign3d = True
+    mdl.make()
+
+    models = [m for m in mdl.outputs if m['failure'] is None]
+    sorted_models = sorted(models, key=lambda d: d['DOPE score'])
+    final = sorted_models[0]['name'].rsplit('.', 1)[0] + '_fit.pdb'
+
+    sss = complete_pdb(env, final)
+    sss.write(file=outputname, model_format='PDB')
+    renumber_pdb_chains_start_from_1(outputname,outputname)
+
+def CA2AA_secondary_multimer_slow(filename, outputname, ss_list, disulfides=None, iterations=1, stout=False):
+    _require_modeller()
+    _PIR_TEMPLATE = '\n'.join([
+        '>P1;%s',
+        'sequence:::::::::',
+        '%s',
+        '*',
+        '',
+        '>P1;model_ca',
+        'structure:%s:FIRST:@:END:@::::',
+        '*'
+    ])
+
+    # Suppress output if not requested
+    if not stout:
+        sys.stdout = open(os.devnull, 'w')
+
+    pdb = mkstemp(prefix='.', suffix='.pdb', dir='.', text=True)[1]
+    prefix = basename(pdb).rsplit('.', 1)[0]
+
+    # Reverse map residue names to 1-letter code
+    aa_names = {
+        'ALA': 'A', 'CYS': 'C', 'ASP': 'D', 'GLU': 'E',
+        'PHE': 'F', 'GLY': 'G', 'HIS': 'H', 'ILE': 'I',
+        'LYS': 'K', 'LEU': 'L', 'MET': 'M', 'ASN': 'N',
+        'PRO': 'P', 'GLN': 'Q', 'ARG': 'R', 'SER': 'S',
+        'THR': 'T', 'VAL': 'V', 'TRP': 'W', 'TYR': 'Y'
+    }
+
+    atoms = []
+    pattern = re.compile(r'^ATOM.{9}CA\s+([A-Z]{3})\s([A-Z])\s+(\d+).{27}(.{12}).*')
+
+    # Read and write filtered CA-only PDB
+    with open(filename, 'r') as f, open(pdb, 'w') as tmp:
+        for line in f:
+            if line.startswith('ENDMDL'):
+                break
+            match = re.match(pattern, line)
+            if match:
+                atoms.append(match.groups())
+                tmp.write(line)
+
+    if not atoms:
+        raise Exception(f'File {filename} contains no CA atoms')
+
+    atoms_array = np.array(atoms)
+    chains_lst = atoms_array[:,1]
+    unique_chains = list(np.unique(chains_lst))
+
+    seq = ''
+    current_chain = chains_lst[0]
+
+    for i, a in enumerate(atoms):
+        resname, chain, resnum = a[:3]
+        if chain != current_chain:
+            seq += '/'
+            current_chain = chain
+        seq += aa_names.get(resname.strip(), 'X')
+
+    pir = prefix + '.pir'
+    with open(pir, 'w') as f:
+        f.write(_PIR_TEMPLATE % (prefix, seq, pdb))
+
+    env = Environ()
+    env.io.atom_files_directory = ['.']
+    env.libs.topology.read(file='$(LIB)/top_allh.lib')
+    env.libs.parameters.read(file='$(LIB)/par.lib')
+
+    class MyModel(automodel):
+        def __init__(self, env, alnfile, knowns, sequence, assess_methods, ss_list, disulfides):
+            super().__init__(env, alnfile=alnfile, knowns=knowns, sequence=sequence, assess_methods=assess_methods)
+            self.ss_list = ss_list
+            self.disulfides = disulfides or []
+
+        def special_patches(self, aln):
+            # FIX: Extract string names from chains
+            seen_chain_ids = sorted({str(res.chain.name) for res in self.residues})
+            self.rename_segments(segment_ids=seen_chain_ids)
+            
+            for res1_str, res2_str in self.disulfides:
+                res1_num, chain1 = res1_str.split(':')
+                res2_num, chain2 = res2_str.split(':')
+                try:
+                    res1 = self.residues[f'{int(res1_num)}:{chain1}']
+                    res2 = self.residues[f'{int(res2_num)}:{chain2}']
+                    self.patch(residue_type='DISU', residues=(res1, res2))
+                except KeyError:
+                    print(f"Warning: could not find residues {res1_str} or {res2_str} for disulfide bond")
+            
+
+        def special_restraints(self, aln):
+            if not self.ss_list:
+                return
+            self.add_secondary_structure_restraints()
+
+        def add_secondary_structure_restraints(self):
+            rsr = self.restraints
+            i = 1
+            start = 1
+            current_ss = self.ss_list[0]
+            chain = chains_lst[0]
+
+            for i in range(1, len(self.ss_list)):
+                if self.ss_list[i] != current_ss or chains_lst[i] != chains_lst[i-1]:
+                    end = i
+                    if current_ss == 'H':
+                        rsr.add(secondary_structure.alpha(self.residue_range(f'{start}:{chain}', f'{end}:{chain}')))
+                    elif current_ss == 'S':
+                        rsr.add(secondary_structure.strand(self.residue_range(f'{start}:{chain}', f'{end}:{chain}')))
+                    start = i + 1
+                    current_ss = self.ss_list[i]
+                    chain = chains_lst[i]
+            # Final stretch
+            if current_ss == 'H':
+                rsr.add(secondary_structure.alpha(self.residue_range(f'{start}:{chain}', f'{len(self.ss_list)}:{chain}')))
+            elif current_ss == 'S':
+                rsr.add(secondary_structure.strand(self.residue_range(f'{start}:{chain}', f'{len(self.ss_list)}:{chain}')))
+
+    mdl = MyModel(
+        env,
+        alnfile=pir,
+        knowns='model_ca',
+        sequence=prefix,
+        assess_methods=assess.DOPE,
+        ss_list=ss_list,
+        disulfides=disulfides
+    )
+
+    mdl.md_level = refine.slow
+    mdl.auto_align(matrix_file=prefix + '.mat')
+    mdl.starting_model = 1
+    mdl.ending_model = int(iterations)
+    mdl.final_malign3d = True
+    mdl.make()
+
+    models = [m for m in mdl.outputs if m['failure'] is None]
+    sorted_models = sorted(models, key=lambda d: d['DOPE score'])
+    final = sorted_models[0]['name'].rsplit('.', 1)[0] + '_fit.pdb'
+
+    sss = complete_pdb(env, final)
+    sss.write(file=outputname, model_format='PDB')
+    renumber_pdb_chains_start_from_1(outputname,outputname)
+
+def backmap_ca_chain(coords_file, fingerprint_file, write_directory, name, ss_constraint=False):
+
+    # write the CA chain into pdb format - note this won't work if non-standard residues are present!
+    ca_pdb_output_name = os.path.join(write_directory, name+'_CA.pdb')
+    cdt.Carbonara_2_PDB(coords_file, fingerprint_file, ca_pdb_output_name)
+    print('Alpha Coordinates pdb written to: ', ca_pdb_output_name)
+
+    aa_pdb_output_name = os.path.join(write_directory, name+'_AA.pdb')
+
+    ss_list = list(np.genfromtxt(fingerprint_file, dtype=str)[2])
+
+    if ss_constraint:
+        CA2AA_secondary(ca_pdb_output_name, aa_pdb_output_name, ss_list, iterations=3, stout=False)
+
+    else:
+        CA2AA(ca_pdb_output_name, aa_pdb_output_name, iterations=3, stout=False)
+
+    print('All Atomistic pdb written to: ', aa_pdb_output_name)
+
+def backmap_ca_chain_multimer(coords_file, fingerprint_file, write_directory, name,lengths,disulfides=None):
+
+    # write the CA chain into pdb format - note this won't work if non-standard residues are present!
+    split_coords_into_chains(coords_file,coords_file, lengths)
+    
+    ca_pdb_output_name = os.path.join(write_directory, name+'_CA.pdb')
+    cdt.Carbonara_2_PDB(coords_file, fingerprint_file, ca_pdb_output_name)
+    print('Alpha Coordinates pdb written to: ', ca_pdb_output_name)
+
+    aa_pdb_output_name = os.path.join(write_directory, name+'_AA.pdb')
+
+    ss_list = list(np.genfromtxt(fingerprint_file, dtype=str)[2])
+
+    CA2AA_secondary_multimer(ca_pdb_output_name, aa_pdb_output_name, ss_list, disulfides,iterations=1,stout=False)
+
+    print('All Atomistic pdb written to: ', aa_pdb_output_name)
+
+def read_json_from_file(file_path):
+    with open(file_path, 'r') as f:
+        log_data = f.read()
+    return log_data
+
+def split_coords_into_chains(input_path, output_path, segment_lengths):
+    """
+    Re-splits a .dat coordinate file with 'End chain ...' lines into new chains
+    using the given segment_lengths. Always writes 'End chain' after each block.
+    """
+    import re
+
+    with open(input_path, 'r') as infile:
+        raw_lines = [line.strip() for line in infile if line.strip()]
+    
+    # Ignore lines that contain 'End chain' (in any form)
+    coord_lines = [line for line in raw_lines if not re.search(r'end\s+chain', line, re.IGNORECASE)]
+
+    total_input = len(coord_lines)
+    total_expected = sum(segment_lengths)
+
+    print(f"🔍 Found {total_input} coordinates, expecting {total_expected} from segment_lengths")
+
+    if total_input != total_expected:
+        raise ValueError(f"Mismatch: {total_input} coords vs {total_expected} expected")
+
+    idx = 0
+    with open(output_path, 'w') as outfile:
+        for i, L in enumerate(segment_lengths):
+            for _ in range(L):
+                outfile.write(coord_lines[idx] + '\n')
+                idx += 1
+            outfile.write(f"End chain {i+1}\n")
+
+    print(f"✅ Wrote {output_path} with {len(segment_lengths)} chains.")
+
+
+def getFitFiles(directory, threshold="last"):
+    # List all files in the directory that contain "fitLog" in their filename
+    fitlog_files = [f for f in os.listdir(directory) if 'fitLog' in f]
+    fitlog_paths = [os.path.join(directory, f) for f in fitlog_files]
+    
+    molecule_paths = []
+    for fitlog in fitlog_paths:
+        log_data = read_json_from_file(fitlog)
+        lines = log_data.strip().split('\n')
+
+        if threshold == "last":
+            data = json.loads(lines[-1])
+            mol_path = data.get("MoleculePath")
+            scat_path = data.get("ScatterPath")
+            molecule_paths.append([
+                _relativize_path(mol_path, directory),
+                _relativize_path(scat_path, directory)
+            ])
+        else:
+            for line in lines:
+                if not line or line.startswith('{"Run"'):
+                    continue
+                data = json.loads(line)
+                if data.get("ScatterFitFirst", float('inf')) < threshold:
+                    mol_path = data.get("MoleculePath")
+                    scat_path = data.get("ScatterPath")
+                    molecule_paths.append([
+                        _relativize_path(mol_path, directory),
+                        _relativize_path(scat_path, directory)
+                    ])
+    return molecule_paths
+
+def _relativize_path(full_path, directory):
+    """
+    Strips everything before the directory and returns the relative file path from 'directory'.
+    If the file is not in 'directory', return the filename joined with directory.
+    """
+    if not full_path:
+        return None
+    filename = os.path.basename(full_path)
+    return os.path.join(directory, filename)
+
+
+def generateAllAtomisticFits(directory,run,threshold="last"):
+    moleculePaths =getFitFiles(directory+run,threshold)
+    [backmap_ca_chain(moleculePaths[i][0], directory+"fingerPrint1.dat", directory+run,moleculePaths[i][0].strip().split('/')[-1].strip().split('xyz.dat')[0], ss_constraint=True) for i in range(len(moleculePaths)) ]
+
+def generateAllAtomisticFitsMultimter(directory,run,lengths,threshold="last",disulfides=None):
+    moleculePaths =getFitFiles(directory+run,threshold)
+    [backmap_ca_chain_multimer(moleculePaths[i][0], directory+"fingerPrint1.dat", directory+run,moleculePaths[i][0].strip().split('/')[-1].strip().split('xyz.dat')[0],lengths,disulfides) for i in range(len(moleculePaths)) ]
+
+import mdtraj as md
+import string
+
+def get_disulfide_distances(pdb_file, disulfide_list):
+    traj = md.load(pdb_file)
+    topology = traj.topology
+    atom_df, _ = topology.to_dataframe()
+
+    # Dynamically assign 'A', 'B', ... to chain indices in order of appearance
+    available_letters = list(string.ascii_uppercase)
+    chain_id_map = {
+        available_letters[i]: chain.index
+        for i, chain in enumerate(topology.chains)
+    }
+
+    print("User chain label → MDTraj chain index mapping:", chain_id_map)
+
+    # Build SG atom index mapping: (resSeq, internal chain index)
+    sg_atom_indices = {}
+    for atom in topology.atoms:
+        if atom.name == 'SG' and atom.residue.name == 'CYS':
+            chain_idx = atom.residue.chain.index
+            res_seq = atom.residue.resSeq
+            sg_atom_indices[(res_seq, chain_idx)] = atom.index
+
+    # Process each disulfide pair
+    results = []
+    for res1, res2 in disulfide_list:
+        resnum1, chain1 = res1.split(':')
+        resnum2, chain2 = res2.split(':')
+
+        if chain1 not in chain_id_map or chain2 not in chain_id_map:
+            print(f"Warning: Chain {chain1} or {chain2} not found in chain map.")
+            results.append((res1, res2, None))
+            continue
+
+        key1 = (int(resnum1), chain_id_map[chain1])
+        key2 = (int(resnum2), chain_id_map[chain2])
+
+        idx1 = sg_atom_indices.get(key1)
+        idx2 = sg_atom_indices.get(key2)
+
+        if idx1 is None or idx2 is None:
+            print(f"Missing SG atom for: {key1 if idx1 is None else ''} {key2 if idx2 is None else ''}")
+            results.append((res1, res2, None))
+        else:
+            dist_nm = md.compute_distances(traj, [[idx1, idx2]])[0][0]
+            dist_angstrom = dist_nm * 10
+            results.append((res1, res2, dist_angstrom))
+
+    return results
+
+from Bio.PDB import PDBParser
+
+def count_c_alpha_atoms(pdb_filename):
+    """
+    Counts the number of C-alpha (CA) atoms in a PDB file.
+
+    Parameters:
+        pdb_filename (str): Path to the PDB file
+
+    Returns:
+        int: Number of CA atoms
+    """
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("structure", pdb_filename)
+    ca_count = 0
+
+    for model in structure:
+        for chain in model:
+            for residue in chain:
+                if "CA" in residue:
+                    ca_count += 1
+    return ca_count
+
+
+def backmap_ca_chain(coords_file, fingerprint_file, write_directory, name,
+                     ss_constraint=True, rate='fast'):
+    ca_pdb_output_name = os.path.join(write_directory, f"{name}_CA.pdb")
+    cdt.Carbonara_2_PDB(coords_file, fingerprint_file, ca_pdb_output_name)
+    print("Alpha Coordinates pdb written to:", ca_pdb_output_name)
+
+    # Normalize rate to avoid surprises like ' Slow ' or 'SLOW'
+    rate_norm = str(rate).strip().lower()
+
+    # Build base output name
+    aa_base = os.path.join(write_directory, f"{name}_AA_")
+
+    ss_list = list(np.genfromtxt(fingerprint_file, dtype=str)[2])
+
+    if ss_constraint:
+        if rate_norm == 'slow':
+            aa_pdb_output_name = aa_base + "_slow.pdb"
+            print("Running CA2AA_secondary_slow …")
+            CA2AA_secondary_slow(ca_pdb_output_name, aa_pdb_output_name, ss_list,
+                                 iterations=1, stout=False)
+        else:
+            aa_pdb_output_name = aa_base + "_fast.pdb"
+            print("Running CA2AA_secondary_fast …")
+            CA2AA_secondary_fast(ca_pdb_output_name, aa_pdb_output_name, ss_list,
+                                 iterations=1, stout=False)
+    else:
+        aa_pdb_output_name = aa_base + ".pdb"  # ensure extension
+        print("Running unconstrained CA2AA … (rate ignored)")
+        CA2AA(ca_pdb_output_name, aa_pdb_output_name, iterations=3, stout=False)
+
+    print("All Atomistic pdb written to:", aa_pdb_output_name)
+
+def backmap_ca_chain_multimer(coords_file, fingerprint_file, write_directory, name,lengths,disulfides=None,rate_norm='fast'):
+
+    # write the CA chain into pdb format - note this won't work if non-standard residues are present!
+    split_coords_into_chains(coords_file,coords_file, lengths)
+    
+    ca_pdb_output_name = os.path.join(write_directory, name+'_CA.pdb')
+    if rate_norm == 'slow':
+        cdt.Carbonara_2_PDB_multichain_slow(coords_file, fingerprint_file, ca_pdb_output_name,lengths)
+    else:
+        cdt.Carbonara_2_PDB_multichain(coords_file, fingerprint_file, ca_pdb_output_name,lengths)
+    
+    print('Alpha Coordinates pdb written to: ', ca_pdb_output_name)
+
+    aa_pdb_output_name = os.path.join(write_directory, name+'_AA.pdb')
+
+    ss_list = list(np.genfromtxt(fingerprint_file, dtype=str)[2])
+
+    CA2AA_secondary_multimer(ca_pdb_output_name, aa_pdb_output_name, ss_list, disulfides,iterations=1,stout=False)
+
+    print('All Atomistic pdb written to: ', aa_pdb_output_name)
+
+def read_json_from_file(file_path):
+    with open(file_path, 'r') as f:
+        log_data = f.read()
+    return log_data
+
+def split_coords_into_chains(input_path, output_path, segment_lengths):
+    """
+    Re-splits a .dat coordinate file with 'End chain ...' lines into new chains
+    using the given segment_lengths. Always writes 'End chain' after each block.
+    """
+    import re
+
+    with open(input_path, 'r') as infile:
+        raw_lines = [line.strip() for line in infile if line.strip()]
+    
+    # Ignore lines that contain 'End chain' (in any form)
+    coord_lines = [line for line in raw_lines if not re.search(r'end\s+chain', line, re.IGNORECASE)]
+
+    total_input = len(coord_lines)
+    total_expected = sum(segment_lengths)
+
+    print(f"🔍 Found {total_input} coordinates, expecting {total_expected} from segment_lengths")
+
+    if total_input != total_expected:
+        raise ValueError(f"Mismatch: {total_input} coords vs {total_expected} expected")
+
+    idx = 0
+    with open(output_path, 'w') as outfile:
+        for i, L in enumerate(segment_lengths):
+            for _ in range(L):
+                outfile.write(coord_lines[idx] + '\n')
+                idx += 1
+            outfile.write(f"End chain {i+1}\n")
+
+
+def getFitFiles(directory, threshold="last"):
+    molecule_paths = []
+
+    if threshold == "last":
+        scatter_files = glob.glob(os.path.join(directory, "mol*_step_*_scatter.dat"))
+        scat_pat = re.compile(r"mol(\d+)_step_(\d+)_scatter\.dat$")
+        sub_pat = re.compile(r"mol(\d+)_sub_(\d+)_step_(\d+)_xyz\.dat$")
+
+        found = []
+        for scat_path in scatter_files:
+            fname = os.path.basename(scat_path)
+            m = scat_pat.match(fname)
+            if m:
+                runNo = int(m.group(1))
+                stepNo = int(m.group(2))
+                found.append((runNo, stepNo, scat_path))
+
+        if not found:
+            return molecule_paths
+
+        latest_by_run = {}
+        for runNo, stepNo, scat_path in found:
+            if runNo not in latest_by_run or stepNo > latest_by_run[runNo][0]:
+                latest_by_run[runNo] = (stepNo, scat_path)
+
+        for runNo in sorted(latest_by_run):
+            stepNo, scat_path = latest_by_run[runNo]
+
+            mol_pattern = os.path.join(directory, f"mol{runNo}_sub_*_step_{stepNo}_xyz.dat")
+            mol_files = glob.glob(mol_pattern)
+
+            parsed = []
+            for mol_path in mol_files:
+                fname = os.path.basename(mol_path)
+                m = sub_pat.match(fname)
+                if m:
+                    subNo = int(m.group(2))
+                    parsed.append((subNo, mol_path))
+
+            for subNo, mol_path in sorted(parsed):
+                molecule_paths.append([
+                    _relativize_path(mol_path, directory),
+                    _relativize_path(scat_path, directory)
+                ])
+
+        return molecule_paths
+
+    fitlog_files = [f for f in os.listdir(directory) if 'fitLog' in f]
+    fitlog_paths = [os.path.join(directory, f) for f in fitlog_files]
+
+    for fitlog in fitlog_paths:
+        log_data = read_json_from_file(fitlog)
+        lines = log_data.strip().split('\n')
+
+        for line in lines:
+            if not line or line.startswith('{"Run"'):
+                continue
+            data = json.loads(line)
+            if data.get("ScatterFitFirst", float('inf')) < threshold:
+                mol_path = data.get("MoleculePath")
+                scat_path = data.get("ScatterPath")
+                molecule_paths.append([
+                    _relativize_path(mol_path, directory),
+                    _relativize_path(scat_path, directory)
+                ])
+
+    return molecule_paths
+
+def _relativize_path(full_path, directory):
+    """
+    Strips everything before the directory and returns the relative file path from 'directory'.
+    If the file is not in 'directory', return the filename joined with directory.
+    """
+    if not full_path:
+        return None
+    filename = os.path.basename(full_path)
+    return os.path.join(directory, filename)
+
+#warning put in temp fix for this
+
+
+def generateAllAtomisticFits(directory,run,disulfides=None,threshold="last",rateIn= "fast"):
+    with open(directory+'chainLengths.dat', 'rb') as f:
+        chainLengths = pickle.load(f)
+    lengths =list(chainLengths.values())
+    moleculePaths =getFitFiles(directory+run,threshold)
+    [backmap_ca_chain_multimer(moleculePaths[i][0], directory+"fingerPrint1.dat", directory+run,moleculePaths[i][0].strip().split('/')[-1].strip().split('xyz.dat')[0],lengths,disulfides) for i in range(len(moleculePaths)) ]
+
+def generateAllAtomisticFitsList(directory,run,moleculePaths):
+    [bmbackmap_ca_chain(moleculePaths[i][0], directory+"fingerPrint1.dat", directory+run,moleculePaths[i][0].strip().split('/')[-1].strip().split('xyz.dat')[0], ss_constraint=True) for i in range(len(moleculePaths)) ]
+
+def generateAllAtomisticFitsMultimter(directory,run,lengths,threshold="last",disulfides=None):
+    moleculePaths =getFitFiles(directory+run,threshold)
+    [backmap_ca_chain_multimer(moleculePaths[i][0], directory+"fingerPrint1.dat", directory+run,moleculePaths[i][0].strip().split('/')[-1].strip().split('xyz.dat')[0],lengths,disulfides) for i in range(len(moleculePaths)) ]
+
+
+##  
+
+def getFitFilesForRun(directory,logNo):
+    # List all files in the directory that contain "fitlog" in their filename
+    log_data = read_json_from_file(directory+'/fitLog'+str(logNo)+'.dat')
+    molecule_paths = []
+    for line in log_data.strip().split('\n'):
+        if not line.startswith('{"Run"'):
+            data = json.loads(line)
+            molecule_path = [data.get("MoleculePath"),data.get("ScatterPath")]
+            molecule_paths.append(molecule_path)
+    return molecule_paths
+
+def read_json_from_file(file_path):
+    with open(file_path, 'r') as f:
+        log_data = f.read()
+    return log_data
+
+def generateAllAtomisticFitsRun(directory,run,logNo,disulfides=None):
+    with open(directory+'chainLengths.dat', 'rb') as f:
+        chainLengths = pickle.load(f)
+    lengths =list(chainLengths.values())
+    directoryNew =  directory+run+"/allAtomRun"+str(logNo)
+    # Create the directory only if it doesn't exist
+    if not os.path.exists(directoryNew):
+        os.makedirs(directoryNew)
+        print(f"Directory '{directoryNew}' created.")
+    else:
+        print(f"Directory '{directoryNew}' already exists.")
+    moleculePaths =getFitFilesForRun(directory+run,logNo)
+    [backmap_ca_chain_multimer(moleculePaths[i][0], directory+"fingerPrint1.dat", directory+run+"/allAtomRun"+str(logNo)+"/",moleculePaths[i][0].strip().split('/')[-1].strip().split('xyz.dat')[0],lengths,disulfides) for i in range(len(moleculePaths)) ]
+
+
+def generateAllAtomisticFitsRunMultimer(directory,run,logNo,disulfides=None):
+    with open(directory+'chainLengths.dat', 'rb') as f:
+        chainLengths = pickle.load(f)
+    lengths =list(chainLengths.values())
+    directoryNew =  directory+run+"/allAtomRun"+str(i)
+    # Create the directory only if it doesn't exist
+    if not os.path.exists(directoryNew):
+        os.makedirs(directoryNew)
+        print(f"Directory '{directoryNew}' created.")
+    else:
+        print(f"Directory '{directoryNew}' already exists.")
+    moleculePaths =getFitFilesForRun(directory+run,logNo)
+    [backmap_ca_chain_multimer(moleculePaths[i][0], directory+"fingerPrint1.dat", directory+run,moleculePaths[i][0].strip().split('/')[-1].strip().split('xyz.dat')[0],lengths,disulfides) for i in range(len(moleculePaths)) ]
+
+def constraints_to_residue_pairs(fingerprint_file, constraint_file):
+    """
+    Convert Carbonara fixedDistanceConstraints entries into residue pairs like:
+        [('136:A', '680:C'), ('149:A', '205:A'), ...]
+
+    Assumptions
+    -----------
+    - fingerPrint file contains:
+          nChains
+          sequence_1
+          ss_1
+          sequence_2
+          ss_2
+          ...
+    - Each SS line is split into contiguous segments *within that chain only*
+    - Segments are indexed globally across chains, in file order
+    - Constraint lines are of the form:
+          seg1 elem1 seg2 elem2 distance tolerance
+      where only the first four integers are used
+    - elem indices are 0-based within the segment
+    - returned residue numbers are 1-based within each chain
+
+    Returns
+    -------
+    pairs : list of tuple[str, str]
+        Example:
+            [('27:A', '76:A'), ('15:B', '88:B')]
+    """
+
+    # ----------------------------
+    # Read and clean fingerprint
+    # ----------------------------
+    with open(fingerprint_file, "r") as f:
+        lines = [line.strip() for line in f if line.strip()]
+
+    if not lines:
+        raise ValueError("Empty fingerprint file")
+
+    try:
+        n_chains = int(lines[0])
+    except ValueError:
+        raise ValueError("First line of fingerprint file should be the number of chains")
+
+    expected = 1 + 2 * n_chains
+    if len(lines) < expected:
+        raise ValueError(
+            f"Fingerprint file incomplete: expected at least {expected} non-empty lines, "
+            f"found {len(lines)}"
+        )
+
+    chain_blocks = []
+    for i in range(n_chains):
+        seq = lines[1 + 2 * i]
+        ss  = lines[1 + 2 * i + 1]
+
+        if len(seq) != len(ss):
+            raise ValueError(
+                f"Chain {i}: sequence length ({len(seq)}) != SS length ({len(ss)})"
+            )
+
+        chain_blocks.append((seq, ss))
+
+    # ----------------------------
+    # Build global segment table
+    # ----------------------------
+    # Each entry will contain:
+    #   global segment index
+    #   chain index
+    #   chain letter
+    #   segment start residue (0-based within chain)
+    #   segment length
+    #   segment string
+    segments = []
+
+    chain_letters = string.ascii_uppercase
+    if n_chains > len(chain_letters):
+        raise ValueError("More than 26 chains not supported in this simple version")
+
+    for chain_idx, (seq, ss) in enumerate(chain_blocks):
+        chain_letter = chain_letters[chain_idx]
+
+        pos = 0
+        while pos < len(ss):
+            start = pos
+            ch = ss[pos]
+            while pos < len(ss) and ss[pos] == ch:
+                pos += 1
+
+            seg_ss = ss[start:pos]
+            segments.append({
+                "chain_idx": chain_idx,
+                "chain_letter": chain_letter,
+                "start": start,              # 0-based residue index within chain
+                "length": len(seg_ss),
+                "ss": seg_ss,
+            })
+
+    # ----------------------------
+    # Map (segment, elem) -> residue:chain
+    # ----------------------------
+    def segment_elem_to_residue(seg_idx, elem_idx):
+        if seg_idx < 0 or seg_idx >= len(segments):
+            raise IndexError(f"Segment index {seg_idx} out of range (0..{len(segments)-1})")
+
+        seg = segments[seg_idx]
+
+        if elem_idx < 0 or elem_idx >= seg["length"]:
+            raise IndexError(
+                f"Element index {elem_idx} out of range for segment {seg_idx} "
+                f"(length {seg['length']})"
+            )
+
+        residue_number = seg["start"] + elem_idx + 1   # convert to 1-based within chain
+        chain_letter = seg["chain_letter"]
+        return f"{residue_number}:{chain_letter}"
+
+    # ----------------------------
+    # Parse constraints
+    # ----------------------------
+    pairs = []
+
+    with open(constraint_file, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+
+            seg1, elem1, seg2, elem2 = map(int, parts[:4])
+
+            res1 = segment_elem_to_residue(seg1, elem1)
+            res2 = segment_elem_to_residue(seg2, elem2)
+
+            pairs.append((res1, res2))
+
+    return pairs
+
+    
+
+# =============================
+# CG2ALL optional backend patch
+# =============================
+
+def _normalize_backend_method(method):
+    method_norm = str(method).strip().lower()
+    aliases = {
+        'modeller': 'modeller',
+        'modeler': 'modeller',
+        'cg2all': 'cg2all',
+        'cg': 'cg2all',
+    }
+    if method_norm not in aliases:
+        raise ValueError(f"Unknown backmapping method '{method}'. Use 'modeller' or 'cg2all'.")
+    return aliases[method_norm]
+
+
+def _coerce_cg2all_exec(cg2all_exec=None):
+    if cg2all_exec is None:
+        return ['convert_cg2all']
+    if isinstance(cg2all_exec, (list, tuple)):
+        return [str(x) for x in cg2all_exec]
+    return [str(cg2all_exec)]
+
+
+def _format_ssbond_records(disulfides):
+    """
+    Convert disulfide pairs like [('136:A','680:C'), ...] into PDB SSBOND records.
+    """
+    if not disulfides:
+        return []
+
+    records = []
+    for idx, pair in enumerate(disulfides, start=1):
+        if len(pair) != 2:
+            raise ValueError(f"Each disulfide entry must contain exactly two residues, got: {pair}")
+        res1_str, res2_str = pair
+        try:
+            res1_num, chain1 = str(res1_str).split(':')
+            res2_num, chain2 = str(res2_str).split(':')
+        except ValueError as exc:
+            raise ValueError(
+                f"Disulfides must look like [('136:A','680:C'), ...], got {pair}"
+            ) from exc
+
+        line = (
+            f"SSBOND {idx:>3d} CYS {chain1:1s}{int(res1_num):>4d}    "
+            f"CYS {chain2:1s}{int(res2_num):>4d}\n"
+        )
+        records.append(line)
+    return records
+
+
+def write_ssbond_records_to_pdb(input_pdb, output_pdb=None, disulfides=None):
+    """
+    Prepend SSBOND records to a CA PDB. If output_pdb is None or equal to input_pdb,
+    the file is rewritten in place.
+    """
+    if not disulfides:
+        if output_pdb is not None and output_pdb != input_pdb:
+            with open(input_pdb, 'r') as src, open(output_pdb, 'w') as dst:
+                dst.write(src.read())
+        return input_pdb
+
+    if output_pdb is None:
+        output_pdb = input_pdb
+
+    ssbond_lines = _format_ssbond_records(disulfides)
+    with open(input_pdb, 'r') as f:
+        original = f.readlines()
+
+    atom_start = 0
+    for i, line in enumerate(original):
+        if line.startswith(('ATOM', 'HETATM', 'MODEL', 'TER', 'END')):
+            atom_start = i
+            break
+
+    new_lines = original[:atom_start] + ssbond_lines + original[atom_start:]
+    with open(output_pdb, 'w') as f:
+        f.writelines(new_lines)
+    return output_pdb
+
+
+def CA2AA_cg2all(filename, outputname, disulfides=None, cg_model='CalphaBasedModel',
+                 cg2all_exec=None, stout=False, extra_args=None):
+    """
+    Backmap a CA-only PDB to all atom using CG2ALL.
+
+    Parameters
+    ----------
+    filename : str
+        Input CA-only PDB.
+    outputname : str
+        Output all-atom PDB.
+    disulfides : list[tuple[str, str]] or None
+        Optional residue pairs like [('136:A', '680:C')]. These are written as
+        SSBOND records into the CA PDB before reconstruction.
+    cg_model : str
+        CG2ALL coarse-grained model name. For Carbonara CA-only inputs this should
+        normally remain 'CalphaBasedModel'.
+    cg2all_exec : None, str, list[str], or tuple[str, ...]
+        Executable invocation. Examples:
+            None -> ['convert_cg2all']
+            'convert_cg2all'
+            ['./bin/micromamba', 'run', '-p', '/root/micromamba/envs/cg2all', 'convert_cg2all']
+    stout : bool
+        If False, capture stdout/stderr unless the command fails.
+    extra_args : list[str] or None
+        Any additional CLI args to append.
+    """
+    import subprocess
+
+    if disulfides:
+        write_ssbond_records_to_pdb(filename, filename, disulfides)
+
+    cmd = _coerce_cg2all_exec(cg2all_exec)
+    cmd += ['-p', filename, '-o', outputname, '--cg', cg_model]
+    if extra_args:
+        cmd += [str(x) for x in extra_args]
+
+    if stout:
+        subprocess.run(cmd, check=True)
+    else:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def backmap_ca_chain(coords_file, fingerprint_file, write_directory, name,
+                     ss_constraint=True, rate='fast', method='modeller',
+                     disulfides=None, cg_model='CalphaBasedModel',
+                     cg2all_exec=None, cg2all_extra_args=None):
+    """
+    Backmap a single-chain Carbonara prediction.
+
+    method='modeller' is the default for backwards compatibility.
+    method='cg2all' writes the CA PDB exactly as before, then runs CG2ALL.
+    """
+    method = _normalize_backend_method(method)
+
+    ca_pdb_output_name = os.path.join(write_directory, f"{name}_CA.pdb")
+    cdt.Carbonara_2_PDB(coords_file, fingerprint_file, ca_pdb_output_name)
+    print('Alpha Coordinates pdb written to:', ca_pdb_output_name)
+
+    rate_norm = str(rate).strip().lower()
+
+    if method == 'cg2all':
+        aa_pdb_output_name = os.path.join(write_directory, f"{name}_AA.pdb")
+        if ss_constraint:
+            print('Note: ss_constraint is ignored for method="cg2all".')
+        CA2AA_cg2all(
+            ca_pdb_output_name,
+            aa_pdb_output_name,
+            disulfides=disulfides,
+            cg_model=cg_model,
+            cg2all_exec=cg2all_exec,
+            stout=False,
+            extra_args=cg2all_extra_args,
+        )
+        print('All Atomistic pdb written to:', aa_pdb_output_name)
+        return aa_pdb_output_name
+
+    aa_base = os.path.join(write_directory, f"{name}_AA_")
+    ss_list = list(np.genfromtxt(fingerprint_file, dtype=str)[2])
+
+    if ss_constraint:
+        if rate_norm == 'slow':
+            aa_pdb_output_name = aa_base + '_slow.pdb'
+            print('Running CA2AA_secondary_slow ...')
+            CA2AA_secondary_slow(ca_pdb_output_name, aa_pdb_output_name, ss_list,
+                                 iterations=1, stout=False)
+        else:
+            aa_pdb_output_name = aa_base + '_fast.pdb'
+            print('Running CA2AA_secondary_fast ...')
+            CA2AA_secondary_fast(ca_pdb_output_name, aa_pdb_output_name, ss_list,
+                                 iterations=1, stout=False)
+    else:
+        aa_pdb_output_name = aa_base + '.pdb'
+        print('Running unconstrained CA2AA ... (rate ignored)')
+        CA2AA(ca_pdb_output_name, aa_pdb_output_name, iterations=3, stout=False)
+
+    print('All Atomistic pdb written to:', aa_pdb_output_name)
+    return aa_pdb_output_name
+
+
+def backmap_ca_chain_multimer(coords_file, fingerprint_file, write_directory, name,
+                              lengths, disulfides=None, rate_norm='fast',
+                              method='modeller', cg_model='CalphaBasedModel',
+                              cg2all_exec=None, cg2all_extra_args=None):
+    """
+    Backmap a multimeric Carbonara prediction.
+
+    method='modeller' remains the default. method='cg2all' writes a multichain
+    CA PDB, optionally inserts SSBOND records, and runs CG2ALL.
+    """
+    method = _normalize_backend_method(method)
+
+    split_coords_into_chains(coords_file, coords_file, lengths)
+
+    ca_pdb_output_name = os.path.join(write_directory, name + '_CA.pdb')
+    if str(rate_norm).strip().lower() == 'slow':
+        cdt.Carbonara_2_PDB_multichain_slow(coords_file, fingerprint_file, ca_pdb_output_name, lengths)
+    else:
+        cdt.Carbonara_2_PDB_multichain(coords_file, fingerprint_file, ca_pdb_output_name, lengths)
+
+    print('Alpha Coordinates pdb written to:', ca_pdb_output_name)
+
+    aa_pdb_output_name = os.path.join(write_directory, name + '_AA.pdb')
+
+    if method == 'cg2all':
+        CA2AA_cg2all(
+            ca_pdb_output_name,
+            aa_pdb_output_name,
+            disulfides=disulfides,
+            cg_model=cg_model,
+            cg2all_exec=cg2all_exec,
+            stout=False,
+            extra_args=cg2all_extra_args,
+        )
+        print('All Atomistic pdb written to:', aa_pdb_output_name)
+        return aa_pdb_output_name
+
+    ss_list = list(np.genfromtxt(fingerprint_file, dtype=str)[2])
+    if str(rate_norm).strip().lower() == 'slow':
+        CA2AA_secondary_multimer_slow(ca_pdb_output_name, aa_pdb_output_name, ss_list,
+                                      disulfides, iterations=1, stout=False)
+    else:
+        CA2AA_secondary_multimer(ca_pdb_output_name, aa_pdb_output_name, ss_list,
+                                 disulfides, iterations=1, stout=False)
+
+    print('All Atomistic pdb written to:', aa_pdb_output_name)
+    return aa_pdb_output_name
+
+
+def generateAllAtomisticFits(directory, run, disulfides=None, threshold='last',
+                             rateIn='fast', method='modeller', cg_model='CalphaBasedModel',
+                             cg2all_exec=None, cg2all_extra_args=None):
+    with open(directory + 'chainLengths.dat', 'rb') as f:
+        chainLengths = pickle.load(f)
+    lengths = list(chainLengths.values())
+    moleculePaths = getFitFiles(directory + run, threshold)
+    return [
+        backmap_ca_chain_multimer(
+            moleculePaths[i][0],
+            directory + 'fingerPrint1.dat',
+            directory + run,
+            moleculePaths[i][0].strip().split('/')[-1].strip().split('xyz.dat')[0],
+            lengths,
+            disulfides=disulfides,
+            rate_norm=rateIn,
+            method=method,
+            cg_model=cg_model,
+            cg2all_exec=cg2all_exec,
+            cg2all_extra_args=cg2all_extra_args,
+        )
+        for i in range(len(moleculePaths))
+    ]
+
+
+def generateAllAtomisticFitsMultimter(directory, run, lengths, threshold='last',
+                                      disulfides=None, method='modeller',
+                                      cg_model='CalphaBasedModel',
+                                      cg2all_exec=None, cg2all_extra_args=None,
+                                      rateIn='fast'):
+    moleculePaths = getFitFiles(directory + run, threshold)
+    return [
+        backmap_ca_chain_multimer(
+            moleculePaths[i][0],
+            directory + 'fingerPrint1.dat',
+            directory + run,
+            moleculePaths[i][0].strip().split('/')[-1].strip().split('xyz.dat')[0],
+            lengths,
+            disulfides=disulfides,
+            rate_norm=rateIn,
+            method=method,
+            cg_model=cg_model,
+            cg2all_exec=cg2all_exec,
+            cg2all_extra_args=cg2all_extra_args,
+        )
+        for i in range(len(moleculePaths))
+    ]
+
+
+def generateAllAtomisticFitsRun(directory, run, logNo, disulfides=None,
+                                method='modeller', cg_model='CalphaBasedModel',
+                                cg2all_exec=None, cg2all_extra_args=None,
+                                rateIn='fast'):
+    with open(directory + 'chainLengths.dat', 'rb') as f:
+        chainLengths = pickle.load(f)
+    lengths = list(chainLengths.values())
+    directoryNew = directory + run + '/allAtomRun' + str(logNo)
+    if not os.path.exists(directoryNew):
+        os.makedirs(directoryNew)
+        print(f"Directory '{directoryNew}' created.")
+    else:
+        print(f"Directory '{directoryNew}' already exists.")
+    moleculePaths = getFitFilesForRun(directory + run, logNo)
+    return [
+        backmap_ca_chain_multimer(
+            moleculePaths[i][0],
+            directory + 'fingerPrint1.dat',
+            directory + run + '/allAtomRun' + str(logNo) + '/',
+            moleculePaths[i][0].strip().split('/')[-1].strip().split('xyz.dat')[0],
+            lengths,
+            disulfides=disulfides,
+            rate_norm=rateIn,
+            method=method,
+            cg_model=cg_model,
+            cg2all_exec=cg2all_exec,
+            cg2all_extra_args=cg2all_extra_args,
+        )
+        for i in range(len(moleculePaths))
+    ]
+
+
+def generateAllAtomisticFitsRunMultimer(directory, run, logNo, disulfides=None,
+                                        method='modeller', cg_model='CalphaBasedModel',
+                                        cg2all_exec=None, cg2all_extra_args=None,
+                                        rateIn='fast'):
+    with open(directory + 'chainLengths.dat', 'rb') as f:
+        chainLengths = pickle.load(f)
+    lengths = list(chainLengths.values())
+    directoryNew = directory + run + '/allAtomRun' + str(logNo)
+    if not os.path.exists(directoryNew):
+        os.makedirs(directoryNew)
+        print(f"Directory '{directoryNew}' created.")
+    else:
+        print(f"Directory '{directoryNew}' already exists.")
+    moleculePaths = getFitFilesForRun(directory + run, logNo)
+    return [
+        backmap_ca_chain_multimer(
+            moleculePaths[i][0],
+            directory + 'fingerPrint1.dat',
+            directoryNew + '/',
+            moleculePaths[i][0].strip().split('/')[-1].strip().split('xyz.dat')[0],
+            lengths,
+            disulfides=disulfides,
+            rate_norm=rateIn,
+            method=method,
+            cg_model=cg_model,
+            cg2all_exec=cg2all_exec,
+            cg2all_extra_args=cg2all_extra_args,
+        )
+        for i in range(len(moleculePaths))
+    ]
