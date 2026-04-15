@@ -229,7 +229,7 @@ def write_runme(
     except Exception as e:
         print(f"Warning: Could not copy files: {e}")
 
-        lines = [
+    lines = [
         "#!/bin/bash",
         "set -euo pipefail",
         "set +m   # ensure background jobs stay in same job-control context",
@@ -457,6 +457,7 @@ def parse_structure_lengths(filename: str) -> dict:
 
 
 def main():
+    print("me me me me me me me")
     parser = argparse.ArgumentParser(description="Setup Carbonara processing pipeline")
     parser.add_argument("-p", "--pdb", required=True, help="Path to input PDB file")
     parser.add_argument("-s", "--saxs", required=True, help="Path to input SAXS data file")
@@ -538,15 +539,31 @@ def main():
                     help="Do not enable FoXS in the generated run script")
     parser.add_argument("--backend", choices=["modeller", "cg2all"], default="modeller",
                     help="Backmapping backend for the generated RunMe script")
-    parser.add_argument("--cg2all_exec", default="./bin/micromamba run -p /root/micromamba/envs/cg2all convert_cg2all",
-                    help="cg2all executable command string to embed in the generated RunMe script")
     parser.add_argument("--disulfide_constraints_file", default="",
                     help="Optional constraint file to treat as disulfides during backmapping")
     parser.add_argument("--foxs_cmd_default", default="pyfoxs",
                     help="Default FoXS command for the generated RunMe script; user can still override as first shell arg")
-
+    parser.add_argument("--cg2all_exec",default=None,help="Override cg2all executable command string (advanced users only)")
     args = parser.parse_args()
+    
+    print("new")
+    def detect_cg2all_exec(user_value):
+        if user_value:
+            return user_value
 
+        if os.path.exists("/content/bin/micromamba"):
+            return "/content/bin/micromamba run -p /root/micromamba/envs/cg2all convert_cg2all"
+
+        if os.path.exists("./bin/micromamba"):
+            return "./bin/micromamba run -p /root/micromamba/envs/cg2all convert_cg2all"
+
+        return "convert_cg2all"
+
+    if args.backend == "cg2all":
+        args.cg2all_exec = detect_cg2all_exec(args.cg2all_exec)
+        print(f"Using CG2ALL executable: {args.cg2all_exec}")
+    else:
+        args.cg2all_exec = ""
     try:
         if args.mixture_n < 1:
             raise ValueError("--mixture_n must be >= 1")
@@ -563,7 +580,7 @@ def main():
             cdt.pull_structure_from_pdb(args.pdb)
         )
 
-        print("number of chains is ", len(coords_chains))
+        print("The number of chains is ", len(coords_chains))
         new_coords_chains = []
         new_sequence_chains = []
         new_secondary_structure_chains = []
