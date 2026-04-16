@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import re
 import threading
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -139,6 +140,8 @@ class PollingWatcher:
         self._thread = None
         self._last_processed_mtime = {}
         self._inflight = set()
+        self._queue = deque()
+        self._queued = set()
         self._sem = threading.Semaphore(cfg.max_backmap)
         self._start_time = time.time()
         self._activation_time = self._start_time + cfg.defer_backmap_seconds
