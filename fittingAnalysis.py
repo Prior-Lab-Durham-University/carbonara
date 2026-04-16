@@ -8,13 +8,38 @@ import pandas as pd
 import math
 import os
 import glob
-import py3Dmol
+
+# handling the possibility py3D didn't automatically install
+
+try:
+    import py3Dmol
+    HAS_PY3DMOL = True
+    _PY3DMOL_IMPORT_ERROR = None
+except ImportError as e:
+    py3Dmol = None
+    HAS_PY3DMOL = False
+    _PY3DMOL_IMPORT_ERROR = e
 import string
 import io
 from Bio.PDB import PDBParser, PDBIO, Superimposer
 from tqdm import tqdm
 from collections import defaultdict
+from typing import List, Tuple, Optional
 
+#####################################################
+## Warning function for the visulisation routines which require pymol3d
+#####################################################
+_PY3DMOL_WARNED = False
+
+def _warn_missing_py3dmol():
+    global _PY3DMOL_WARNED
+    if _PY3DMOL_WARNED:
+        return
+    print(
+        "Warning: py3Dmol is not installed, so inline notebook visualisation is unavailable. "
+        "The rest of fittingAnalysis has imported correctly."
+    )
+    _PY3DMOL_WARNED = True
 
 #####################################################
 ## count the number of fitting runs available to a user
@@ -429,6 +454,9 @@ def _resolve_latest_prediction(directory, runNo, subNo=0,subRun=False):
 
 
 def visualisePrediction(directory, runNo, predNo=None, subNo=0,subRun=False):
+    if not HAS_PY3DMOL:
+        _warn_missing_py3dmol()
+        return None
     view = py3Dmol.view(width=800, height=600)
     if subRun:
         run_dir = os.path.join(directory, f"allAtomRun{runNo}")
@@ -541,6 +569,9 @@ def superimpose_pdb_strings_by_ca(ref_pdb_str, mob_pdb_str):
     return aligned_mob_str, float(sup.rms), len(common_keys)
 
 def visualisePredictionComparison(directory, runNo1, runNo2, predNo1, predNo2, subNo1, subNo2, do_superpose=True):
+    if not HAS_PY3DMOL:
+        _warn_missing_py3dmol()
+        return None
     view = py3Dmol.view(width=800, height=600)
 
     aa_fname = f"mol{runNo1}_sub_{subNo1}_step_{predNo1}__AA.pdb"
@@ -880,7 +911,7 @@ def collect_allatom_end_pdbs(directory):
 
     return paths
 
-def collect_final_predictions_test(directory):
+def collect_final_predictions(directory):
     """
     Find the final AA prediction for each (runNo, subNo) found directly in `directory`.
 
@@ -1651,3 +1682,156 @@ def calc_rg_distribution(
 
     return results
 
+
+#########################################################
+#
+#   For the live update fornt end this will grab all the "good" predictions (user specified chi squared)
+#
+#########################################################
+    
+
+def collect_good_prediction_files(
+    fitdata_dir: str | Path,
+    chi2_threshold: float,
+    require_exists: bool = True,
+    sort_by_chi2: bool = True,
+) -> List[Tuple[Path, float]]:
+    """
+    Collect AA PDB files whose FoXS chi^2 is <= chi2_threshold.
+
+    Parameters
+    ----------
+    fitdata_dir : str | Path
+        Path to the fitdata directory containing allAtomRun*/foxs_results.txt
+    chi2_threshold : float
+        Maximum chi^2 to accept.
+    require_exists : bool
+        If True, only return PDB paths that currently exist on disk.
+    sort_by_chi2 : bool
+        If True, sort results by increasing chi^2.
+
+    Returns
+    -------
+    List[Tuple[Path, float]]
+        List of (pdb_path, chi2) tuples.
+    """
+    fitdata_dir = Path(fitdata_dir)
+    good = []
+
+    for run_dir in sorted(fitdata_dir.glob("allAtomRun*")):
+        if not run_dir.is_dir():
+            continue
+
+        foxs_file = run_dir / "foxs_results.txt"
+        if not foxs_file.exists():
+            continue
+
+        for line in foxs_file.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+
+            pdb_path_str, chi_str = parts[0], parts[1]
+
+            if chi_str.upper() == "ERROR":
+                continue
+
+            try:
+                chi2 = float(chi_str)
+            except ValueError:
+                continue
+
+            if chi2 <= chi2_threshold:
+                pdb_path = Path(pdb_path_str)
+                if (not require_exists) or pdb_path.exists():
+                    good.append((pdb_path, chi2))
+
+    if sort_by_chi2:
+        good.sort(key=lambda x: x[1])
+
+    return good
+
+
+
+
+############################################
+
+## Visulaisation routine for a specific path, used in live notebook
+
+############################################
+
+
+def visualisePredictionIndividual(aa_path):
+    if not HAS_PY3DMOL:
+        _warn_missing_py3dmol()
+        return None
+    view = py3Dmol.view(width=800, height=600)
+    
+    
+
+    # ---- load AA model ----
+    with open(aa_path, "r") as f:
+        pdb_data_aa = f.read()
+    view.addModel(pdb_data_aa, "pdb")   # model 0
+    aa_chains = _chains_present_in_pdb(pdb_data_aa)
+
+
+    # ---- choose colors ----
+    palette = ["blue", "green", "red", "yellow", "cyan", "magenta",
+               "orange", "purple", "lime", "gray"]
+
+    # Style AA chains (cartoon)
+    for i, ch in enumerate(aa_chains):
+        color = palette[i % len(palette)]
+        view.setStyle({"model": 0, "chain": ch}, {"cartoon": {"color": color}})
+
+    view.zoomTo()
+    view.show()
+
+
+
+def visualisePredictionComp(pdb1,pdb2, do_superpose=True):
+    if not HAS_PY3DMOL:
+        _warn_missing_py3dmol()
+    return None
+view = py3Dmol.view(width=800, height=600)
+
+with open(pdb1, "r") as f:
+    pdb_data_aa = f.read()
+
+    with open(pdb2, "r") as f:
+        pdb_data_ca = f.read()
+            
+    # --- superimpose CA model onto AA model for fair visual comparison ---
+    if do_superpose:
+        pdb_data_ca_aln, rmsd, nmatch = superimpose_pdb_strings_by_ca(pdb_data_aa, pdb_data_ca)
+        pdb_data_ca_to_show = pdb_data_ca_aln
+        print(f"Superposed model 1 onto model 0 using {nmatch} matched Cα atoms. RMSD = {rmsd:.3f} Å")
+    else:
+        pdb_data_ca_to_show = pdb_data_ca
+
+    # Add models
+    view.addModel(pdb_data_aa, "pdb")          # model 0 (reference)
+    view.addModel(pdb_data_ca_to_show, "pdb")  # model 1 (mobile/aligned)
+
+    aa_chains = _chains_present_in_pdb(pdb_data_aa)
+    ca_chains = _chains_present_in_pdb(pdb_data_ca_to_show)
+        
+    palette = ["blue", "green", "red", "yellow", "cyan", "magenta", "orange", "purple", "lime", "gray"]
+
+    # Style AA chains (cartoon)
+    for i, ch in enumerate(aa_chains):
+        color = palette[i % len(palette)]
+        view.setStyle({"model": 0, "chain": ch}, {"cartoon": {"color": color}})
+
+    # Style AA chains (cartoon)
+    for i, ch in enumerate(ca_chains):
+        color = palette[(i+1) % len(palette)]
+        view.setStyle({"model": 1, "chain": ch}, {"cartoon": {"color": color}})
+
+    view.zoomTo()
+    view.show()
