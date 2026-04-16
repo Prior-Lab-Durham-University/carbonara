@@ -1793,19 +1793,19 @@ def visualisePredictionIndividual(aa_path):
     view.show()
 
 
-
-def visualisePredictionComp(pdb1,pdb2, do_superpose=True):
+def visualisePredictionComp(pdb1, pdb2, do_superpose=True):
     if not HAS_PY3DMOL:
         _warn_missing_py3dmol()
-    return None
-view = py3Dmol.view(width=800, height=600)
+        return None
 
-with open(pdb1, "r") as f:
-    pdb_data_aa = f.read()
+    view = py3Dmol.view(width=800, height=600)
+
+    with open(pdb1, "r") as f:
+        pdb_data_aa = f.read()
 
     with open(pdb2, "r") as f:
         pdb_data_ca = f.read()
-            
+
     # --- superimpose CA model onto AA model for fair visual comparison ---
     if do_superpose:
         pdb_data_ca_aln, rmsd, nmatch = superimpose_pdb_strings_by_ca(pdb_data_aa, pdb_data_ca)
@@ -1820,18 +1820,21 @@ with open(pdb1, "r") as f:
 
     aa_chains = _chains_present_in_pdb(pdb_data_aa)
     ca_chains = _chains_present_in_pdb(pdb_data_ca_to_show)
-        
-    palette = ["blue", "green", "red", "yellow", "cyan", "magenta", "orange", "purple", "lime", "gray"]
 
-    # Style AA chains (cartoon)
+    palette = ["blue", "green", "red", "yellow", "cyan", "magenta",
+               "orange", "purple", "lime", "gray"]
+
+    # Style model 0
     for i, ch in enumerate(aa_chains):
         color = palette[i % len(palette)]
         view.setStyle({"model": 0, "chain": ch}, {"cartoon": {"color": color}})
 
-    # Style AA chains (cartoon)
+    # Style model 1
     for i, ch in enumerate(ca_chains):
-        color = palette[(i+1) % len(palette)]
+        color = palette[(i + 1) % len(palette)]
         view.setStyle({"model": 1, "chain": ch}, {"cartoon": {"color": color}})
 
     view.zoomTo()
     view.show()
+    return view
+
