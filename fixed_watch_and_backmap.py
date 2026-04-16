@@ -36,7 +36,7 @@ class WatchConfig:
     out_dir: Path | None = None
     overwrite: bool = False
     do_foxs: bool = False
-    foxs_py: Optional[Path] = None
+    foxs_py: Optional[str] = None
     saxs_dat: Optional[Path] = None
     max_q: Optional[float] = None
     dat_glob: str = "*.dat"
@@ -138,19 +138,25 @@ class PollingWatcher:
         self._stop = threading.Event()
         self._thread = None
         self._last_processed_mtime = {}
+        self._inflight = set()
         self._sem = threading.Semaphore(cfg.max_backmap)
-        self._activation_time = time.time() + cfg.defer_backmap_seconds
+        self._start_time = time.time()
+        self._activation_time = self._start_time + cfg.defer_backmap_seconds
 
     def _run_backmap_limited(self, dat_file: Path):
         if self._stop.is_set():
             return
-        self._sem.acquire()
+        acquired = self._sem.acquire(timeout=0.5)
+        if not acquired:
+            self._inflight.discard(dat_file)
+            return
         try:
             if self._stop.is_set():
                 return
             print(f"[BACKMAP] starting {dat_file.name}", flush=True)
             run_backmap(self.cfg, dat_file)
         finally:
+            self._inflight.discard(dat_file)
             self._sem.release()
 
     def start(self):
@@ -180,9 +186,17 @@ class PollingWatcher:
                     continue
                 if any(str(dat).endswith(sfx) for sfx in self.cfg.ignore_suffixes):
                     continue
+                if dat in self._inflight:
+                    continue
 
                 mtime = dat.stat().st_mtime
                 if self._last_processed_mtime.get(dat) == mtime:
+                    continue
+
+                # Hard cutoff: only files created/written after the activation
+                # threshold are ever eligible for backmapping.
+                if mtime < self._activation_time:
+                    self._last_processed_mtime[dat] = mtime
                     continue
 
                 ok = wait_until_stable(dat, self.cfg.stable_for, self.cfg.stable_poll, self.cfg.stable_timeout)
@@ -191,11 +205,12 @@ class PollingWatcher:
                     self._last_processed_mtime[dat] = mtime
                     continue
 
-                if time.time() < self._activation_time:
-                    self._last_processed_mtime[dat] = dat.stat().st_mtime
+                if dat.stat().st_size == 0:
+                    print(f"[WARN] Empty file, will retry later: {dat.name}", flush=True)
                     continue
 
                 print(f"[WATCHER] running backmap for {dat.name}", flush=True)
+                self._inflight.add(dat)
                 threading.Thread(target=self._run_backmap_limited, args=(dat,), daemon=True).start()
                 self._last_processed_mtime[dat] = dat.stat().st_mtime
 
@@ -221,7 +236,7 @@ def start_watcher(watch_dir, scenario_root, backmap_script,
         max_backmap=max_backmap,
         defer_backmap_seconds=defer_backmap_seconds,
         do_foxs=do_foxs,
-        foxs_py=Path(foxs_py).resolve() if foxs_py else None,
+        foxs_py=str(foxs_py) if foxs_py else None,
         saxs_dat=Path(saxs_dat).resolve() if saxs_dat else None,
         max_q=max_q,
         backend=backend,
@@ -273,7 +288,7 @@ def main():
         overwrite=args.overwrite,
         max_backmap=args.max_backmap,
         do_foxs=args.do_foxs,
-        foxs_py=Path(args.foxs_py).resolve() if args.foxs_py else None,
+        foxs_py=str(args.foxs_py) if args.foxs_py else None,
         saxs_dat=Path(args.saxs).resolve() if args.saxs else None,
         max_q=args.max_q,
         defer_backmap_seconds=args.defer_backmap_seconds,
