@@ -171,7 +171,7 @@ def write_runme(
     no_structures: int = 1,
     pairedQ: bool = False,
     rotation: bool = False,
-    max_backmap: int = 1,
+    max_backmap: int = 3,
     defer_backmap_seconds: int = 600,
     do_foxs: bool = True,
     backend: str = "modeller",
