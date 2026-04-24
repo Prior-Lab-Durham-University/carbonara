@@ -23,6 +23,8 @@ from tqdm import tqdm
 
 from typing import List, Set
 
+import shlex
+from pathlib import Path
 
 #from Bio.PDB import PDBParser
 #from Bio.PDB.DSSP import DSSP
@@ -2609,3 +2611,480 @@ def auto_select_varying_linker(coords_file, fingerprint_file):
 
     return varying_linker_indices
 
+def choose_sections_by_number(fullPoss, selected_ids):
+    """
+    fullPoss: list like ['ResID: 1-6', 'ResID: 14-17', ...]
+    selected_ids: 1-based list like [1, 5, 7, 26, 33]
+
+    Returns
+    -------
+    new_selected_secs : list[str]
+    """
+    n = len(fullPoss)
+    new_selected_secs = []
+
+    for i in selected_ids:
+        if not isinstance(i, int):
+            print(f"Warning: {i!r} is not an integer, skipping")
+            continue
+
+        if 1 <= i <= n:
+            new_selected_secs.append(fullPoss[i - 1])
+        else:
+            print(f"Warning: index {i} out of range 1-{n}, skipping")
+
+    # remove duplicates, preserve order
+    seen = set()
+    new_selected_secs = [x for x in new_selected_secs if not (x in seen or seen.add(x))]
+
+    return new_selected_secs
+
+def choose_sections_by_number_index(fullPoss, selected_ids):
+    return [fullPoss[ss-1] for ss in selected_ids]
+
+
+def write_varysections_file_frontend(selected_secs,working_path):
+    ss_len_tensor = [len(i) for i in get_sses(working_path+"/fingerPrint1.dat")]
+    # Calculate cumulative lengths
+    cumulative_lengths = np.cumsum(ss_len_tensor)
+
+    # Initialize an empty list to hold the chunked groups
+    chunked_groups = [[] for _ in range(len(cumulative_lengths))]
+    
+    for index in selected_secs:
+        for i, cum_length in enumerate(cumulative_lengths):
+            if index < cum_length:
+                chunked_groups[i].append(index)
+                break
+    flattened = [item for sublist in chunked_groups for item in sublist]
+    write_varysections_file(flattened, working_path)
+
+
+def view_selected_sections_sequence(run_name):
+    filename = "carbonara_runs/"+run_name+"/fingerPrint1.dat"
+    highlight_segments = np.loadtxt("carbonara_runs/"+run_name+"/varyingSectionSecondary1.dat",dtype=int)
+    chains = parse_structures_with_segments(filename)
+    print_structure_with_highlights(chains,highlight_segments)
+
+def view_newly_selected_sections_sequence(run_name,highlight_segments):
+    filename = "carbonara_runs/"+run_name+"/fingerPrint1.dat"
+    chains = parse_structures_with_segments(filename)
+    print_structure_with_highlights(chains,highlight_segments)
+
+#The segments highlighted in red below are those selected for changing
+
+def possibleLinkerList_all_chains(fp_fl, pdb_fl):
+    """
+    Reads a secondary structure file (fp_fl) and structure file (pdb_fl),
+    and returns dash-only ('-') segments for all chains.
+
+    Returns
+    -------
+    numpy.ndarray
+        Array of shape (n_linkers, 2) with rows:
+            [global_segment_number, 'Chain X ResID: start-end']
+
+    Here global_segment_number counts all segments ('-', 'S', 'H')
+    across all chains in order, without restarting at each chain.
+    """
+
+    resid_tensor = getResIDs_from_structure(pdb_fl, fp_fl)
+
+    with open(fp_fl, "r") as f:
+        lines = [line.strip() for line in f if line.strip()]
+
+    n_chains = int(lines[0])
+    structures = lines[2::2]
+
+    if len(structures) != n_chains:
+        raise ValueError(
+            f"Fingerprint file says {n_chains} chains, but found {len(structures)} structure entries."
+        )
+
+    dash_segments = []
+    global_segment_number = 0
+
+    for chain in range(1, n_chains + 1):
+        resids = resid_tensor[chain - 1]
+        structure = structures[chain - 1]
+
+        idx = 0
+
+        for match in re.finditer(r"(-+|S+|H+)", structure):
+            length = match.end() - match.start()
+
+            if match.group()[0] == "-":
+                res_start = resids[idx]
+                res_end = resids[idx + length - 1]
+                label = f"Chain {chain} ResID: {res_start}-{res_end}"
+                dash_segments.append([global_segment_number, label])
+
+            idx += length
+            global_segment_number += 1
+
+    return np.array(dash_segments, dtype=object)
+
+
+def parse_linker_label(label):
+    m = re.search(r"Chain\s+(\d+)\s+ResID:\s*(\d+)-(\d+)", label)
+    if m is None:
+        raise ValueError(f"Could not parse linker label: {label}")
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
+def ranges_overlap(a1, a2, b1, b2):
+    return not (a2 < b1 or b2 < a1)
+
+def linker_ids_from_ranges_new(fullPoss, user_ranges):
+    """
+    Returns a numpy array with same structure as fullPoss:
+        [segment_id, label]
+    """
+
+    selected_rows = []
+
+    for row in fullPoss:
+        seg_id = int(row[0])
+        label = row[1]
+
+        chain, lstart, lend = parse_linker_label(label)
+
+        if chain not in user_ranges:
+            continue
+
+        for rstart, rend in user_ranges[chain]:
+            if ranges_overlap(lstart, lend, rstart, rend):
+                selected_rows.append([seg_id, label])
+                break
+
+    # remove duplicates but preserve order
+    seen = set()
+    final_rows = []
+    for seg_id, label in selected_rows:
+        key = (seg_id, label)
+        if key not in seen:
+            seen.add(key)
+            final_rows.append([seg_id, label])
+
+    return np.array(final_rows, dtype=object)
+
+
+def convert_user_ranges_to_structure(user_ranges, resid_tensor, warn=True):
+    """
+    Convert chain-local residue ranges to structure residue IDs.
+
+    Adds warnings if user ranges fall outside the chain bounds.
+    """
+    converted = {}
+
+    for chain, ranges in user_ranges.items():
+        resids = resid_tensor[chain - 1]
+
+        min_res = 1
+        max_res = len(resids)
+
+        offset = int(resids[0]) - 1
+
+        new_ranges = []
+
+        for start, end in ranges:
+            # --- sanity checks ---
+            if warn:
+                if start < min_res or end > max_res:
+                    print(
+                        f"Warning: Chain {chain} range {start}-{end} "
+                        f"is outside valid range {min_res}-{max_res}"
+                    )
+                elif start > end:
+                    print(
+                        f"Warning: Chain {chain} range {start}-{end} "
+                        f"has start > end"
+                    )
+
+            # still convert (do not silently drop)
+            new_ranges.append((start + offset, end + offset))
+
+        converted[chain] = new_ranges
+
+    return converted
+    
+def linker_ids_from_ranges(run_name,pdb_name,user_ranges):
+    fullPoss = possibleLinkerList_all_chains("carbonara_runs/" + run_name + "/fingerPrint1.dat",pdb_name)
+    resid_tensor = getResIDs_from_structure(pdb_name, "carbonara_runs/" + run_name + "/fingerPrint1.dat")
+    user_ranges_mod =convert_user_ranges_to_structure(user_ranges, resid_tensor)
+    selected_secs = linker_ids_from_ranges_new(fullPoss, user_ranges_mod)
+    return selected_secs[:,0].tolist(),selected_secs[:,1].tolist()
+
+def initial_linker_ids(run_name,pdb_name):
+    allowed_linker = np.loadtxt("carbonara_runs/"+run_name+"/varyingSectionSecondary1.dat",dtype=int).tolist()
+    fullPoss = possibleLinkerList_all_chains("carbonara_runs/"+run_name+"/fingerPrint1.dat",pdb_name)
+    selected_secs = [i[1] for i in fullPoss if int(i[0]) in allowed_linker and linkerLengthCheck(i[1])]
+    fullPossIndicies = fullPoss[:,0].tolist()
+    fullPoss = fullPoss[:,1].tolist()
+    return selected_secs,fullPossIndicies,fullPoss
+
+
+def _normalise_cmd(cmd):
+    if isinstance(cmd, str):
+        return shlex.split(cmd)
+    if isinstance(cmd, (list, tuple)):
+        return list(cmd)
+    raise TypeError("foxs_cmd must be a string or a list/tuple")
+
+
+def load_numeric_table_loose(path, min_cols=2):
+    """
+    Load only numeric rows from a whitespace-delimited file.
+    Skips headers and other non-numeric lines.
+    """
+    rows = []
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            try:
+                vals = [float(x) for x in parts]
+            except ValueError:
+                continue
+            if len(vals) >= min_cols:
+                rows.append(vals)
+
+    if not rows:
+        raise ValueError(f"No numeric rows found in {path}")
+
+    ncols = min(len(r) for r in rows)
+    return np.array([r[:ncols] for r in rows], dtype=float)
+
+
+def _find_foxs_fit_file(pdb_path, saxs_path):
+    """
+    Try to locate a likely FoXS fit/output file.
+    Searches near the input files and current working directory.
+    """
+    search_dirs = []
+    for d in [Path.cwd(), pdb_path.parent, saxs_path.parent]:
+        if d not in search_dirs:
+            search_dirs.append(d)
+
+    pdb_stem = pdb_path.stem.lower()
+    saxs_stem = saxs_path.stem.lower()
+
+    candidates = []
+
+    for d in search_dirs:
+        for f in d.iterdir():
+            if not f.is_file():
+                continue
+
+            name = f.name.lower()
+            score = 0
+
+            if "fit" in name:
+                score += 5
+            if "foxs" in name:
+                score += 3
+            if "profile" in name:
+                score += 2
+            if pdb_stem in name:
+                score += 2
+            if saxs_stem in name:
+                score += 2
+            if f.suffix.lower() in {".fit", ".dat", ".txt"}:
+                score += 1
+
+            if score > 0:
+                candidates.append((score, f.stat().st_mtime, f))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return candidates[0][2]
+
+def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None):
+    """
+    Run pyFoXS, extract chi^2, locate the fit file, and plot
+    the fit with a FoXS-style residual panel.
+
+    Parameters
+    ----------
+    pdb_name : str
+        Path to structure file.
+    saxs_name : str
+        Path to SAXS data file.
+    foxs_cmd : str or list
+        Examples:
+            "pyfoxs"
+            "python3 /path/to/foxs.py"
+            ["python3", "/path/to/foxs.py"]
+    max_q : float or None
+        Optional maximum q-value to pass to pyFoXS.
+
+    Returns
+    -------
+    dict
+        Keys:
+            chi2, stdout, stderr, fit_file
+    """
+    pdb_path = Path(pdb_name).resolve()
+    saxs_path = Path(saxs_name).resolve()
+
+    if not pdb_path.exists():
+        raise FileNotFoundError(f"Structure file not found: {pdb_path}")
+    if not saxs_path.exists():
+        raise FileNotFoundError(f"SAXS file not found: {saxs_path}")
+
+    temp_pdb_to_clean = None
+
+    try:
+        pdb_for_foxs, temp_pdb_to_clean = _convert_cif_to_pdb_for_foxs(pdb_path)
+        pdb_for_foxs = Path(pdb_for_foxs)
+
+        #if temp_pdb_to_clean is not None:
+        #    print(f"Converted mmCIF to temporary PDB for FoXS: {pdb_for_foxs}")
+
+        base_cmd = _normalise_cmd(foxs_cmd)
+        cmd = base_cmd + [str(pdb_for_foxs), str(saxs_path)]
+
+        if max_q is not None:
+            cmd += ["--max_q", str(max_q)]
+
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+
+        stdout = proc.stdout
+        stderr = proc.stderr
+
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"pyFoXS failed with exit code {proc.returncode}\n\nSTDERR:\n{stderr}\n\nSTDOUT:\n{stdout}"
+            )
+
+        combined_text = stdout + "\n" + stderr
+        chi2 = None
+        chi_patterns = [
+            r"Chi(?:\^?2| square)\s*[:=]\s*([0-9.eE+-]+)",
+            r"chi(?:\^?2| square)\s*[:=]\s*([0-9.eE+-]+)",
+            r"\bchi\s*=\s*([0-9.eE+-]+)",
+            r"\bChi\s*=\s*([0-9.eE+-]+)",
+            r"\bchi2\s*[:=]\s*([0-9.eE+-]+)",
+            r"\bChi2\s*[:=]\s*([0-9.eE+-]+)",
+        ]
+        for pat in chi_patterns:
+            m = re.search(pat, combined_text)
+            if m:
+                try:
+                    chi2 = float(m.group(1))
+                    break
+                except ValueError:
+                    pass
+
+        fit_file = _find_foxs_fit_file(pdb_for_foxs, saxs_path)
+
+        if chi2 is not None:
+            print(f"Initial FoXS chi^2: {chi2:.4g}")
+        else:
+            print("Initial FoXS chi^2: not parsed from output")
+
+        if fit_file is None:
+            print("Could not identify a fit file automatically.")
+            return {
+                "chi2": chi2,
+                "stdout": stdout,
+                "stderr": stderr,
+                "fit_file": None,
+            }
+
+        #print(f"Using fit file: {fit_file}")
+
+        try:
+            fit = load_numeric_table_loose(fit_file, min_cols=2)
+
+            q = fit[:, 0]
+
+            if fit.shape[1] >= 4:
+                i_exp = fit[:, 1]
+                sigma = fit[:, 2]
+                i_fit = fit[:, 3]
+                residual = (i_exp - i_fit) / sigma
+                residual_label = r"$(I_{\rm exp}-I_{\rm fit})/\sigma$"
+            elif fit.shape[1] == 3:
+                i_exp = fit[:, 1]
+                sigma = None
+                i_fit = fit[:, 2]
+                residual = i_exp - i_fit
+                residual_label = r"$I_{\rm exp}-I_{\rm fit}$"
+            else:
+                raise ValueError(
+                    "Fit file must have at least 3 columns for residual plotting."
+                )
+
+            fig = plt.figure(figsize=(7, 7))
+            gs = fig.add_gridspec(2, 1, height_ratios=[3, 1], hspace=0.08)
+
+            ax1 = fig.add_subplot(gs[0])
+            ax2 = fig.add_subplot(gs[1], sharex=ax1)
+
+            ax1.plot(q, i_exp, "o", ms=4, label="Experimental")
+            ax1.plot(q, i_fit, "-", lw=2, label="FoXS fit")
+            ax1.set_yscale("log")
+            ax1.set_ylabel("Intensity")
+
+            title = "Initial FoXS check"
+            if chi2 is not None:
+                title += f"  (chi² = {chi2:.4g})"
+            if max_q is not None:
+                title += f", max_q={max_q}"
+            ax1.set_title(title)
+            ax1.legend()
+            ax1.tick_params(axis="x", labelbottom=False)
+
+            ax2.axhline(0.0, lw=1)
+            ax2.plot(q, residual, "o", ms=3)
+            ax2.set_xlabel("q")
+            ax2.set_ylabel("Residual")
+            # ax2.set_ylabel(residual_label)
+
+            plt.tight_layout()
+            plt.show()
+
+        except Exception as e:
+            print(f"FoXS ran, but plotting failed: {e}")
+
+        return {
+            "chi2": chi2,
+            "stdout": stdout,
+            "stderr": stderr,
+            "fit_file": fit_file,
+        }
+
+    finally:
+        if temp_pdb_to_clean is not None:
+            try:
+                os.remove(temp_pdb_to_clean)
+            except OSError:
+                pass
+
+
+from Bio.PDB import MMCIFParser, PDBIO
+import tempfile
+
+def _convert_cif_to_pdb_for_foxs(structure_path):
+    structure_path = Path(structure_path)
+    suffix = structure_path.suffix.lower()
+
+    if suffix not in [".cif", ".mmcif"]:
+        return str(structure_path), None
+
+    parser = MMCIFParser(QUIET=True)
+    structure = parser.get_structure("model", str(structure_path))
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".pdb", delete=False)
+    tmp.close()
+
+    io = PDBIO()
+    io.set_structure(structure)
+    io.save(tmp.name)
+
+    return tmp.name, tmp.name
