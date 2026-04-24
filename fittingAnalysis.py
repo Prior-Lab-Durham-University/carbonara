@@ -8,6 +8,17 @@ import pandas as pd
 import math
 import os
 import glob
+import CarbonaraDataTools as CDT
+
+
+
+import base64
+from pathlib import Path
+import subprocess
+import contextlib
+
+import matplotlib.pyplot as plt
+from IPython.display import HTML, display
 
 # handling the possibility py3D didn't automatically install
 
@@ -25,6 +36,9 @@ from Bio.PDB import PDBParser, PDBIO, Superimposer
 from tqdm import tqdm
 from collections import defaultdict
 from typing import List, Tuple, Optional
+from tempfile import NamedTemporaryFile
+from pdbfixer import PDBFixer
+from openmm.app import PDBFile
 
 #####################################################
 ## Warning function for the visulisation routines which require pymol3d
@@ -396,6 +410,203 @@ def _chains_present_in_pdb(pdb_text: str):
     # Sort with A,B,C... first if present
     return sorted(chains, key=lambda c: (c not in string.ascii_uppercase, c))
 
+def _read_structure_for_viewer(structure_path):
+    """
+    Read a structure file for py3Dmol and return:
+        (structure_text, format_string)
+
+    Supports .pdb, .cif, .mmcif
+    """
+    structure_path = str(structure_path)
+    suffix = Path(structure_path).suffix.lower()
+
+    if suffix == ".pdb":
+        fmt = "pdb"
+    elif suffix in [".cif", ".mmcif"]:
+        fmt = "cif"
+    else:
+        raise ValueError(f"Unsupported structure format: {suffix}")
+
+    with open(structure_path, "r") as f:
+        structure_data = f.read()
+
+    return structure_data, fmt
+
+
+def _chains_present_in_structure(structure_text: str, fmt: str):
+    """
+    Return chain IDs when easily available from PDB text.
+    For CIF/mmCIF, return None and let callers fall back to whole-model styling.
+    """
+    if fmt != "pdb":
+        return None
+    return _chains_present_in_pdb(structure_text)
+
+
+def _load_mdtraj_any(structure_path):
+    """
+    Load PDB or CIF/mmCIF into MDTraj.
+    For CIF/mmCIF, route through PDBFixer -> temporary PDB if needed.
+    Returns (traj, tmp_path_to_cleanup_or_None).
+    """
+    structure_path = str(structure_path)
+    suffix = Path(structure_path).suffix.lower()
+
+    if suffix == ".pdb":
+        return md.load(structure_path), None
+
+    if suffix in [".cif", ".mmcif"]:
+        fixer = PDBFixer(filename=structure_path)
+        fixer.findMissingResidues()
+        fixer.findMissingAtoms()
+        fixer.addMissingAtoms()
+        fixer.addMissingHydrogens()
+
+        with NamedTemporaryFile(mode="w", suffix=".pdb", delete=False) as tmp:
+            PDBFile.writeFile(fixer.topology, fixer.positions, tmp)
+            tmp_path = tmp.name
+
+        traj = md.load(tmp_path)
+        return traj, tmp_path
+
+    raise ValueError(f"Unsupported structure format: {suffix}")
+
+
+def _chain_id_for_mdtraj_chain(chain, chain_key="id"):
+    if chain_key == "index":
+        return chain.index
+    elif chain_key == "id":
+        cid = getattr(chain, "chain_id", None)
+        if cid is None or str(cid).strip() == "":
+            letters = string.ascii_uppercase
+            if chain.index < len(letters):
+                return letters[chain.index]
+            return str(chain.index)
+        return str(cid).strip()
+    else:
+        raise ValueError("chain_key must be 'index' or 'id'")
+
+
+def _ca_map_mdtraj(traj, chain_key="id"):
+    """
+    Return:
+        ca_map: dict[(chain_id, resSeq, icode)] -> xyz(3,)
+    Coordinates are returned in Å.
+    """
+    top = traj.topology
+    xyz = traj.xyz[0] * 10.0  # MDTraj nm -> Å
+
+    ca_map = {}
+
+    for atom in top.atoms:
+        if atom.name != "CA":
+            continue
+
+        res = atom.residue
+        ch = _chain_id_for_mdtraj_chain(res.chain, chain_key=chain_key)
+        resseq = int(res.resSeq)
+        icode = getattr(res, "insertion_code", "") or ""
+        key = (ch, resseq, icode)
+
+        ca_map[key] = xyz[atom.index]
+
+    return ca_map
+
+
+def _kabsch_transform(P, Q):
+    """
+    Find rotation/translation that maps Q onto P.
+    P, Q : (N,3)
+    Returns R, t such that Q @ R + t matches P
+    """
+    Pc = P.mean(axis=0)
+    Qc = Q.mean(axis=0)
+
+    P0 = P - Pc
+    Q0 = Q - Qc
+
+    C = Q0.T @ P0
+    V, S, Wt = np.linalg.svd(C)
+    d = np.sign(np.linalg.det(V @ Wt))
+    R = V @ np.diag([1.0, 1.0, d]) @ Wt
+    t = Pc - Qc @ R
+    return R, t
+
+
+def _traj_to_pdb_string_with_transform(traj, R=None, t=None):
+    """
+    Apply optional rigid transform to an MDTraj trajectory and return PDB text.
+    """
+    xyz = traj.xyz.copy()  # nm
+    if R is not None and t is not None:
+        xyzA = xyz[0] * 10.0
+        xyzA = xyzA @ R + t
+        xyz[0] = xyzA / 10.0
+
+    tmp = NamedTemporaryFile(mode="w", suffix=".pdb", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+
+    try:
+        traj2 = traj[:]
+        traj2.xyz = xyz
+        traj2.save_pdb(tmp_path)
+        with open(tmp_path, "r") as f:
+            pdb_text = f.read()
+    finally:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+    return pdb_text
+
+
+def superimpose_structure_files_by_ca(ref_path, mob_path, chain_key="id"):
+    """
+    Superimpose mobile structure onto reference using matched Cα atoms.
+
+    Supports PDB and CIF/mmCIF inputs.
+
+    Returns
+    -------
+    aligned_mob_pdb_str : str
+        Mobile structure transformed and written as PDB text
+    rmsd : float
+        RMSD over matched Cα atoms in Å
+    n_matched : int
+        Number of matched Cα atoms
+    """
+    ref_traj, ref_tmp = _load_mdtraj_any(ref_path)
+    mob_traj, mob_tmp = _load_mdtraj_any(mob_path)
+
+    try:
+        ref_ca = _ca_map_mdtraj(ref_traj, chain_key=chain_key)
+        mob_ca = _ca_map_mdtraj(mob_traj, chain_key=chain_key)
+
+        common_keys = sorted(set(ref_ca.keys()) & set(mob_ca.keys()))
+        if len(common_keys) < 3:
+            raise ValueError(f"Not enough matched Cα atoms for superposition (matched={len(common_keys)}).")
+
+        P = np.array([ref_ca[k] for k in common_keys], float)
+        Q = np.array([mob_ca[k] for k in common_keys], float)
+
+        R, t = _kabsch_transform(P, Q)
+        Q_aln = Q @ R + t
+        diff = P - Q_aln
+        rmsd = float(np.sqrt(np.mean(np.sum(diff**2, axis=1))))
+
+        aligned_mob_pdb_str = _traj_to_pdb_string_with_transform(mob_traj, R=R, t=t)
+        return aligned_mob_pdb_str, rmsd, len(common_keys)
+
+    finally:
+        for tmp_path in [ref_tmp, mob_tmp]:
+            if tmp_path is not None:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+
 def _resolve_latest_prediction(directory, runNo, subNo=0,subRun=False):
     """
     Resolve the latest prediction for a given runNo and subNo.
@@ -453,15 +664,18 @@ def _resolve_latest_prediction(directory, runNo, subNo=0,subRun=False):
     return predNo, aa_path, ca_path
 
 
-def visualisePrediction(directory, runNo, predNo=None, subNo=0,subRun=False):
+def visualisePrediction(directory, runNo, predNo=None, subNo=0, subRun=False):
     if not HAS_PY3DMOL:
         _warn_missing_py3dmol()
         return None
+
     view = py3Dmol.view(width=800, height=600)
+
     if subRun:
         run_dir = os.path.join(directory, f"allAtomRun{runNo}")
     else:
-        run_dir =directory
+        run_dir = directory
+
     # Resolve file names
     if predNo is None:
         pred_tag, aa_path, ca_path = _resolve_latest_prediction(directory, runNo, subNo=subNo)
@@ -483,35 +697,38 @@ def visualisePrediction(directory, runNo, predNo=None, subNo=0,subRun=False):
             raise FileNotFoundError(f"CA file not found: {ca_path}")
 
     # ---- load AA model ----
-    with open(aa_path, "r") as f:
-        pdb_data_aa = f.read()
-    view.addModel(pdb_data_aa, "pdb")   # model 0
-    aa_chains = _chains_present_in_pdb(pdb_data_aa)
+    aa_data, aa_fmt = _read_structure_for_viewer(aa_path)
+    view.addModel(aa_data, aa_fmt)   # model 0
+    aa_chains = _chains_present_in_structure(aa_data, aa_fmt)
 
     # ---- load CA model ----
-    with open(ca_path, "r") as f:
-        pdb_data_ca = f.read()
-    view.addModel(pdb_data_ca, "pdb")   # model 1
-    ca_chains = _chains_present_in_pdb(pdb_data_ca)
+    ca_data, ca_fmt = _read_structure_for_viewer(ca_path)
+    view.addModel(ca_data, ca_fmt)   # model 1
+    ca_chains = _chains_present_in_structure(ca_data, ca_fmt)
 
-    # ---- choose colors ----
     palette = ["blue", "green", "red", "yellow", "cyan", "magenta",
                "orange", "purple", "lime", "gray"]
 
-    # Style AA chains (cartoon)
-    for i, ch in enumerate(aa_chains):
-        color = palette[i % len(palette)]
-        view.setStyle({"model": 0, "chain": ch}, {"cartoon": {"color": color}})
+    # Style AA model
+    if aa_chains:
+        for i, ch in enumerate(aa_chains):
+            color = palette[i % len(palette)]
+            view.setStyle({"model": 0, "chain": ch}, {"cartoon": {"color": color}})
+    else:
+        view.setStyle({"model": 0}, {"cartoon": {"color": "lightgray"}})
 
-    # Style CA chains (spheres)
-    for i, ch in enumerate(ca_chains):
-        color = palette[i % len(palette)]
-        view.setStyle({"model": 1, "chain": ch}, {"sphere": {"color": color, "opacity": 0.5}})
+    # Style CA model
+    if ca_chains:
+        for i, ch in enumerate(ca_chains):
+            color = palette[i % len(palette)]
+            view.setStyle({"model": 1, "chain": ch}, {"sphere": {"color": color, "opacity": 0.5}})
+    else:
+        view.setStyle({"model": 1}, {"sphere": {"color": "red", "opacity": 0.5}})
 
     view.zoomTo()
     view.show()
     return view
-
+    
 def _structure_from_pdb_string(pdb_str, struct_id="X"):
     parser = PDBParser(QUIET=True)
     return parser.get_structure(struct_id, io.StringIO(pdb_str))
@@ -572,6 +789,7 @@ def visualisePredictionComparison(directory, runNo1, runNo2, predNo1, predNo2, s
     if not HAS_PY3DMOL:
         _warn_missing_py3dmol()
         return None
+
     view = py3Dmol.view(width=800, height=600)
 
     aa_fname = f"mol{runNo1}_sub_{subNo1}_step_{predNo1}__AA.pdb"
@@ -580,43 +798,40 @@ def visualisePredictionComparison(directory, runNo1, runNo2, predNo1, predNo2, s
     aa_path = os.path.join(directory, "allAtomRun" + str(runNo1), aa_fname)
     ca_path = os.path.join(directory, "allAtomRun" + str(runNo2), ca_fname)
 
-    with open(aa_path, "r") as f:
-        pdb_data_aa = f.read()
+    aa_data, aa_fmt = _read_structure_for_viewer(aa_path)
 
-    with open(ca_path, "r") as f:
-        pdb_data_ca = f.read()
-
-    # --- superimpose CA model onto AA model for fair visual comparison ---
     if do_superpose:
-        pdb_data_ca_aln, rmsd, nmatch = superimpose_pdb_strings_by_ca(pdb_data_aa, pdb_data_ca)
-        pdb_data_ca_to_show = pdb_data_ca_aln
+        ca_data_to_show, rmsd, nmatch = superimpose_structure_files_by_ca(aa_path, ca_path)
+        ca_fmt = "pdb"
         print(f"Superposed model 1 onto model 0 using {nmatch} matched Cα atoms. RMSD = {rmsd:.3f} Å")
     else:
-        pdb_data_ca_to_show = pdb_data_ca
+        ca_data_to_show, ca_fmt = _read_structure_for_viewer(ca_path)
 
-    # Add models
-    view.addModel(pdb_data_aa, "pdb")          # model 0 (reference)
-    view.addModel(pdb_data_ca_to_show, "pdb")  # model 1 (mobile/aligned)
+    view.addModel(aa_data, aa_fmt)
+    view.addModel(ca_data_to_show, ca_fmt)
 
-    aa_chains = _chains_present_in_pdb(pdb_data_aa)
-    ca_chains = _chains_present_in_pdb(pdb_data_ca_to_show)
+    aa_chains = _chains_present_in_pdb(aa_data) if aa_fmt == "pdb" else None
+    ca_chains = _chains_present_in_pdb(ca_data_to_show) if ca_fmt == "pdb" else None
 
     palette = ["blue", "green", "red", "yellow", "cyan", "magenta", "orange", "purple", "lime", "gray"]
 
-    # Style AA chains (cartoon)
-    for i, ch in enumerate(aa_chains):
-        color = palette[i % len(palette)]
-        view.setStyle({"model": 0, "chain": ch}, {"cartoon": {"color": color}})
+    if aa_chains:
+        for i, ch in enumerate(aa_chains):
+            color = palette[i % len(palette)]
+            view.setStyle({"model": 0, "chain": ch}, {"cartoon": {"color": color}})
+    else:
+        view.setStyle({"model": 0}, {"cartoon": {"color": "lightgray"}})
 
-    # Style aligned CA model (spheres)
-    for i, ch in enumerate(ca_chains):
-        color = palette[i % len(palette)]
-        view.setStyle({"model": 1, "chain": ch}, {"sphere": {"color": color, "opacity": 0.5}})
+    if ca_chains:
+        for i, ch in enumerate(ca_chains):
+            color = palette[i % len(palette)]
+            view.setStyle({"model": 1, "chain": ch}, {"sphere": {"color": color, "opacity": 0.5}})
+    else:
+        view.setStyle({"model": 1}, {"sphere": {"color": "red", "opacity": 0.5}})
 
     view.zoomTo()
     view.show()
     return view
-
 
 def _infer_length_unit_from_ca(coords):
     """
@@ -634,10 +849,9 @@ def _infer_length_unit_from_ca(coords):
 
 def read_ca_coords(pdb_or_cif, chain_key="index", force_angstrom=True, unit="auto"):
     """
-    Read Cα coordinates from PDB or mmCIF using MDTraj.
+    Read Cα coordinates from PDB or mmCIF using MDTraj/PDBFixer.
 
-    MDTraj's traj.xyz is *normally always in nm*.
-    This function can optionally auto-detect and then force Å.
+    MDTraj coordinates are handled in nm internally and converted to Å if requested.
 
     unit: "auto" | "nm" | "A"
       - "auto": infer from CA-CA spacing
@@ -645,45 +859,52 @@ def read_ca_coords(pdb_or_cif, chain_key="index", force_angstrom=True, unit="aut
       - "A":  treat coords as Å
     force_angstrom: if True, returns coords in Å.
     """
-    traj = md.load(pdb_or_cif)
-    top = traj.topology
-    xyz = traj.xyz[0]  # MDTraj: nm
+    traj, tmp_path = _load_mdtraj_any(pdb_or_cif)
+    try:
+        top = traj.topology
+        xyz = traj.xyz[0]  # nm
 
-    coords = []
-    keys = []
+        coords = []
+        keys = []
 
-    for atom in top.atoms:
-        if atom.name != "CA":
-            continue
+        for atom in top.atoms:
+            if atom.name != "CA":
+                continue
 
-        res = atom.residue
-        chain = res.chain
+            res = atom.residue
+            chain = res.chain
 
-        if chain_key == "index":
-            ch = chain.index
-        elif chain_key == "id":
-            ch = (chain.chain_id or "").strip()
-        else:
-            raise ValueError("chain_key must be 'index' or 'id'")
+            if chain_key == "index":
+                ch = chain.index
+            elif chain_key == "id":
+                ch = _chain_id_for_mdtraj_chain(chain, chain_key="id")
+            else:
+                raise ValueError("chain_key must be 'index' or 'id'")
 
-        icode = getattr(res, "insertion_code", "") or ""
-        coords.append(xyz[atom.index])
-        keys.append((ch, res.resSeq, icode))
+            icode = getattr(res, "insertion_code", "") or ""
+            coords.append(xyz[atom.index])
+            keys.append((ch, res.resSeq, icode))
 
-    coords = np.array(coords, float)
+        coords = np.array(coords, float)
 
-    if unit == "auto":
-        unit = _infer_length_unit_from_ca(coords)
+        if unit == "auto":
+            unit = _infer_length_unit_from_ca(coords)
 
-    if force_angstrom:
-        if unit == "nm":
-            coords = coords * 10.0
-        elif unit == "A":
-            pass
-        else:
-            raise ValueError("unit must be 'auto', 'nm', or 'A'")
+        if force_angstrom:
+            if unit == "nm":
+                coords = coords * 10.0
+            elif unit == "A":
+                pass
+            else:
+                raise ValueError("unit must be 'auto', 'nm', or 'A'")
 
-    return coords, keys
+        return coords, keys
+    finally:
+        if tmp_path is not None:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 def kabsch_align_Q_to_P(P, Q):
@@ -1769,25 +1990,22 @@ def visualisePredictionIndividual(aa_path):
     if not HAS_PY3DMOL:
         _warn_missing_py3dmol()
         return None
+
     view = py3Dmol.view(width=800, height=600)
-    
-    
 
-    # ---- load AA model ----
-    with open(aa_path, "r") as f:
-        pdb_data_aa = f.read()
-    view.addModel(pdb_data_aa, "pdb")   # model 0
-    aa_chains = _chains_present_in_pdb(pdb_data_aa)
+    structure_data, fmt = _read_structure_for_viewer(aa_path)
+    view.addModel(structure_data, fmt)   # model 0
+    chains = _chains_present_in_structure(structure_data, fmt)
 
-
-    # ---- choose colors ----
     palette = ["blue", "green", "red", "yellow", "cyan", "magenta",
                "orange", "purple", "lime", "gray"]
 
-    # Style AA chains (cartoon)
-    for i, ch in enumerate(aa_chains):
-        color = palette[i % len(palette)]
-        view.setStyle({"model": 0, "chain": ch}, {"cartoon": {"color": color}})
+    if chains:
+        for i, ch in enumerate(chains):
+            color = palette[i % len(palette)]
+            view.setStyle({"model": 0, "chain": ch}, {"cartoon": {"color": color}})
+    else:
+        view.setStyle({"model": 0}, {"cartoon": {"color": "lightgray"}})
 
     view.zoomTo()
     view.show()
@@ -1800,41 +2018,541 @@ def visualisePredictionComp(pdb1, pdb2, do_superpose=True):
 
     view = py3Dmol.view(width=800, height=600)
 
-    with open(pdb1, "r") as f:
-        pdb_data_aa = f.read()
+    data1, fmt1 = _read_structure_for_viewer(pdb1)
 
-    with open(pdb2, "r") as f:
-        pdb_data_ca = f.read()
-
-    # --- superimpose CA model onto AA model for fair visual comparison ---
     if do_superpose:
-        pdb_data_ca_aln, rmsd, nmatch = superimpose_pdb_strings_by_ca(pdb_data_aa, pdb_data_ca)
-        pdb_data_ca_to_show = pdb_data_ca_aln
+        data2_to_show, rmsd, nmatch = superimpose_structure_files_by_ca(pdb1, pdb2)
+        fmt2 = "pdb"
         print(f"Superposed model 1 onto model 0 using {nmatch} matched Cα atoms. RMSD = {rmsd:.3f} Å")
     else:
-        pdb_data_ca_to_show = pdb_data_ca
+        data2_to_show, fmt2 = _read_structure_for_viewer(pdb2)
 
-    # Add models
-    view.addModel(pdb_data_aa, "pdb")          # model 0 (reference)
-    view.addModel(pdb_data_ca_to_show, "pdb")  # model 1 (mobile/aligned)
+    view.addModel(data1, fmt1)
+    view.addModel(data2_to_show, fmt2)
 
-    aa_chains = _chains_present_in_pdb(pdb_data_aa)
-    ca_chains = _chains_present_in_pdb(pdb_data_ca_to_show)
+    chains1 = _chains_present_in_pdb(data1) if fmt1 == "pdb" else None
+    chains2 = _chains_present_in_pdb(data2_to_show) if fmt2 == "pdb" else None
 
     palette = ["blue", "green", "red", "yellow", "cyan", "magenta",
                "orange", "purple", "lime", "gray"]
 
-    # Style model 0
-    for i, ch in enumerate(aa_chains):
-        color = palette[i % len(palette)]
-        view.setStyle({"model": 0, "chain": ch}, {"cartoon": {"color": color}})
+    if chains1:
+        for i, ch in enumerate(chains1):
+            color = palette[i % len(palette)]
+            view.setStyle({"model": 0, "chain": ch}, {"cartoon": {"color": color}})
+    else:
+        view.setStyle({"model": 0}, {"cartoon": {"color": "lightgray"}})
 
-    # Style model 1
-    for i, ch in enumerate(ca_chains):
-        color = palette[(i + 1) % len(palette)]
-        view.setStyle({"model": 1, "chain": ch}, {"cartoon": {"color": color}})
+    if chains2:
+        for i, ch in enumerate(chains2):
+            color = palette[(i + 1) % len(palette)]
+            view.setStyle({"model": 1, "chain": ch}, {"cartoon": {"color": color, "opacity": 0.6}})
+    else:
+        view.setStyle({"model": 1}, {"cartoon": {"color": "red"}})
 
     view.zoomTo()
     view.show()
+
+
+
+def visualise_linker_sections(structure_path, selected_secs, chain_id_map=None, ignore_chain=False):
+    structure_path = str(structure_path)
+    suffix = Path(structure_path).suffix.lower()
+
+    if suffix == ".pdb":
+        fmt = "pdb"
+    elif suffix in [".cif", ".mmcif"]:
+        fmt = "cif"
+    else:
+        raise ValueError(f"Unsupported structure format: {suffix}")
+
+    with open(structure_path, "r") as f:
+        structure_data = f.read()
+
+    view = py3Dmol.view(width=900, height=650)
+    view.addModel(structure_data, fmt)
+
+    view.setStyle(
+        {"model": 0},
+        {"cartoon": {"color": "lightgray", "opacity": 0.5}}
+    )
+
+    colours = ["red", "orange", "yellow", "cyan", "magenta", "lime", "blue"]
+
+    # Try to infer PDB chain IDs if none supplied
+    inferred_chain_ids = []
+    if fmt == "pdb":
+        seen = set()
+        for line in structure_data.splitlines():
+            if line.startswith(("ATOM", "HETATM")) and len(line) > 21:
+                ch = line[21].strip()
+                if ch and ch not in seen:
+                    seen.add(ch)
+                    inferred_chain_ids.append(ch)
+
+    if chain_id_map is None and inferred_chain_ids:
+        chain_id_map = {i + 1: ch for i, ch in enumerate(inferred_chain_ids)}
+
+    print("chain_id_map =", chain_id_map)
+    print("ignore_chain =", ignore_chain)
+
+    parsed = []
+
+    for i, sec in enumerate(selected_secs):
+        m = re.search(r"Chain\s+(\d+)\s+ResID:\s*(\d+)-(\d+)", sec)
+        if not m:
+            print(f"Could not parse section label: {sec}")
+            continue
+
+        chain_num = int(m.group(1))
+        start = int(m.group(2))
+        end = int(m.group(3))
+        colour = colours[i % len(colours)]
+
+        sel = {"model": 0, "resi": f"{start}-{end}"}
+
+        if not ignore_chain and chain_id_map is not None and chain_num in chain_id_map:
+            sel["chain"] = chain_id_map[chain_num]
+
+        print("Applying selection:", sel, "for", sec)
+
+        view.addStyle(
+            sel,
+            {"cartoon": {"color": colour, "opacity": 1.0}}
+        )
+
+        parsed.append((chain_num, start, end))
+
+    print("Parsed sections:", parsed)
+
+    view.zoomTo()
+    view.show()
+
+
+def visualisePredictionComp_panel(
+    file_list,
+    reference_file,
+    do_superpose=True,
+    ncols=3,
+    panel_width=350,
+    panel_height=300,
+    max_panels=None,
+    show_labels=True,
+):
+    """
+    Show a grid of pairwise comparisons against a fixed reference.
+
+    model 0 = reference
+    model 1 = one member of file_list
+    """
+    if not HAS_PY3DMOL:
+        _warn_missing_py3dmol()
+        return None
+
+    if max_panels is not None:
+        file_list = file_list[:max_panels]
+
+    n = len(file_list)
+    if n == 0:
+        print("No files to display.")
+        return None
+
+    ncols = max(1, int(ncols))
+    nrows = (n + ncols - 1) // ncols
+
+    view = py3Dmol.view(
+        viewergrid=(nrows, ncols),
+        width=ncols * panel_width,
+        height=nrows * panel_height,
+        linked=False,
+    )
+
+    ref_data, ref_fmt = _read_structure_for_viewer(reference_file)
+
+    for k, mobile_file in enumerate(file_list):
+        r = k // ncols
+        c = k % ncols
+        viewer = (r, c)
+
+        try:
+            # reference
+            view.addModel(ref_data, ref_fmt, viewer=viewer)
+
+            # mobile
+            if do_superpose:
+                mob_data_to_show, rmsd, nmatch = superimpose_structure_files_by_ca(
+                    reference_file, mobile_file
+                )
+                mob_fmt = "pdb"
+                panel_title = f"{Path(mobile_file).name}\nRMSD={rmsd:.2f} Å"
+            else:
+                mob_data_to_show, mob_fmt = _read_structure_for_viewer(mobile_file)
+                panel_title = Path(mobile_file).name
+
+            view.addModel(mob_data_to_show, mob_fmt, viewer=viewer)
+
+            # style reference
+            ref_chains = _chains_present_in_structure(ref_data, ref_fmt)
+            if ref_chains:
+                for ch in ref_chains:
+                    view.setStyle(
+                        {"model": 0, "chain": ch},
+                        {"cartoon": {"color": "lightgray", "opacity": 0.85}},
+                        viewer=viewer,
+                    )
+            else:
+                view.setStyle(
+                    {"model": 0},
+                    {"cartoon": {"color": "lightgray", "opacity": 0.85}},
+                    viewer=viewer,
+                )
+
+            # style mobile
+            mob_chains = _chains_present_in_structure(mob_data_to_show, mob_fmt)
+            if mob_chains:
+                for ch in mob_chains:
+                    view.setStyle(
+                        {"model": 1, "chain": ch},
+                        {"cartoon": {"color": "red", "opacity": 0.85}},
+                        viewer=viewer,
+                    )
+            else:
+                view.setStyle(
+                    {"model": 1},
+                    {"cartoon": {"color": "red", "opacity": 0.85}},
+                    viewer=viewer,
+                )
+
+            view.zoomTo(viewer=viewer)
+
+            if show_labels:
+                view.addLabel(
+                    panel_title,
+                    {
+                        "fontSize": 10,
+                        "backgroundColor": "white",
+                        "backgroundOpacity": 0.7,
+                        "fontColor": "black",
+                        "borderThickness": 0,
+                        "inFront": True,
+                    },
+                    viewer=viewer,
+                )
+
+        except Exception as e:
+            print(f"Failed for {mobile_file}: {e}")
+            view.addLabel(
+                f"Failed:\n{Path(mobile_file).name}",
+                {
+                    "fontSize": 12,
+                    "backgroundColor": "mistyrose",
+                    "backgroundOpacity": 0.8,
+                    "fontColor": "black",
+                    "borderThickness": 0,
+                    "inFront": True,
+                },
+                viewer=viewer,
+            )
+
+    view.show()
     return view
 
+
+
+
+def show_structure_and_foxs_side_by_side(
+    pdb_name,
+    saxs_name,
+    foxs_cmd="pyfoxs",
+    max_q=None,
+    structure_width=480,
+    structure_height=420,
+    plot_width=520,
+    print_summary=False,
+):
+    """
+    Display:
+      left  = structure viewer
+      right = FoXS fit + residuals
+
+    Returns
+    -------
+    dict with keys:
+        chi2, stdout, stderr, fit_file, view_html
+    """
+
+    pdb_path = Path(pdb_name).resolve()
+    saxs_path = Path(saxs_name).resolve()
+
+    if not pdb_path.exists():
+        raise FileNotFoundError(f"Structure file not found: {pdb_path}")
+    if not saxs_path.exists():
+        raise FileNotFoundError(f"SAXS file not found: {saxs_path}")
+
+    temp_pdb_to_clean = None
+
+    try:
+        pdb_for_foxs, temp_pdb_to_clean = CDT._convert_cif_to_pdb_for_foxs(pdb_path)
+        pdb_for_foxs = Path(pdb_for_foxs)
+
+        base_cmd = CDT._normalise_cmd(foxs_cmd)
+        cmd = base_cmd + [str(pdb_for_foxs), str(saxs_path)]
+
+        if max_q is not None:
+            cmd += ["--max_q", str(max_q)]
+
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        stdout = proc.stdout
+        stderr = proc.stderr
+
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"pyFoXS failed with exit code {proc.returncode}\n\nSTDERR:\n{stderr}\n\nSTDOUT:\n{stdout}"
+            )
+
+        combined_text = stdout + "\n" + stderr
+        chi2 = None
+        chi_patterns = [
+            r"Chi(?:\^?2| square)\s*[:=]\s*([0-9.eE+-]+)",
+            r"chi(?:\^?2| square)\s*[:=]\s*([0-9.eE+-]+)",
+            r"\bchi\s*=\s*([0-9.eE+-]+)",
+            r"\bChi\s*=\s*([0-9.eE+-]+)",
+            r"\bchi2\s*[:=]\s*([0-9.eE+-]+)",
+            r"\bChi2\s*[:=]\s*([0-9.eE+-]+)",
+        ]
+        for pat in chi_patterns:
+            m = re.search(pat, combined_text)
+            if m:
+                try:
+                    chi2 = float(m.group(1))
+                    break
+                except ValueError:
+                    pass
+
+        fit_file = CDT._find_foxs_fit_file(pdb_for_foxs, saxs_path)
+
+        if fit_file is None:
+            raise FileNotFoundError("Could not identify a FoXS fit file automatically.")
+
+        fit = CDT.load_numeric_table_loose(fit_file, min_cols=2)
+        q = fit[:, 0]
+
+        if fit.shape[1] >= 4:
+            i_exp = fit[:, 1]
+            sigma = fit[:, 2]
+            i_fit = fit[:, 3]
+            residual = (i_exp - i_fit) / sigma
+        elif fit.shape[1] == 3:
+            i_exp = fit[:, 1]
+            i_fit = fit[:, 2]
+            residual = i_exp - i_fit
+        else:
+            raise ValueError("Fit file must have at least 3 columns for residual plotting.")
+
+        # -----------------------------
+        # Build matplotlib figure -> HTML image
+        # -----------------------------
+        fig = plt.figure(figsize=(6.0, 6.0))
+        gs = fig.add_gridspec(2, 1, height_ratios=[3, 1], hspace=0.08)
+
+        ax1 = fig.add_subplot(gs[0])
+        ax2 = fig.add_subplot(gs[1], sharex=ax1)
+
+        ax1.plot(q, i_exp, "o", ms=4, label="Experimental")
+        ax1.plot(q, i_fit, "-", lw=2, label="FoXS fit")
+        ax1.set_yscale("log")
+        ax1.set_ylabel("Intensity")
+
+        title = "Initial FoXS check"
+        if chi2 is not None:
+            title += f"  (chi² = {chi2:.4g})"
+        if max_q is not None:
+            title += f", max_q={max_q}"
+        ax1.set_title(title)
+        ax1.legend()
+        ax1.tick_params(axis="x", labelbottom=False)
+
+        ax2.axhline(0.0, lw=1)
+        ax2.plot(q, residual, "o", ms=3)
+        ax2.set_xlabel("q")
+        ax2.set_ylabel("Residual")
+
+        plt.tight_layout()
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+        plot_b64 = base64.b64encode(buf.read()).decode("utf-8")
+        plot_html = f'<img src="data:image/png;base64,{plot_b64}" style="width:{plot_width}px; max-width:100%;">'
+
+        # -----------------------------
+        # Build py3Dmol viewer -> HTML quietly
+        # -----------------------------
+        if not HAS_PY3DMOL:
+            _warn_missing_py3dmol()
+            viewer_html = "<div style='padding:20px;border:1px solid #ddd;border-radius:6px;'>py3Dmol is not available.</div>"
+        else:
+            view = py3Dmol.view(width=structure_width, height=structure_height)
+
+            structure_data, fmt = _read_structure_for_viewer(pdb_name)
+            view.addModel(structure_data, fmt)
+
+            chains = _chains_present_in_structure(structure_data, fmt)
+            palette = ["blue", "green", "red", "yellow", "cyan", "magenta",
+                       "orange", "purple", "lime", "gray"]
+
+            if chains:
+                for i, ch in enumerate(chains):
+                    color = palette[i % len(palette)]
+                    view.setStyle({"model": 0, "chain": ch}, {"cartoon": {"color": color}})
+            else:
+                view.setStyle({"model": 0}, {"cartoon": {"color": "lightgray"}})
+
+            view.zoomTo()
+
+            silent_out = io.StringIO()
+            silent_err = io.StringIO()
+            with contextlib.redirect_stdout(silent_out), contextlib.redirect_stderr(silent_err):
+                viewer_html = view._make_html()
+
+        # -----------------------------
+        # Display side by side
+        # -----------------------------
+        html = f"""
+        <div style="
+            display:flex;
+            flex-wrap:wrap;
+            gap:20px;
+            align-items:flex-start;
+            margin-top:10px;
+            margin-bottom:10px;
+        ">
+            <div style="flex:0 0 auto;">
+                <div style="font-weight:600; margin-bottom:8px;">Structure</div>
+                {viewer_html}
+            </div>
+            <div style="flex:0 0 auto;">
+                <div style="font-weight:600; margin-bottom:8px;">Initial FoXS fit</div>
+                {plot_html}
+            </div>
+        </div>
+        """
+        display(HTML(html))
+
+        if print_summary:
+            if chi2 is not None:
+                print(f"Initial FoXS chi^2: {chi2:.4g}")
+            else:
+                print("Initial FoXS chi^2: not parsed from output")
+
+        return {
+            "chi2": chi2,
+            "stdout": stdout,
+            "stderr": stderr,
+            "fit_file": fit_file,
+            "view_html": viewer_html,
+        }
+
+    finally:
+        if temp_pdb_to_clean is not None:
+            try:
+                os.remove(temp_pdb_to_clean)
+            except OSError:
+                pass
+
+
+def collect_best_prediction_per_run_closest_to_one(
+    fitdata_dir: str | Path,
+    require_exists: bool = True,
+):
+    """
+    For each run number from 1 up to the maximum detected allAtomRun*,
+    select the prediction whose FoXS chi^2 is closest to 1.
+
+    Missing runs or runs with no valid prediction return None.
+
+    Parameters
+    ----------
+    fitdata_dir : str | Path
+        Path to the fitdata directory containing allAtomRun*/foxs_results.txt
+    require_exists : bool
+        If True, only consider PDB paths that currently exist on disk.
+
+    Returns
+    -------
+    list
+        List indexed by run number - 1.
+        Each entry is either:
+            (pdb_path: Path, chi2: float)
+        or:
+            None
+    """
+    fitdata_dir = Path(fitdata_dir)
+
+    run_map = {}
+    max_run = 0
+
+    for p in fitdata_dir.glob("allAtomRun*"):
+        if not p.is_dir():
+            continue
+        m = re.match(r"allAtomRun(\d+)$", p.name)
+        if not m:
+            continue
+
+        run_no = int(m.group(1))
+        run_map[run_no] = p
+        max_run = max(max_run, run_no)
+
+    if max_run == 0:
+        return []
+
+    results = []
+
+    for run_no in range(1, max_run + 1):
+        run_dir = run_map.get(run_no)
+
+        if run_dir is None:
+            results.append(None)
+            continue
+
+        foxs_file = run_dir / "foxs_results.txt"
+        if not foxs_file.exists():
+            results.append(None)
+            continue
+
+        best_entry = None
+        best_score = None  # smaller is better, score = abs(chi2 - 1)
+
+        for line in foxs_file.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+
+            pdb_path_str, chi_str = parts[0], parts[1]
+
+            if chi_str.upper() == "ERROR":
+                continue
+
+            try:
+                chi2 = float(chi_str)
+            except ValueError:
+                continue
+
+            pdb_path = Path(pdb_path_str)
+            if require_exists and not pdb_path.exists():
+                continue
+
+            score = abs(chi2 - 1.0)
+
+            if best_score is None or score < best_score:
+                best_score = score
+                best_entry = (pdb_path, chi2)
+
+        results.append(best_entry)
+
+    return results
