@@ -531,8 +531,8 @@ def main():
         default=0.05,
         help="Snap sampled mixtures to multiples of this (0 disables). Default: 0.05",
     )
-    parser.add_argument("--max_backmap", type=int, default=1,
-                    help="Maximum number of concurrent backmapping jobs (default: 1)")
+    parser.add_argument("--max_backmap", type=int, default=3,
+                    help="Maximum number of concurrent backmapping jobs (default: 3)")
     parser.add_argument("--defer_backmap_seconds", type=int, default=600,
                     help="Ignore early structures for this many seconds before backmapping starts (default: 600)")
     parser.add_argument("--no_foxs", action="store_true",
