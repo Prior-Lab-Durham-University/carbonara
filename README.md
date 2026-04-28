@@ -20,7 +20,8 @@ Carbonara can be used at several levels. The simplest route runs the core C++ fi
 | **2. Basic setup / one-shot run** | New users with a PDB/mmCIF and SAXS curve who trust the defaults | Python setup script, automatic `RunMe_*.sh` creation, optional one-shot run | Real-time all-atom scoring/monitoring unless using the full workflow |
 | **3. Full interactive/all-atom workflow** | Complex systems, exploratory fitting, custom flexibility/constraints, multimers, mixtures | Full Python setup, notebooks/front-end, real-time monitoring, all-atom backmapping, pyFoXS scoring, analysis tools | MODELLER and CG2ALL are optional external tools and may require separate installation |
 
-If you are new to Carbonara, start with workflow 2. If you need control over flexible regions, distance constraints, multimeric rotations, mixture fitting, or real-time all-atom analysis, use workflow 3.
+Workflow 3 would be our suggested workflow, it requires a bit more upfront setup but once its in place the user recieves all-atom preditions by default and gives clear visual co
+control over flexible regions, distance constraints, multimeric rotations and mixture fitting. Carbonara's strength is this fleixbility. Workflow 2 would suit a user who is confident at the command line and can perform the structures backmapping themselves.
 
 ---
 
