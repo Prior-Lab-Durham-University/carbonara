@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import signal
 import threading
@@ -9,14 +10,89 @@ from IPython.display import display, Markdown, update_display
 from monitor_utils import sweep_quality
 
 
+def check_modeller_available() -> bool:
+    """
+    Return True only if MODELLER is importable and can initialise an environ().
+
+    MODELLER is an optional external dependency because it requires a separate
+    licence. It should therefore be checked only when the user requests the
+    Modeller backmapping backend.
+    """
+    try:
+        from modeller import environ  # type: ignore
+        _ = environ()
+        return True
+    except Exception:
+        return False
+
+
+def modeller_error_message() -> str:
+    return (
+        "MODELLER backmapping was requested, but MODELLER is not installed "
+        "or is not licensed/configured in this Python environment.\n\n"
+        "MODELLER is optional and is not installed by setupPython.sh because "
+        "it requires a separate licence. Either install/configure MODELLER on "
+        "this machine, or choose a non-Modeller backmapping method such as "
+        "CG2ALL if available.\n\n"
+        "Check manually with:\n"
+        "    python -c \"from modeller import environ; env=environ(); print('MODELLER OK')\""
+    )
+
+
+def detect_backmap_method_from_run_script(script_path: str | Path) -> str | None:
+    """
+    Try to detect a backmapping method from a RunMe_*.sh script.
+
+    This deliberately supports several common spellings, since notebook/run
+    scripts often evolve:
+      BACKMAP_METHOD=modeller
+      method=modeller
+      --method modeller
+      --backmap-method modeller
+      method='modeller'
+
+    Returns 'modeller', 'cg2all', or None if no method is identifiable.
+    """
+    script_path = Path(script_path)
+    if not script_path.exists():
+        return None
+
+    try:
+        text = script_path.read_text(errors="ignore")
+    except Exception:
+        return None
+
+    patterns = [
+        r"(?im)^\s*(?:BACKMAP_METHOD|BACKMAPPING_METHOD|METHOD|method)\s*=\s*[\"']?(modeller|cg2all)[\"']?\b",
+        r"(?i)--(?:backmap-method|method)\s+[\"']?(modeller|cg2all)[\"']?\b",
+        r"(?i)\bmethod\s*=\s*[\"']?(modeller|cg2all)[\"']?\b",
+    ]
+
+    for pat in patterns:
+        match = re.search(pat, text)
+        if match:
+            return match.group(1).lower()
+
+    return None
+
+
 class CarbonaraRunner:
 
-    def __init__(self, project_name, base_dir="carbonara_runs", foxs_cmd="pyfoxs"):
+    def __init__(
+        self,
+        project_name,
+        base_dir="carbonara_runs",
+        foxs_cmd="pyfoxs",
+        backmap_method="auto",
+        require_modeller_check=True,
+    ):
         self.project_name = project_name
         self.base_dir = Path(base_dir)
         self.script = f"RunMe_{project_name}.sh"
         self.fitdata = self.base_dir / project_name / "fitdata"
         self.foxs_cmd = foxs_cmd
+        self.backmap_method = backmap_method
+        self.require_modeller_check = require_modeller_check
 
         self.proc = None
         self._monitor_thread = None
@@ -36,10 +112,52 @@ class CarbonaraRunner:
     # ------------------------
     # Run control
     # ------------------------
+    def _resolve_backmap_method(self) -> str | None:
+        """
+        Resolve requested backmapping method.
+
+        If self.backmap_method is 'auto', inspect the generated RunMe script.
+        If no method can be detected, return None and do not block startup.
+        """
+        if self.backmap_method is None:
+            return None
+
+        method = str(self.backmap_method).strip().lower()
+        if method in {"", "none", "false", "off", "no"}:
+            return None
+
+        if method == "auto":
+            return detect_backmap_method_from_run_script(self.script)
+
+        return method
+
+    def _preflight_checks(self):
+        script_path = Path(self.script)
+        if not script_path.exists():
+            raise FileNotFoundError(
+                f"Run script not found: {script_path}\n"
+                f"Expected to find RunMe_{self.project_name}.sh in the current directory."
+            )
+
+        method = self._resolve_backmap_method()
+
+        if method == "modeller" and self.require_modeller_check:
+            if not check_modeller_available():
+                raise RuntimeError(modeller_error_message())
+            print("✅ MODELLER check passed")
+        elif method == "cg2all":
+            print("ℹ️ Backmapping method detected: CG2ALL")
+        elif method is None:
+            print("ℹ️ No backmapping method detected in run script; skipping MODELLER preflight check")
+        else:
+            print(f"ℹ️ Backmapping method set to {method!r}; no MODELLER preflight needed")
+
     def start(self):
         if self.proc is not None:
             print("Already running.")
             return
+
+        self._preflight_checks()
 
         self.proc = subprocess.Popen(
             ["bash", self.script, self.foxs_cmd],
