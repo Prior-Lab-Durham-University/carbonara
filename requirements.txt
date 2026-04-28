@@ -10,3 +10,9 @@ plotly
 networkx
 scikit-learn
 numba
+Cython
+mdtraj
+openmm
+git+https://github.com/openmm/pdbfixer.git
+py3Dmol
+torch
