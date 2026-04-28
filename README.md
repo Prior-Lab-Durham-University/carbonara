@@ -8,7 +8,13 @@ Carbonara bridges the gap between crystal-like and solution-state conformations 
 
 Schematic representation of the Carbonara refinement pipeline. The workflow proceeds from an initial structure (a) with identification of flexible regions (b), conformational sampling guided by SAXS data constraints (c), model selection based on optimal fit (d), and finally all-atom reconstruction (e) for downstream applications.
 
-## Building with CMake
+## Clone the repository 
+
+```
+git clone https://github.com/Prior-Lab-Durham-University/carbonara.git carbonara
+```
+
+## Building the underlying algorithm with with CMake
 
 To build the project using CMake, follow these steps:
 
@@ -42,6 +48,14 @@ cmake ..
 
 ```
 make
+```
+
+## Building the underlying algorithm with with CMake
+
+In the carbonara directory run the following shell script
+
+```
+sh setupPython.sh
 ```
 
 ## Reproducing structures refined in the paper
