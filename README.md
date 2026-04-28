@@ -4,7 +4,7 @@ Carbonara bridges the gap between crystal-like and solution-state conformations 
 
 The method can incorporate additional experimental constraints such as disulfide bonds, NMR distance measurements, contact predictions, or FRET data to further guide the refinement process.
 
-![Method Overview](figures/method_overview.png)
+![Method Overview](figures/method_overview_arrows.png)
 
 Schematic representation of the Carbonara refinement pipeline. The workflow proceeds from an initial structure (a), identification of flexible regions (b), conformational sampling guided by SAXS and optional structural constraints (c), model selection based on optimal fit (d), and optional all-atom reconstruction (e) for downstream applications.
 
