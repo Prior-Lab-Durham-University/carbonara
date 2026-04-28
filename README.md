@@ -16,12 +16,13 @@ Carbonara can be used at several levels. The simplest route runs the core C++ fi
 
 | Workflow | Best for | What it includes | What it does not include |
 |---|---|---|---|
-| **1. Core C++ engine** | Reproducing prepared runs, running existing `RunMe_*.sh` scripts | Fast Carbonara fitting engine | Guided setup, all-atom reconstruction, real-time analysis |
-| **2. Basic setup / one-shot run** | New users with a PDB/mmCIF and SAXS curve who trust the defaults | Python setup script, automatic `RunMe_*.sh` creation, optional one-shot run | Real-time all-atom scoring/monitoring unless using the full workflow |
-| **3. Full interactive/all-atom workflow** | Complex systems, exploratory fitting, custom flexibility/constraints, multimers, mixtures | Full Python setup, notebooks/front-end, real-time monitoring, all-atom backmapping, pyFoXS scoring, analysis tools | MODELLER and CG2ALL are optional external tools and may require separate installation |
+| **1. Core C++ engine** | Reproducing prepared runs or running existing `RunMe_*.sh` scripts | Fast Carbonara C++ fitting engine | Guided setup, all-atom reconstruction, real-time analysis |
+| **2. Basic setup / one-shot run** | Users with a PDB/mmCIF and SAXS curve who want Carbonara to prepare a run using sensible defaults | Python setup script, automatic `RunMe_*.sh` creation, optional one-shot fitting | Real-time all-atom scoring/monitoring unless using the full workflow |
+| **3. Full interactive/all-atom workflow** | Complex systems, exploratory fitting, custom flexibility/constraints, multimers, mixtures, and production analysis | Full Python setup, notebooks/front-end, real-time monitoring, all-atom backmapping, pyFoXS scoring, analysis tools | MODELLER and CG2ALL are optional external tools and may require separate installation |
 
-Workflow 3 would be our suggested workflow, it requires a bit more upfront setup but once its in place the user recieves all-atom preditions by default and gives clear visual co
-control over flexible regions, distance constraints, multimeric rotations and mixture fitting. Carbonara's strength is this fleixbility. Workflow 2 would suit a user who is confident at the command line and can perform the structures backmapping themselves.
+**For most new users**, workflow 2 is the quickest way to start a Carbonara calculation.
+
+**For users who want the full Carbonara experience**, workflow 3 is recommended. It requires more setup, but gives much better control over flexible regions, constraints, multimeric rotations, mixture fitting, real-time all-atom predictions, and live analysis. Carbonara's strength is this flexibility: the user can provide as little or as much structural information as they want.
 
 ---
 
@@ -32,11 +33,19 @@ git clone https://github.com/Prior-Lab-Durham-University/carbonara.git carbonara
 cd carbonara
 ```
 
+If you are using a specific branch, for example the current WAXSiS/pyFoXS workflow branch:
+
+```bash
+git checkout pseudoWaxsis
+```
+
 ---
 
 ## 1. Core C++ engine
 
 Use this route if you already have prepared Carbonara input files and a `RunMe_*.sh` script.
+
+This is the lightest route. It runs the core Carbonara fitting algorithm but does not automatically perform all-atom reconstruction or real-time pyFoXS scoring.
 
 ### Build the C++ algorithm
 
@@ -68,8 +77,6 @@ or:
 sh RunMe_C239S.sh
 ```
 
-This runs the core Carbonara fitting algorithm. It does not automatically perform all-atom reconstruction or real-time pyFoXS scoring.
-
 ---
 
 ## 2. Basic setup for new structures
@@ -78,9 +85,9 @@ Use this route if you have a starting structure and SAXS data and want Carbonara
 
 You need:
 
-1. A starting structure, usually a PDB or mmCIF file from AlphaFold, crystallography, or another source.
-2. SAXS data in Å units with columns for `q`, intensity, and experimental error.
-3. The C++ Carbonara binary built with CMake.
+1. a starting structure, usually a PDB or mmCIF file from AlphaFold, crystallography, or another source;
+2. SAXS data in Å units with columns for `q`, intensity, and experimental error;
+3. the C++ Carbonara binary built with CMake.
 
 ### Setup a new run
 
@@ -107,6 +114,8 @@ python run_carbonara_oneshot.py \
     --saxs path/to/saxs.dat \
     --name ProteinName
 ```
+
+This route is useful when you want to get a standard Carbonara run started quickly. It does not attempt to give the same level of interactivity, real-time all-atom reconstruction, or live analysis as the full workflow.
 
 ### Multimers and rigid-body rotations
 
@@ -182,9 +191,9 @@ Useful options:
 
 Use this route for the most complete Carbonara workflow.
 
-The full setup supports:
+The full workflow is designed for users who want to interactively control the model and analyse results as they are produced. It supports:
 
-- interactive or guided selection of flexible regions;
+- guided selection of flexible regions;
 - user-defined flexible and fixed sections;
 - multimers and rigid-body rotations;
 - distance constraints such as disulfides, contact predictions, NMR-like distances, crosslinks, or FRET-style measurements;
@@ -192,15 +201,30 @@ The full setup supports:
 - real-time monitoring of Carbonara predictions;
 - real-time all-atom reconstruction;
 - pyFoXS-based all-atom SAXS scoring;
-- downstream analysis of χ², RMSD, TM-score, GDT-TS, and model quality.
+- downstream analysis of χ², RMSD, TM-score, GDT-TS, radius of gyration, and model quality.
+
+This is the recommended route for complex systems or production analysis.
 
 ### Install the Python workflow
 
-Create and activate a virtual environment:
+For the full interactive/all-atom workflow, run:
+
+```bash
+bash setupPython.sh
+```
+
+The setup script installs the Python/Git-installable dependencies needed by the notebook/front-end tools. It also handles packages that need special installation order, such as `biobox`, and installs pyFoXS runtime dependencies.
+
+We recommend running this inside a clean Python environment if possible, but this is not strictly required if you already manage Python packages another way.
+
+### Optional: use a local virtual environment
+
+If you want to avoid modifying your existing Python environment, create a virtual environment first:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+bash setupPython.sh
 ```
 
 For `tcsh`/`csh` shells:
@@ -208,17 +232,14 @@ For `tcsh`/`csh` shells:
 ```tcsh
 python3 -m venv .venv
 source .venv/bin/activate.csh
-```
-
-Then run:
-
-```bash
 bash setupPython.sh
 ```
 
-The setup script installs the Python/Git-installable dependencies needed by the full workflow. It also handles packages that need special installation order, such as `biobox`, and installs pyFoXS runtime dependencies.
+This is also a useful way to test that installation works from scratch.
 
-Then build the C++ engine if you have not already done so:
+### Build the C++ engine
+
+If you have not already built the C++ engine:
 
 ```bash
 mkdir build
@@ -230,7 +251,7 @@ cd ..
 
 ### Using notebooks
 
-If using Jupyter, register the environment as a kernel:
+If using Jupyter, register your Python environment as a kernel:
 
 ```bash
 python -m ipykernel install --user \
@@ -323,7 +344,7 @@ sh RunMe_C239S.sh
 
 ## Colab implementation
 
-Carbonara’s key strength is its flexibility: users can specify as little or as much of the structure to vary, enforce rigid-body motions of subdomains, and apply a wide range of distance constraints.
+Carbonara's key strength is its flexibility: users can specify as little or as much of the structure to vary, enforce rigid-body motions of subdomains, and apply a wide range of distance constraints.
 
 The Colab implementation provides a guided graphical setup for choosing flexible regions and preparing Carbonara runs.
 
@@ -359,6 +380,10 @@ Use `setupPython.sh`. The full setup installs the pyFoXS runtime dependencies.
 
 This is expected unless you installed and licensed MODELLER separately. MODELLER is only needed for MODELLER-based all-atom backmapping.
 
+### The basic Carbonara engine runs but all-atom reconstruction does not
+
+This usually means the core C++ run is correctly installed, but the optional all-atom backmapping route is missing one of its external tools. Check whether you selected MODELLER or CG2ALL, and confirm that the selected tool is installed and available from the same Python environment used by the notebook or script.
+
 ---
 
 ## Citation
@@ -376,6 +401,6 @@ If you use Carbonara in your research, please cite our preprint:
 }
 ```
 
-Shield: ![CC BY-NC-SA 4.0](https://licensebuttons.net/l/by-nc-sa/4.0/88x31.png)
+![CC BY-NC-SA 4.0](https://licensebuttons.net/l/by-nc-sa/4.0/88x31.png)
 
 This work is licensed under a [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License](https://creativecommons.org/licenses/by-nc-sa/4.0/).
