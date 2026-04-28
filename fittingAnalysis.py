@@ -2440,20 +2440,6 @@ def show_structure_and_foxs_side_by_side(
         """
         display(HTML(html))
 
-        if print_summary:
-            if chi2 is not None:
-                print(f"Initial FoXS chi^2: {chi2:.4g}")
-            else:
-                print("Initial FoXS chi^2: not parsed from output")
-
-        return {
-            "chi2": chi2,
-            "stdout": stdout,
-            "stderr": stderr,
-            "fit_file": fit_file,
-            "view_html": viewer_html,
-        }
-
     finally:
         if temp_pdb_to_clean is not None:
             try:
