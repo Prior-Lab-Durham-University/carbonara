@@ -189,21 +189,38 @@ Useful options:
 
 ## 3. Full interactive / all-atom workflow
 
-Use this route for the most complete Carbonara workflow.
+Option 3: full interactive setup using the notebooks
 
-The full workflow is designed for users who want to interactively control the model and analyse results as they are produced. It supports:
+For the most complete and recommended workflow, Carbonara provides interactive Jupyter/Colab notebooks that guide the user through the advanced setup. These notebooks are designed both to help new users configure Carbonara for their own systems and to reproduce the examples reported in the paper.
 
-- guided selection of flexible regions;
-- user-defined flexible and fixed sections;
-- multimers and rigid-body rotations;
-- distance constraints such as disulfides, contact predictions, NMR-like distances, crosslinks, or FRET-style measurements;
-- mixture fitting and ensemble-style comparisons;
-- real-time monitoring of Carbonara predictions;
-- real-time all-atom reconstruction;
-- pyFoXS-based all-atom SAXS scoring;
-- downstream analysis of χ², RMSD, TM-score, GDT-TS, radius of gyration, and model quality.
+This route is recommended when the user wants to:
 
-This is the recommended route for complex systems or production analysis.
+inspect and customise which regions of the structure are flexible;
+impose their own structural knowledge or assumptions;
+define rigid domains and allowed hinge motions;
+treat multimers with constrained rigid-body rotations;
+apply distance constraints such as disulfide bonds, FRET-derived distances, NMR distances, or other known contacts;
+recreate the Human SMARCAL1 and IgG2 examples from the paper.
+
+The main notebooks are:
+
+runCarbonara.ipynb
+
+A standard guided Carbonara run. This notebook demonstrates the setup used for the Human SMARCAL1 example in the paper and is the best starting point for a typical monomeric SAXS refinement.
+
+runCarbonaraUserFlex.ipynb
+
+A guided workflow for manually controlling the flexibility of the structure. This is intended for cases where the user has prior knowledge of the system and wants to decide which regions should be allowed to vary, rather than relying entirely on automatic flexibility assignment.
+
+This is useful, for example, when the user wants to preserve known structured domains while allowing specific linkers, termini, loops, or uncertain regions to move.
+
+runCarbonaraMultimer.ipynb
+
+A guided workflow for multimeric systems and constrained rigid-body rotations. This notebook demonstrates the IgG2 example from the paper: a tetramer composed of a pair of dimers, where the dimers are treated as locked units that should rotate only about the hinge region.
+
+The notebook also demonstrates how to impose distance constraints. In the IgG2 case, these are disulfide-bond constraints, but the same machinery can also be used for other experimentally or structurally motivated distance restraints.
+
+The notebooks provide the clearest route into Carbonara’s full functionality. The one-shot and scripted workflows are useful for rapid testing, but the interactive notebooks are the preferred route when physical assumptions about flexibility, rigid-body motion, multimers, or constraints are important.
 
 ### Install the Python workflow
 
