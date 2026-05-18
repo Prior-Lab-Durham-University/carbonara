@@ -324,7 +324,7 @@ The one-shot route is designed to get a reasonable calculation running quickly. 
 
 ## Reproducing structures refined in the paper and  Guided notebook workflows
 
-The full interactive workflow is built around three guided notebooks. These notebooks are intended both as practical user interfaces for setting up new Carbonara runs and as reproducible examples for the systems studied in the paper.
+The full interactive workflow is introdcued through guided notebooks provided in the file structure. These notebooks are intended both as practical user interfaces for setting up new Carbonara runs and as reproducible examples for the systems studied in the paper.
 
 > [!TIP]
 > If you are new to Carbonara, we recommend starting with `runCarbonara.ipynb`.
