@@ -202,25 +202,71 @@ treat multimers with constrained rigid-body rotations;
 apply distance constraints such as disulfide bonds, FRET-derived distances, NMR distances, or other known contacts;
 recreate the Human SMARCAL1 and IgG2 examples from the paper.
 
-The main notebooks are:
+### Guided notebook workflows
 
-runCarbonara.ipynb
+The full interactive workflow is built around three guided notebooks. These notebooks are intended both as practical user interfaces for setting up new Carbonara runs and as reproducible examples for the systems studied in the paper.
 
-A standard guided Carbonara run. This notebook demonstrates the setup used for the Human SMARCAL1 example in the paper and is the best starting point for a typical monomeric SAXS refinement.
+> [!TIP]
+> If you are new to Carbonara, we recommend starting with `runCarbonara.ipynb`.
+> The other notebooks introduce increasingly advanced control over flexibility, rigid-body motion, multimers, and distance constraints.
 
-runCarbonaraUserFlex.ipynb
+| Notebook | Best for | Paper example |
+|---|---|---|
+| [`runCarbonara.ipynb`](runCarbonara.ipynb) | Standard guided Carbonara setup | Human SMARCAL1 |
+| [`runCarbonaraUserFlex.ipynb`](runCarbonaraUserFlex.ipynb) | Manually defining flexible and fixed regions | User-controlled flexibility |
+| [`runCarbonaraMultimer.ipynb`](runCarbonaraMultimer.ipynb) | Multimers, locked rigid-body rotations, and distance constraints | IgG2 tetramer |
 
-A guided workflow for manually controlling the flexibility of the structure. This is intended for cases where the user has prior knowledge of the system and wants to decide which regions should be allowed to vary, rather than relying entirely on automatic flexibility assignment.
+#### 🧬 `runCarbonara.ipynb` — standard guided run
 
-This is useful, for example, when the user wants to preserve known structured domains while allowing specific linkers, termini, loops, or uncertain regions to move.
+This notebook provides the standard guided Carbonara setup. It is the best starting point for most users and demonstrates the workflow used for the Human SMARCAL1 example in the paper.
 
-runCarbonaraMultimer.ipynb
+It guides the user through:
 
-A guided workflow for multimeric systems and constrained rigid-body rotations. This notebook demonstrates the IgG2 example from the paper: a tetramer composed of a pair of dimers, where the dimers are treated as locked units that should rotate only about the hinge region.
+- loading a starting PDB/mmCIF structure and SAXS profile;
+- preparing the Carbonara input files;
+- selecting default or automatically inferred flexible regions;
+- launching the Carbonara fitting procedure;
+- monitoring the run and analysing the resulting models.
 
-The notebook also demonstrates how to impose distance constraints. In the IgG2 case, these are disulfide-bond constraints, but the same machinery can also be used for other experimentally or structurally motivated distance restraints.
+Use this notebook when you want a conventional Carbonara run without manually specifying every modelling assumption.
 
-The notebooks provide the clearest route into Carbonara’s full functionality. The one-shot and scripted workflows are useful for rapid testing, but the interactive notebooks are the preferred route when physical assumptions about flexibility, rigid-body motion, multimers, or constraints are important.
+---
+
+#### 🧩 `runCarbonaraUserFlex.ipynb` — user-defined flexibility
+
+This notebook demonstrates how to manually control which parts of the structure are allowed to vary.
+
+Carbonara can choose flexible regions automatically, for example using AlphaFold PAE information, but in many real applications the user has additional structural or biochemical knowledge. This notebook is intended for cases where the user wants to impose their own assumptions about the system.
+
+For example, the user may wish to:
+
+- keep well-folded domains fixed;
+- allow specific linkers, termini, loops, or uncertain regions to move;
+- preserve known secondary-structure or domain organisation;
+- test how sensitive the SAXS fit is to different flexibility choices.
+
+This notebook is useful when the user wants more control than the default setup provides.
+
+---
+
+#### 🔗 `runCarbonaraMultimer.ipynb` — multimers, locked rotations, and constraints
+
+This notebook demonstrates the more advanced multimer workflow.
+
+It includes the IgG2 example from the paper, where the system is a tetramer composed of a pair of dimers. In this case the dimers should behave as locked units, with motion primarily occurring through rotations about the hinge region rather than arbitrary independent motion of all chains.
+
+The notebook demonstrates how to:
+
+- define multimeric subunits;
+- lock groups of chains into rigid units;
+- allow controlled rigid-body rotations;
+- apply distance constraints;
+- reproduce the IgG2-style constrained tetramer setup from the paper.
+
+In the IgG2 example, the distance constraints correspond to disulfide bonds. The same machinery can also be used for other structural information, including contact predictions, crosslinks, FRET-style distances, NMR-style distance restraints, or other known pairwise constraints.
+
+> [!IMPORTANT]
+> This notebook is the recommended route for multimeric systems where the allowed motions are known to be restricted by biological assembly, hinge structure, disulfide bonds, or other physical constraints.
 
 ### Install the Python workflow
 
