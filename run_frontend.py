@@ -76,6 +76,42 @@ def detect_backmap_method_from_run_script(script_path: str | Path) -> str | None
     return None
 
 
+def detect_no_structures_from_run_script(script_path: str | Path) -> int:
+    """
+    Read the generated RunMe_*.sh script and extract the Carbonara
+    noStructures value. This is the authoritative mixture/component count
+    used both by predictStructureQvary and the watcher.
+    """
+    script_path = Path(script_path)
+    if not script_path.exists():
+        return 1
+
+    try:
+        text = script_path.read_text(errors="ignore")
+    except Exception:
+        return 1
+
+    # Standard generated form:
+    #   noStructures=2
+    m = re.search(r"(?im)^\s*noStructures\s*=\s*[\"']?(\d+)[\"']?\s*(?:#.*)?$", text)
+    if m:
+        try:
+            return max(1, int(m.group(1)))
+        except Exception:
+            return 1
+
+    # Fallback: watcher arg form:
+    #   --no-structures "$noStructures"  or --no-structures 2
+    m = re.search(r"(?i)--no-structures\s+[\"']?(\d+)[\"']?", text)
+    if m:
+        try:
+            return max(1, int(m.group(1)))
+        except Exception:
+            return 1
+
+    return 1
+
+
 class CarbonaraRunner:
 
     def __init__(
@@ -107,6 +143,7 @@ class CarbonaraRunner:
             "last_update": None,
             "start_time": None,
             "defer_backmap_seconds": 600,
+            "mixture_n": 1,
         }
 
     # ------------------------
@@ -209,6 +246,7 @@ class CarbonaraRunner:
                 lines.append("**Status:** Backmapping window active. New eligible predictions should now be picked up.")
 
         lines.append(f"**Threshold (χ²):** {stats['threshold']}")
+        lines.append(f"**Mixture components:** {stats.get('mixture_n', 1)}")
         lines.append(f"**Good models:** {stats['good']} / {stats['total']}")
         lines.append(f"**Errors:** {stats['errors']}")
         if stats["best"] is not None:
@@ -227,6 +265,8 @@ class CarbonaraRunner:
         self._monitor_state["threshold"] = threshold
         self._monitor_state["start_time"] = time.time()
         self._monitor_state["defer_backmap_seconds"] = defer_backmap_seconds
+        mixture_n = detect_no_structures_from_run_script(self.script)
+        self._monitor_state["mixture_n"] = mixture_n
 
         initial = Markdown(self._render_monitor_text())
         handle = display(initial, display_id=True)
@@ -235,7 +275,7 @@ class CarbonaraRunner:
         def loop():
             while not self._stop_event.is_set():
                 try:
-                    stats = sweep_quality(self.fitdata, threshold)
+                    stats = sweep_quality(self.fitdata, threshold, mixture_n=mixture_n)
                     self._monitor_state.update(stats)
                 except Exception:
                     self._monitor_state["errors"] += 1
@@ -246,7 +286,7 @@ class CarbonaraRunner:
 
         self._monitor_thread = threading.Thread(target=loop, daemon=True)
         self._monitor_thread.start()
-        print("📊 Monitoring started")
+        print(f"📊 Monitoring started (mixture_n={mixture_n})")
 
     def stop_monitor(self):
         self._stop_event.set()

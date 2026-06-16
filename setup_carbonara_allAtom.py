@@ -359,6 +359,7 @@ def write_runme(
         f'    --scenario-root "$ROOT/{data_path}"',
         '    --backmap-script "$BACKMAP_SCRIPT"',
         f'    --max-backmap {int(max_backmap)}',
+        '    --no-structures "$noStructures"',
         f'    --defer-backmap-seconds {int(defer_backmap_seconds)}',
         '    --backend "$BACKMAP_BACKEND"',
     ]
@@ -457,7 +458,6 @@ def parse_structure_lengths(filename: str) -> dict:
 
 
 def main():
-    print("me me me me me me me")
     parser = argparse.ArgumentParser(description="Setup Carbonara processing pipeline")
     parser.add_argument("-p", "--pdb", required=True, help="Path to input PDB file")
     parser.add_argument("-s", "--saxs", required=True, help="Path to input SAXS data file")
@@ -546,7 +546,6 @@ def main():
     parser.add_argument("--cg2all_exec",default=None,help="Override cg2all executable command string (advanced users only)")
     args = parser.parse_args()
     
-    print("new")
     def detect_cg2all_exec(user_value):
         if user_value:
             return user_value
