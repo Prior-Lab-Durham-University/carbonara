@@ -3088,3 +3088,518 @@ def _convert_cif_to_pdb_for_foxs(structure_path):
     io.save(tmp.name)
 
     return tmp.name, tmp.name
+
+# -----------------------------------------------------------------------------
+# Carbonara PDB/mmCIF robustness patch
+# Paste this at the END of CarbonaraDataTools.py so it overrides the earlier
+# definitions. It can then be removed cleanly if needed.
+#
+# What this overrides/adds:
+#   - sanitize_pdb_for_carbonara(...)
+#   - pdb_2_biobox(...)
+#   - find_missing_residues(...)
+#   - pull_structure_from_pdb(...)
+#
+# Defaults are chosen to preserve Carbonara's legacy global input numbering
+# convention while fixing duplicate/alternate atom records and odd author
+# residue numbering.
+# -----------------------------------------------------------------------------
+
+from collections import OrderedDict
+from tempfile import NamedTemporaryFile
+import os
+import numpy as np
+import mdtraj as md
+import biobox as bb
+
+
+_CARBONARA_AA3 = {
+    'ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY', 'HIS', 'ILE',
+    'LEU', 'LYS', 'MET', 'PHE', 'PRO', 'SER', 'THR', 'TRP', 'TYR', 'VAL',
+    'SEC', 'PYL',
+    'HIP', 'HID', 'HSD', 'HSE', 'HIE',
+    'GLH', 'GLUP',
+    'CYX', 'CYM',
+    'ASH', 'ASPP',
+    'LYN', 'LSN',
+    'MSE',
+}
+
+
+def _carbonara_normalise_resname(resname):
+    """Map common residue variants onto names understood by get_residue_map()."""
+    resname = str(resname).strip()
+    if resname in ('HIP', 'HID', 'HSD', 'HSE', 'HIE'):
+        return 'HIS'
+    if resname in ('GLH', 'GLUP'):
+        return 'GLU'
+    if resname in ('CYX', 'CYM'):
+        return 'CYS'
+    if resname in ('ASH', 'ASPP'):
+        return 'ASP'
+    if resname in ('LYN', 'LSN'):
+        return 'LYS'
+    if resname == 'MSE':
+        return 'MET'
+    return resname
+
+
+def _carbonara_safe_occupancy(line):
+    """Read PDB occupancy; malformed/missing occupancy is treated as 0."""
+    try:
+        return float(line[54:60])
+    except Exception:
+        return 0.0
+
+
+def _carbonara_replace_pdb_fields(line, serial=None, resseq=None, altloc=' '):
+    """Replace selected fixed-width PDB fields while preserving coordinates etc."""
+    line = line.rstrip('\n')
+    if len(line) < 80:
+        line = line.ljust(80)
+    chars = list(line)
+
+    if serial is not None:
+        chars[6:11] = f"{int(serial):5d}"
+
+    if altloc is not None:
+        chars[16] = altloc
+
+    if resseq is not None:
+        resseq = int(resseq)
+        if not (1 <= resseq <= 9999):
+            raise ValueError(
+                f"PDB residue number {resseq} is outside the fixed-width PDB range 1..9999. "
+                "Use mmCIF output or set renumber_residues=False for this structure."
+            )
+        chars[22:26] = f"{resseq:4d}"
+        chars[26] = ' '
+
+    return ''.join(chars).rstrip() + '\n'
+
+
+def _carbonara_make_ter_line(serial, last_atom_line):
+    """Create a simple TER line matching the previous written atom."""
+    if last_atom_line is None:
+        return 'TER\n'
+
+    line = last_atom_line.rstrip('\n')
+    if len(line) < 80:
+        line = line.ljust(80)
+
+    ter = f"TER   {int(serial):5d}      {line[17:20]} {line[21]}{line[22:26]}{line[26]}"
+    return ter.ljust(80).rstrip() + '\n'
+
+
+def sanitize_pdb_for_carbonara(
+    pdb_in,
+    pdb_out=None,
+    keep_hetatm=True,
+    renumber_residues=True,
+    renumber_mode='global',
+    first_model_only=True,
+    preserve_ter=True,
+):
+    """
+    Write a Carbonara-safe PDB and return (path, report).
+
+    Fixes:
+      1. Alternate-location atoms and duplicate atom records written as if normal.
+      2. Odd residue numbering, e.g. chain A starting at 7 or chain B at 0.
+      3. Non-protein HETATM records being mistaken for CA atoms.
+      4. Blank chain IDs where chains are defined only by TER records.
+
+    renumber_mode:
+      'global'    -> one global residue axis across all chains/TER segments
+      'per_chain' -> each chain/TER segment starts at residue 1
+    """
+    if pdb_out is None:
+        tmp = NamedTemporaryFile(mode='w', suffix='.carbonara_clean.pdb', delete=False)
+        pdb_out = tmp.name
+        tmp.close()
+
+    chosen = OrderedDict()
+    events = []
+    input_atom_records = 0
+    seen_model = False
+    segment_index = 0
+
+    with open(pdb_in, errors='replace') as handle:
+        for original_i, line in enumerate(handle):
+            if line.startswith('MODEL'):
+                if seen_model and first_model_only:
+                    break
+                seen_model = True
+                continue
+
+            if line.startswith('ENDMDL') and first_model_only:
+                break
+
+            if preserve_ter and line.startswith('TER'):
+                events.append((original_i, 'TER', segment_index, None))
+                segment_index += 1
+                continue
+
+            is_atom = line.startswith('ATOM')
+            is_hetatm = line.startswith('HETATM')
+            if not is_atom and not (keep_hetatm and is_hetatm):
+                continue
+
+            resname = line[17:20].strip()
+            if resname not in _CARBONARA_AA3:
+                continue
+
+            input_atom_records += 1
+
+            atom_key = (
+                segment_index,
+                line[21],
+                line[22:26],
+                line[26],
+                resname,
+                line[12:16],
+                line[76:78] if len(line) >= 78 else '',
+            )
+            events.append((original_i, 'ATOM', segment_index, atom_key))
+
+            occ = _carbonara_safe_occupancy(line)
+            if atom_key not in chosen:
+                chosen[atom_key] = (original_i, occ, line)
+            else:
+                old_i, old_occ, old_line = chosen[atom_key]
+                if occ > old_occ:
+                    chosen[atom_key] = (original_i, occ, line)
+
+    selected_by_original_i = {item[0]: item[2] for item in chosen.values()}
+
+    residue_map = OrderedDict()
+    chain_counters = {}
+    next_global_resseq = 1
+    out_lines = []
+    serial = 1
+    atoms_since_ter = False
+    last_atom_line = None
+    output_atom_records = 0
+
+    for original_i, event_type, segment_index, atom_key in events:
+        if event_type == 'TER':
+            if preserve_ter and atoms_since_ter:
+                out_lines.append(_carbonara_make_ter_line(serial, last_atom_line))
+                serial += 1
+                atoms_since_ter = False
+                last_atom_line = None
+            continue
+
+        line = selected_by_original_i.get(original_i)
+        if line is None:
+            continue
+
+        new_resseq = None
+        if renumber_residues:
+            residue_key = (segment_index, line[21], line[22:26], line[26], line[17:20].strip())
+            if residue_key not in residue_map:
+                if renumber_mode == 'global':
+                    residue_map[residue_key] = next_global_resseq
+                    next_global_resseq += 1
+                elif renumber_mode == 'per_chain':
+                    chain_key = (segment_index, line[21])
+                    chain_counters[chain_key] = chain_counters.get(chain_key, 0) + 1
+                    residue_map[residue_key] = chain_counters[chain_key]
+                else:
+                    raise ValueError("renumber_mode must be either 'global' or 'per_chain'")
+            new_resseq = residue_map[residue_key]
+
+        out_line = _carbonara_replace_pdb_fields(
+            line,
+            serial=serial,
+            resseq=new_resseq,
+            altloc=' ',
+        )
+        out_lines.append(out_line)
+        serial += 1
+        output_atom_records += 1
+        atoms_since_ter = True
+        last_atom_line = out_line
+
+    if preserve_ter and atoms_since_ter:
+        out_lines.append(_carbonara_make_ter_line(serial, last_atom_line))
+
+    out_lines.append('END\n')
+    with open(pdb_out, 'w') as handle:
+        handle.writelines(out_lines)
+
+    report = {
+        'input_atom_records': input_atom_records,
+        'output_atom_records': output_atom_records,
+        'removed_duplicate_atom_records': input_atom_records - output_atom_records,
+        'output_residues': len(residue_map) if renumber_residues else None,
+        'renumber_residues': renumber_residues,
+        'renumber_mode': renumber_mode if renumber_residues else None,
+        'preserve_ter': preserve_ter,
+    }
+    return pdb_out, report
+
+
+def _carbonara_cif_to_pdb(cif_file):
+    """
+    Convert mmCIF to a temporary PDB for BioBox and the PDB sanitizer.
+
+    This imports PDBFixer/OpenMM lazily so ordinary PDB loading is unaffected if
+    those optional dependencies are unavailable. It does not add missing residues,
+    missing atoms, or hydrogens; it only rewrites the existing topology/positions.
+    """
+    try:
+        from pdbfixer import PDBFixer
+        from openmm.app import PDBFile
+    except Exception as exc:
+        raise ImportError(
+            "Reading .cif files through this Carbonara patch requires pdbfixer and openmm. "
+            "Install them or convert the mmCIF to PDB before calling Carbonara."
+        ) from exc
+
+    fixer = PDBFixer(filename=cif_file)
+    tmp = NamedTemporaryFile(mode='w', suffix='.pdb', delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+
+    with open(tmp_path, 'w') as handle:
+        try:
+            PDBFile.writeFile(fixer.topology, fixer.positions, handle, keepIds=True)
+        except TypeError:
+            PDBFile.writeFile(fixer.topology, fixer.positions, handle)
+
+    return tmp_path
+
+
+def pdb_2_biobox(
+    pdb_file,
+    sanitize=True,
+    renumber_residues=True,
+    renumber_mode='global',
+    preserve_ter=True,
+):
+    """
+    Load a PDB/mmCIF into BioBox after applying the same cleaning used by MDTraj.
+
+    This intentionally overrides the earlier pdb_2_biobox definition when pasted
+    at the end of CarbonaraDataTools.py. possibleLinkerList therefore sees the
+    cleaned/global residue numbering too.
+    """
+    M = bb.Molecule()
+    ext = os.path.splitext(pdb_file)[1].lower()
+    temp_paths = []
+
+    try:
+        if ext == '.pdb':
+            load_path = pdb_file
+            if sanitize:
+                load_path, _ = sanitize_pdb_for_carbonara(
+                    pdb_file,
+                    renumber_residues=renumber_residues,
+                    renumber_mode=renumber_mode,
+                    preserve_ter=preserve_ter,
+                )
+                temp_paths.append(load_path)
+            M.import_pdb(load_path)
+
+        elif ext == '.cif':
+            pdb_tmp = _carbonara_cif_to_pdb(pdb_file)
+            temp_paths.append(pdb_tmp)
+            load_path = pdb_tmp
+            if sanitize:
+                clean_tmp, _ = sanitize_pdb_for_carbonara(
+                    pdb_tmp,
+                    renumber_residues=renumber_residues,
+                    renumber_mode=renumber_mode,
+                    preserve_ter=preserve_ter,
+                )
+                temp_paths.append(clean_tmp)
+                load_path = clean_tmp
+            M.import_pdb(load_path)
+
+        else:
+            raise ValueError(f"Unsupported structure file extension: {ext}")
+
+        return M
+
+    finally:
+        for path in temp_paths:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def find_missing_residues(resIDs, include_leading=True):
+    """
+    Return missing residue numbers caused by gaps in residue numbering.
+
+    include_leading=True preserves legacy Carbonara behaviour: if a chain starts
+    at residue 242, residues 1..241 are reported as missing. This can look odd,
+    but it keeps the old behaviour for globally numbered multichain inputs.
+
+    The sanitizer normally renumbers single-chain inputs to 1..N, so excised
+    domains like 325..870 no longer falsely report 1..324 as missing.
+    """
+    resIDs = np.asarray(resIDs, dtype=int)
+    if resIDs.size == 0:
+        return np.asarray([], dtype=int)
+
+    missing_residues = []
+
+    if include_leading and resIDs[0] > 1:
+        missing_residues.extend(range(1, int(resIDs[0])))
+
+    for left, right in zip(resIDs[:-1], resIDs[1:]):
+        left = int(left)
+        right = int(right)
+        if right > left + 1:
+            missing_residues.extend(range(left + 1, right))
+
+    return np.asarray(missing_residues, dtype=int)
+
+
+def pull_structure_from_pdb(
+    file_path,
+    sanitize=True,
+    renumber_residues=True,
+    renumber_mode='global',
+    preserve_ter=True,
+    missing_include_leading=True,
+    verbose=False,
+):
+    """
+    Robust replacement for pull_structure_from_pdb().
+
+    Returns the same four objects as before:
+      coords_chains, sequence_chains, secondary_structure_chains, missing_residues_chains
+
+    For clean legacy inputs this should leave coordinates, sequence and secondary
+    structure unchanged. It only intervenes before MDTraj/BioBox loading to remove
+    duplicate/alternate atom records and normalise problematic residue numbering.
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+    temp_paths = []
+
+    try:
+        if ext == '.pdb':
+            load_path = file_path
+            report = None
+            if sanitize:
+                load_path, report = sanitize_pdb_for_carbonara(
+                    file_path,
+                    renumber_residues=renumber_residues,
+                    renumber_mode=renumber_mode,
+                    preserve_ter=preserve_ter,
+                )
+                temp_paths.append(load_path)
+
+            if verbose and report is not None:
+                print(
+                    "Carbonara PDB clean-up: "
+                    f"input atoms={report['input_atom_records']}, "
+                    f"output atoms={report['output_atom_records']}, "
+                    f"removed duplicates/alternates={report['removed_duplicate_atom_records']}, "
+                    f"renumber={report['renumber_residues']}:{report['renumber_mode']}"
+                )
+
+            traj = md.load(load_path)
+
+        elif ext == '.cif':
+            pdb_tmp = _carbonara_cif_to_pdb(file_path)
+            temp_paths.append(pdb_tmp)
+            load_path = pdb_tmp
+            report = None
+
+            if sanitize:
+                clean_tmp, report = sanitize_pdb_for_carbonara(
+                    pdb_tmp,
+                    renumber_residues=renumber_residues,
+                    renumber_mode=renumber_mode,
+                    preserve_ter=preserve_ter,
+                )
+                temp_paths.append(clean_tmp)
+                load_path = clean_tmp
+
+            if verbose and report is not None:
+                print(
+                    "Carbonara mmCIF clean-up: "
+                    f"input atoms={report['input_atom_records']}, "
+                    f"output atoms={report['output_atom_records']}, "
+                    f"removed duplicates/alternates={report['removed_duplicate_atom_records']}, "
+                    f"renumber={report['renumber_residues']}:{report['renumber_mode']}"
+                )
+
+            traj = md.load(load_path)
+
+        else:
+            raise ValueError(f"Unsupported structure file extension: {ext}")
+
+        topology = traj.topology
+        chains = list(topology.chains)
+        if len(chains) == 0:
+            raise ValueError("No chains found in structure")
+
+        three_to_one = get_residue_map()
+        coords_chains = []
+        sequence_chains = []
+        secondary_structure_chains = []
+        missing_residues_chains = []
+
+        ss_pred = md.compute_dssp(traj, simplified=True)[0]
+        ss_map = {'H': 'H', 'E': 'S', 'C': '-', 'NA': '-'}
+        ss_pred_mapped = np.array([ss_map.get(str(ss), '-') for ss in ss_pred])
+        ss_pred_mapped = clean_s_sequences(ss_pred_mapped)
+
+        residue_index = 0
+        for chain in chains:
+            residues = list(chain.residues)
+            chain_ss_all = ss_pred_mapped[residue_index:residue_index + len(residues)]
+
+            ca_atom_indices = []
+            resids = []
+            seq = []
+            chain_ss = []
+
+            for local_i, res in enumerate(residues):
+                ca_atom = next((atom for atom in res.atoms if atom.name == 'CA'), None)
+                if ca_atom is None:
+                    continue
+
+                ca_atom_indices.append(ca_atom.index)
+                resids.append(res.resSeq)
+
+                resname = _carbonara_normalise_resname(res.name)
+                seq.append(three_to_one.get(resname, 'X'))
+                chain_ss.append(chain_ss_all[local_i])
+
+            if ca_atom_indices:
+                ca_coords = traj.xyz[0, ca_atom_indices, :] * 10.0
+
+                if len(ca_coords) > 10:
+                    if not (len(ca_coords) == len(seq) == len(chain_ss)):
+                        raise ValueError(
+                            "Internal structure parsing mismatch after clean-up: "
+                            f"coords={len(ca_coords)}, sequence={len(seq)}, ss={len(chain_ss)}"
+                        )
+
+                    coords_chains.append(ca_coords)
+                    sequence_chains.append(np.asarray(seq))
+                    secondary_structure_chains.append(np.asarray(chain_ss))
+                    missing_residues_chains.append(
+                        find_missing_residues(
+                            np.asarray(resids),
+                            include_leading=missing_include_leading,
+                        )
+                    )
+
+            residue_index += len(residues)
+
+        return coords_chains, sequence_chains, secondary_structure_chains, missing_residues_chains
+
+    finally:
+        for path in temp_paths:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
