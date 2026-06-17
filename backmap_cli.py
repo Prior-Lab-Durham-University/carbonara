@@ -4,6 +4,8 @@ import pickle
 import shlex
 import subprocess
 import re
+import os
+import tempfile
 from pathlib import Path
 
 try:
