@@ -1,4 +1,6 @@
 import time
+import os
+import signal
 import subprocess
 import shlex
 from pathlib import Path
@@ -95,6 +97,12 @@ class WatchConfig:
     backend: str = "modeller"
     cg2all_exec: Optional[str] = None
     disulfide_file: Optional[Path] = None
+
+    # Optional batch-screening mode. Default is maximal exploration:
+    # leave every predictStructureQvary process running to maxNoFitSteps.
+    terminate_on_foxs: bool = False
+    terminate_threshold: Optional[float] = None
+    terminate_confirmation_count: int = 1
 
 
 def wait_until_stable(path: Path, stable_for: float, poll: float, timeout: float) -> bool:
@@ -224,6 +232,41 @@ def aa_pdb_for_dat(cfg: WatchConfig, dat_file: Path) -> Path:
     run_i = extract_run_index(dat_file)
     run_dir = cfg.watch_dir / (f"allAtomRun{run_i}" if run_i is not None else "allAtomRunUnknown")
     return run_dir / f"{dat_file.stem}_AA.pdb"
+
+
+def read_single_foxs_score_for_dat(cfg: WatchConfig, dat_file: Path) -> Optional[float]:
+    """
+    Read the FoXS chi^2 that backmap_cli.py writes for one ordinary
+    single-structure prediction. Mixture/ensemble scores are handled by
+    run_foxs_mixture_group().
+    """
+    run_i = extract_run_index(dat_file)
+    if run_i is None:
+        return None
+    run_dir = cfg.watch_dir / f"allAtomRun{run_i}"
+    summary = run_dir / "foxs_results.txt"
+    aa = aa_pdb_for_dat(cfg, dat_file)
+    if not summary.exists():
+        return None
+
+    aa_str = str(aa)
+    aa_name = aa.name
+    try:
+        lines = summary.read_text().splitlines()
+    except Exception:
+        return None
+
+    for line in reversed(lines):
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        # Current backmap_cli writes: <absolute/relative AA pdb path> <chi2|ERROR>
+        if parts[0] == aa_str or parts[0].endswith("/" + aa_name) or aa_name in parts[0]:
+            try:
+                return float(parts[-1])
+            except Exception:
+                return None
+    return None
 
 
 def _load_numeric_table(path: Path):
@@ -378,15 +421,15 @@ def _update_mixture_summary(summary_file: Path, label: str, chi2: float, weights
     summary_file.write_text("\n".join(old) + "\n")
 
 
-def run_foxs_mixture_group(cfg: WatchConfig, group_key, files: list[Path]) -> int:
+def run_foxs_mixture_group(cfg: WatchConfig, group_key, files: list[Path]) -> tuple[int, Optional[float]]:
     """
     Score a grouped mixture state by running FoXS on each all-atom component,
     then fitting best non-negative mixture weights that sum to one.
     """
     if not cfg.do_foxs:
-        return 0
+        return 0, None
     if len(files) <= 1:
-        return 0
+        return 0, None
 
     run_i = group_key[0]
     outdir = cfg.watch_dir / f"allAtomRun{run_i}"
@@ -394,7 +437,7 @@ def run_foxs_mixture_group(cfg: WatchConfig, group_key, files: list[Path]) -> in
     missing = [p for p in aa_pdbs if not p.exists()]
     if missing:
         print(f"[FOXS-MIX] missing AA PDBs: {', '.join(str(p) for p in missing)}", flush=True)
-        return 4
+        return 4, None
 
     q_exp, I_exp, sigma = _load_experimental_saxs(Path(cfg.saxs_dat), cfg.max_q)
     curves = []
@@ -403,11 +446,11 @@ def run_foxs_mixture_group(cfg: WatchConfig, group_key, files: list[Path]) -> in
         profile, log_path, rc = _run_foxs_for_profile(cfg, aa, outdir)
         if rc != 0 or profile is None:
             print(f"[FOXS-MIX] FoXS failed/no profile for {aa.name}; see {log_path}", flush=True)
-            return 5
+            return 5, None
         Icalc = _extract_calc_curve(profile, q_exp)
         if Icalc is None:
             print(f"[FOXS-MIX] Could not parse FoXS curve: {profile}", flush=True)
-            return 6
+            return 6, None
         curves.append(Icalc)
         profiles.append(profile)
 
@@ -423,7 +466,7 @@ def run_foxs_mixture_group(cfg: WatchConfig, group_key, files: list[Path]) -> in
     summary_file = outdir / "foxs_mixture_results.txt"
     _update_mixture_summary(summary_file, label, chi2, weights, scale, aa_pdbs)
     print(f"[FOXS-MIX] {label} chi2={chi2:.6g} weights={','.join(f'{w:.4g}' for w in weights)}", flush=True)
-    return 0
+    return 0, float(chi2)
 
 
 class PollingWatcher:
@@ -437,6 +480,153 @@ class PollingWatcher:
         self._sem = threading.Semaphore(cfg.max_backmap)
         self._start_time = time.time()
         self._activation_time = self._start_time + cfg.defer_backmap_seconds
+        self._good_foxs_counts = {}  # run_i -> number of qualifying FoXS scores
+        self._termination_lock = threading.Lock()
+
+    def _pid_file_for_run(self, run_i: int) -> Path:
+        return self.cfg.watch_dir / f"run{run_i}.pid"
+
+    def _stopped_file_for_run(self, run_i: int) -> Path:
+        return self.cfg.watch_dir / f"run{run_i}.stopped"
+
+    def _stop_failed_file_for_run(self, run_i: int) -> Path:
+        return self.cfg.watch_dir / f"run{run_i}.stop_failed"
+
+    def _run_is_stopped(self, run_i: int) -> bool:
+        return self._stopped_file_for_run(run_i).exists()
+
+    @staticmethod
+    def _pid_is_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # It exists, but we cannot signal it. Treat as alive so we do not
+            # accidentally report success.
+            return True
+
+    @staticmethod
+    def _pid_cmdline(pid: int) -> str:
+        proc_cmd = Path(f"/proc/{pid}/cmdline")
+        try:
+            raw = proc_cmd.read_bytes()
+        except Exception:
+            return ""
+        return raw.replace(b"\x00", b" ").decode(errors="ignore").strip()
+
+    def _write_stop_record(self, run_i: int, text: str) -> None:
+        path = self._stopped_file_for_run(run_i)
+        try:
+            path.write_text(text.rstrip() + "\n")
+        except Exception as exc:
+            print(f"[STOP] Could not write {path}: {exc}", flush=True)
+
+    def _write_stop_failed_record(self, run_i: int, text: str) -> None:
+        path = self._stop_failed_file_for_run(run_i)
+        try:
+            path.write_text(text.rstrip() + "\n")
+        except Exception as exc:
+            print(f"[STOP] Could not write {path}: {exc}", flush=True)
+
+    def _terminate_predictor_for_run(self, run_i: int, label: str, chi2: float, count: int) -> bool:
+        """Terminate exactly one predictStructureQvary process using run<i>.pid."""
+        pid_file = self._pid_file_for_run(run_i)
+        if not pid_file.exists():
+            msg = (
+                f"No PID file for run {run_i}: {pid_file}\n"
+                f"Wanted to stop after {label}, FoXS chi2={chi2:.8g}, qualifying_count={count}\n"
+            )
+            print(f"[STOP] {msg.strip()}", flush=True)
+            self._write_stop_failed_record(run_i, msg)
+            return False
+
+        try:
+            pid = int(pid_file.read_text().strip())
+        except Exception as exc:
+            msg = f"Could not read PID file {pid_file}: {exc}"
+            print(f"[STOP] {msg}", flush=True)
+            self._write_stop_failed_record(run_i, msg)
+            return False
+
+        cmdline = self._pid_cmdline(pid)
+        if cmdline and "predictStructureQvary" not in cmdline:
+            msg = (
+                f"Refusing to kill PID {pid} for run {run_i}: command line does not look like predictStructureQvary.\n"
+                f"cmdline={cmdline}\n"
+            )
+            print(f"[STOP] {msg.strip()}", flush=True)
+            self._write_stop_failed_record(run_i, msg)
+            return False
+
+        if not self._pid_is_alive(pid):
+            msg = (
+                f"Run {run_i} already finished before termination signal.\n"
+                f"Trigger: {label}, FoXS chi2={chi2:.8g}, qualifying_count={count}\n"
+            )
+            print(f"[STOP] {msg.strip()}", flush=True)
+            self._write_stop_record(run_i, msg)
+            return True
+
+        try:
+            print(f"[STOP] Terminating run {run_i} PID={pid}: {label}, FoXS chi2={chi2:.6g}", flush=True)
+            os.kill(pid, signal.SIGTERM)
+            time.sleep(1.0)
+            if self._pid_is_alive(pid):
+                print(f"[STOP] PID={pid} still alive; sending SIGKILL", flush=True)
+                os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            # Finished between checks. This is still a successful stop decision.
+            pass
+        except Exception as exc:
+            msg = f"Failed to terminate run {run_i} PID={pid}: {exc}"
+            print(f"[STOP] {msg}", flush=True)
+            self._write_stop_failed_record(run_i, msg)
+            return False
+
+        msg = (
+            f"Stopped run {run_i}\n"
+            f"PID: {pid}\n"
+            f"Trigger: {label}\n"
+            f"FoXS chi2: {chi2:.8g}\n"
+            f"Threshold: {self.cfg.terminate_threshold}\n"
+            f"Qualifying count: {count}\n"
+            f"Required count: {self.cfg.terminate_confirmation_count}\n"
+        )
+        self._write_stop_record(run_i, msg)
+        return True
+
+    def _consider_foxs_termination(self, run_i: int, label: str, chi2: Optional[float]) -> None:
+        if not self.cfg.terminate_on_foxs:
+            return
+        if chi2 is None:
+            return
+        if self.cfg.terminate_threshold is None:
+            return
+
+        try:
+            chi2_f = float(chi2)
+            threshold = float(self.cfg.terminate_threshold)
+        except Exception:
+            return
+
+        if chi2_f > threshold:
+            return
+
+        with self._termination_lock:
+            if self._run_is_stopped(run_i):
+                return
+            count = int(self._good_foxs_counts.get(run_i, 0)) + 1
+            self._good_foxs_counts[run_i] = count
+            need = max(1, int(self.cfg.terminate_confirmation_count))
+            print(
+                f"[STOP-CHECK] run={run_i} {label} FoXS chi2={chi2_f:.6g} <= {threshold:.6g} "
+                f"({count}/{need})",
+                flush=True,
+            )
+            if count >= need:
+                self._terminate_predictor_for_run(run_i, label, chi2_f, count)
 
     def _is_candidate_dat(self, dat: Path) -> bool:
         # Initial structures are produced at run launch and should not be part of
@@ -462,6 +652,8 @@ class PollingWatcher:
             if parsed is None:
                 continue
             run_i, sub_i, tag = parsed
+            if self._run_is_stopped(run_i):
+                continue
             group_key = (run_i, tag)
             groups.setdefault(group_key, []).append((sub_i, dat))
         return groups
@@ -519,11 +711,17 @@ class PollingWatcher:
                                      do_foxs_override=per_file_foxs)
                     if rc != 0:
                         ok_all = False
+                    elif per_file_foxs:
+                        chi2 = read_single_foxs_score_for_dat(self.cfg, dat_file)
+                        if chi2 is not None:
+                            self._consider_foxs_termination(group_key[0], dat_file.stem, chi2)
 
                 if ok_all and self.cfg.do_foxs and self.cfg.no_structures > 1:
-                    rc = run_foxs_mixture_group(self.cfg, group_key, files)
+                    rc, chi2 = run_foxs_mixture_group(self.cfg, group_key, files)
                     if rc != 0:
                         ok_all = False
+                    elif chi2 is not None:
+                        self._consider_foxs_termination(group_key[0], _group_label(group_key), chi2)
 
                 if ok_all:
                     self._completed_groups.add(group_key)
@@ -607,7 +805,9 @@ def start_watcher(watch_dir, scenario_root, backmap_script,
                   max_backmap=1, defer_backmap_seconds=0.0,
                   no_structures=1,
                   do_foxs=False, foxs_py=None, saxs_dat=None, max_q=None,
-                  backend="modeller", cg2all_exec=None, disulfide_file=None):
+                  backend="modeller", cg2all_exec=None, disulfide_file=None,
+                  terminate_on_foxs=False, terminate_threshold=None,
+                  terminate_confirmation_count=1):
     global _WATCHER
     cfg = WatchConfig(
         watch_dir=Path(watch_dir),
@@ -626,6 +826,9 @@ def start_watcher(watch_dir, scenario_root, backmap_script,
         backend=backend,
         cg2all_exec=cg2all_exec,
         disulfide_file=Path(disulfide_file).resolve() if disulfide_file else None,
+        terminate_on_foxs=bool(terminate_on_foxs),
+        terminate_threshold=float(terminate_threshold) if terminate_threshold is not None else None,
+        terminate_confirmation_count=max(1, int(terminate_confirmation_count)),
     )
     _WATCHER = PollingWatcher(cfg)
     _WATCHER.start()
@@ -662,6 +865,13 @@ def main():
     ap.add_argument("--cg2all-exec", default=None)
     ap.add_argument("--disulfide-file", default=None)
 
+    ap.add_argument("--terminate-on-foxs", action="store_true",
+                    help="Opt-in mode: stop individual predictor runs once FoXS chi^2 is good enough")
+    ap.add_argument("--terminate-threshold", type=float, default=2.5,
+                    help="FoXS chi^2 threshold used with --terminate-on-foxs")
+    ap.add_argument("--terminate-confirmation-count", type=int, default=1,
+                    help="Number of qualifying FoXS scores required before stopping a run")
+
     args = ap.parse_args()
 
     if args.no_structures < 1:
@@ -670,6 +880,12 @@ def main():
         ap.error("--do-foxs requires --foxs-py, --saxs, and --max-q")
     if args.backend == "cg2all" and args.cg2all_exec is None:
         ap.error("--backend cg2all requires --cg2all-exec")
+    if args.terminate_confirmation_count < 1:
+        ap.error("--terminate-confirmation-count must be >= 1")
+    if args.terminate_threshold <= 0:
+        ap.error("--terminate-threshold must be > 0")
+    if args.terminate_on_foxs and not args.do_foxs:
+        ap.error("--terminate-on-foxs requires --do-foxs")
 
     cfg = WatchConfig(
         watch_dir=Path(args.watch_dir).resolve(),
@@ -687,6 +903,9 @@ def main():
         backend=args.backend,
         cg2all_exec=args.cg2all_exec,
         disulfide_file=Path(args.disulfide_file).resolve() if args.disulfide_file else None,
+        terminate_on_foxs=args.terminate_on_foxs,
+        terminate_threshold=float(args.terminate_threshold) if args.terminate_on_foxs else None,
+        terminate_confirmation_count=max(1, int(args.terminate_confirmation_count)),
     )
 
     print("[WATCHER] started", flush=True)
@@ -695,6 +914,12 @@ def main():
     print("backmap_script :", cfg.backmap_script, flush=True)
     print("max_backmap    :", cfg.max_backmap, flush=True)
     print("no_structures  :", cfg.no_structures, flush=True)
+    if cfg.terminate_on_foxs:
+        print("mode           : terminate-on-FoXS", flush=True)
+        print("term_threshold :", cfg.terminate_threshold, flush=True)
+        print("term_confirm   :", cfg.terminate_confirmation_count, flush=True)
+    else:
+        print("mode           : maximal exploration", flush=True)
     print(f"[WATCHER] backmapping activates after {cfg.defer_backmap_seconds} s", flush=True)
 
     if not cfg.backmap_script.exists():
