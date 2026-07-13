@@ -10,6 +10,9 @@
 #include <iterator> 
 #include <chrono>
 
+#include <unistd.h>
+#include <limits.h>
+
 class randomMol{
  public:
   randomMol(){};

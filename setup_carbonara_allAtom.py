@@ -187,6 +187,8 @@ def write_runme(
     curr = os.getcwd()
     script_name = "RunMe_" + str(fit_name) + ".sh"
     run_file = os.path.join(curr, script_name)
+    
+    carbonaradir = os.path.dirname(os.path.realpath(sys.argv[0]))
 
     # Use the Python that ran setup by default. The generated shell script still
     # allows PYTHON_EXE to override this at runtime, which is useful for notebooks,
@@ -241,11 +243,15 @@ def write_runme(
 
     lines = [
         "#!/bin/bash",
+        "echo $0",
+        "echo $SHELL",
         "set -euo pipefail",
         "set +m   # ensure background jobs stay in same job-control context",
         "",
         "# Determine the root directory based on the script location",
         'ROOT=$(dirname "$(readlink -f "$0")")',
+        'CARBONARADIR='+str(carbonaradir),
+        'export PATH=$PATH:'+str(carbonaradir),
         "",
         "# Optional first argument: FoXS command",
         f'FOXS_CMD="${{1:-{foxs_cmd_default}}}"',
@@ -366,8 +372,8 @@ def write_runme(
         "# =====================================================",
         "",
         "# ========= NEW: start watcher (background) =========",
-        'WATCHER_SCRIPT="$ROOT/watch_and_backmap.py"',
-        'BACKMAP_SCRIPT="$ROOT/backmap_cli.py"',
+        'WATCHER_SCRIPT="$CARBONARADIR/watch_and_backmap.py"',
+        'BACKMAP_SCRIPT="$CARBONARADIR/backmap_cli.py"',
         'WATCHER_LOG="$predictionFile/watcher.out"',
         "",
         'if [[ ! -f "$WATCHER_SCRIPT" ]]; then',
@@ -443,7 +449,7 @@ def write_runme(
         '    echo ""',
         "",
         '    stdbuf -oL -eL \\',
-        '    "$ROOT/build/bin/predictStructureQvary" \\',
+        '    "$CARBONARADIR/build/bin/predictStructureQvary" \\',
         '        "$ScatterFile" \\',
         '        "$fileLocs" \\',
         '        "$initialCoordsFile" \\',
@@ -618,6 +624,10 @@ def main():
     if args.terminate_on_foxs and args.no_foxs:
         parser.error("--terminate-on-foxs requires FoXS; remove --no_foxs")
     
+    print("DIR: "+str(args.dir))
+    print(os.getcwd())
+    
+    print("new")
     def detect_cg2all_exec(user_value):
         if user_value:
             return user_value
@@ -803,6 +813,7 @@ def main():
         print(f"cd {os.path.dirname(run_script)} && ./RunMe_" + str(args.name) + ".sh")
 
     except Exception as e:
+        raise e
         print(f"Error during setup: {str(e)}", file=sys.stderr)
         sys.exit(1)
 
