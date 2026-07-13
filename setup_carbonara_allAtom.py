@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import pickle
+import shlex
 from string import ascii_uppercase
 from typing import Optional, List
 
@@ -178,12 +179,21 @@ def write_runme(
     cg2all_exec: str = "./bin/micromamba run -p /root/micromamba/envs/cg2all convert_cg2all",
     disulfide_constraints_file: str = "",
     foxs_cmd_default: str = "pyfoxs",
+    python_exe: Optional[str] = None,
+    terminate_on_foxs: bool = False,
+    terminate_threshold: float = 2.5,
+    terminate_confirmation_count: int = 1,
 ):
     curr = os.getcwd()
     script_name = "RunMe_" + str(fit_name) + ".sh"
     run_file = os.path.join(curr, script_name)
     
     carbonaradir = os.path.dirname(os.path.realpath(sys.argv[0]))
+
+    # Use the Python that ran setup by default. The generated shell script still
+    # allows PYTHON_EXE to override this at runtime, which is useful for notebooks,
+    # HPC modules, or advanced users.
+    python_exe = python_exe or sys.executable
 
     # Path to the data directory (relative to ROOT)
     data_path = f"carbonara_runs/{fit_name}"
@@ -197,7 +207,7 @@ def write_runme(
 
     # Copy necessary files from refine_dir to new_data_dir
     try:
-        files_to_copy = ["Saxs.dat", "mixtureFile.dat"]
+        files_to_copy = ["Saxs.dat", "mixtureFile.dat", "chainLengths.dat"]
 
         # Copy numbered per-structure files 1..no_structures
         for i in range(1, int(no_structures) + 1):
@@ -245,6 +255,13 @@ def write_runme(
         "",
         "# Optional first argument: FoXS command",
         f'FOXS_CMD="${{1:-{foxs_cmd_default}}}"',
+        "",
+        "# Python executable for watcher/backmapping.",
+        "# Default is the Python used to generate this script; PYTHON_EXE can override it.",
+        'if [[ -z "${PYTHON_EXE:-}" ]]; then',
+        f'    PYTHON_EXE={shlex.quote(str(python_exe))}',
+        "fi",
+        'echo "Using Python for watcher/backmapping: $PYTHON_EXE"',
         "",
         "# Directory to clear before running",
         f'CLEAR_DIR="$ROOT/{data_path}/fitdata"',
@@ -346,6 +363,14 @@ def write_runme(
         f'DISULFIDE_CONSTRAINTS_FILE="{disulfide_constraints_file}"',
         "# ===========================================",
         "",
+        "# ========= FoXS-based early termination mode =========",
+        f'TERMINATE_ON_FOXS="{"True" if terminate_on_foxs else "False"}"',
+        f'TERMINATE_FOXS_THRESHOLD="{float(terminate_threshold)}"',
+        f'TERMINATE_CONFIRMATION_COUNT="{int(terminate_confirmation_count)}"',
+        "# Default mode is maximal exploration: leave all runs to finish.",
+        "# If TERMINATE_ON_FOXS=True, watcher may stop individual runs once FoXS is good enough.",
+        "# =====================================================",
+        "",
         "# ========= NEW: start watcher (background) =========",
         'WATCHER_SCRIPT="$CARBONARADIR/watch_and_backmap.py"',
         'BACKMAP_SCRIPT="$CARBONARADIR/backmap_cli.py"',
@@ -360,11 +385,26 @@ def write_runme(
         "    exit 1",
         "fi",
         "",
+        "# Check that the Python used by the watcher/backmapper has core dependencies.",
+        'if ! "$PYTHON_EXE" -c "import sys; print(sys.executable); import Bio; from Bio.PDB import PDBParser, PDBIO" >/dev/null 2>&1; then',
+        '    echo "ERROR: chosen PYTHON_EXE cannot import Biopython/Bio.PDB: $PYTHON_EXE"',
+        '    echo "       Activate the correct environment, install biopython, or set PYTHON_EXE=/path/to/python."',
+        "    exit 1",
+        "fi",
+        'if [[ "$BACKMAP_BACKEND" == "modeller" ]]; then',
+        '    if ! "$PYTHON_EXE" -c "from modeller import environ; env=environ()" >/dev/null 2>&1; then',
+        '        echo "ERROR: BACKMAP_BACKEND=modeller but chosen PYTHON_EXE cannot import/configure MODELLER: $PYTHON_EXE"',
+        '        echo "       Install/configure MODELLER in this Python, choose --backend cg2all, or set PYTHON_EXE=/path/to/python."',
+        "        exit 1",
+        "    fi",
+        "fi",
+        "",
         "WATCHER_ARGS=(",
         '    --watch-dir "$predictionFile"',
         f'    --scenario-root "$ROOT/{data_path}"',
         '    --backmap-script "$BACKMAP_SCRIPT"',
         f'    --max-backmap {int(max_backmap)}',
+        '    --no-structures "$noStructures"',
         f'    --defer-backmap-seconds {int(defer_backmap_seconds)}',
         '    --backend "$BACKMAP_BACKEND"',
     ]
@@ -375,6 +415,13 @@ def write_runme(
             '    --foxs-py "$FOXS_CMD"',
             '    --saxs "$ScatterFile"',
             '    --max-q "$kmax"',
+        ])
+
+    if terminate_on_foxs:
+        lines.extend([
+            '    --terminate-on-foxs',
+            '    --terminate-threshold "$TERMINATE_FOXS_THRESHOLD"',
+            '    --terminate-confirmation-count "$TERMINATE_CONFIRMATION_COUNT"',
         ])
 
     lines.extend([
@@ -388,7 +435,7 @@ def write_runme(
         '    WATCHER_ARGS+=(--disulfide-file "$DISULFIDE_CONSTRAINTS_FILE")',
         "fi",
         "",
-        'python "$WATCHER_SCRIPT" "${WATCHER_ARGS[@]}" > "$WATCHER_LOG" 2>&1 &',
+        '"$PYTHON_EXE" "$WATCHER_SCRIPT" "${WATCHER_ARGS[@]}" > "$WATCHER_LOG" 2>&1 &',
         'WATCHER_PID=$!',
         'echo "Watcher started (PID=$WATCHER_PID)"',
         "# ==================================================",
@@ -424,7 +471,10 @@ def write_runme(
         '        "$useErrors" \\',
         '        > "$predictionFile/run$i.out" 2> "$predictionFile/run$i.err" &',
         "",
-        '    PIDS+=($!)',
+        '    pid=$!',
+        '    PIDS+=("$pid")',
+        '    echo "$pid" > "$predictionFile/run${i}.pid"',
+        '    echo "Predictor run $i started (PID=$pid)"',
         "done",
         "",
         'echo',
@@ -432,7 +482,15 @@ def write_runme(
         'echo ">>> Press Ctrl+C to stop everything"',
         'echo',
         "",
-        "wait",
+        "set +e",
+        'for pid in "${PIDS[@]}"; do',
+        '    wait "$pid" || true',
+        "done",
+        "set -e",
+        'echo ">>> Predictor processes have finished or been stopped."',
+        'echo ">>> Watcher remains active for any final backmapping/FoXS scoring."',
+        'echo ">>> Press Ctrl+C to stop the watcher when finished."',
+        'wait "$WATCHER_PID" || true',
         "",
     ])
 
@@ -548,8 +606,23 @@ def main():
                     help="Optional constraint file to treat as disulfides during backmapping")
     parser.add_argument("--foxs_cmd_default", default="pyfoxs",
                     help="Default FoXS command for the generated RunMe script; user can still override as first shell arg")
+    parser.add_argument("--python_exe", default=None,
+                    help="Python executable for watcher/backmapping in the generated RunMe script (default: the Python running setup). Runtime override: PYTHON_EXE=/path/to/python ./RunMe_name.sh")
     parser.add_argument("--cg2all_exec",default=None,help="Override cg2all executable command string (advanced users only)")
+    parser.add_argument("--terminate-on-foxs", action="store_true",
+                    help="Opt-in batch mode: terminate individual predictStructureQvary runs once FoXS chi^2 is good enough")
+    parser.add_argument("--terminate-threshold", type=float, default=2.5,
+                    help="FoXS chi^2 threshold for --terminate-on-foxs (default: 2.5)")
+    parser.add_argument("--terminate-confirmation-count", type=int, default=1,
+                    help="Number of qualifying FoXS scores required before stopping a run (default: 1)")
     args = parser.parse_args()
+
+    if args.terminate_confirmation_count < 1:
+        parser.error("--terminate-confirmation-count must be >= 1")
+    if args.terminate_threshold <= 0:
+        parser.error("--terminate-threshold must be > 0")
+    if args.terminate_on_foxs and args.no_foxs:
+        parser.error("--terminate-on-foxs requires FoXS; remove --no_foxs")
     
     print("DIR: "+str(args.dir))
     print(os.getcwd())
@@ -719,6 +792,10 @@ def main():
             cg2all_exec=args.cg2all_exec,
             disulfide_constraints_file=args.disulfide_constraints_file,
             foxs_cmd_default=args.foxs_cmd_default,
+            python_exe=args.python_exe or sys.executable,
+            terminate_on_foxs=args.terminate_on_foxs,
+            terminate_threshold=args.terminate_threshold,
+            terminate_confirmation_count=args.terminate_confirmation_count,
         )
 
 
@@ -727,6 +804,11 @@ def main():
         print(f"Initial files were created in: {refine_dir}")
         print(f"Files for Carbonara were copied to: {new_data_dir}")
         print(f"Run script created at: {run_script}")
+        print(f"Watcher/backmapping Python: {args.python_exe or sys.executable}")
+        if args.terminate_on_foxs:
+            print(f"Run mode: terminate-on-FoXS, threshold={args.terminate_threshold}, confirmation_count={args.terminate_confirmation_count}")
+        else:
+            print("Run mode: maximal exploration (no individual predictor processes are terminated early)")
         print("\nTo run the refinement, execute:")
         print(f"cd {os.path.dirname(run_script)} && ./RunMe_" + str(args.name) + ".sh")
 

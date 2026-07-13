@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 def parse_foxs_results_file(path: Path):
     vals = []
@@ -15,34 +16,57 @@ def parse_foxs_results_file(path: Path):
                 vals.append(None)
     return vals
 
+_MIX_CHI_RE = re.compile(r"\bchi2=([0-9.eE+-]+)")
 
-def sweep_quality(fitdata_dir: Path, threshold: float):
-    run_dirs = sorted([p for p in fitdata_dir.glob("allAtomRun*") if p.is_dir()])
+def read_foxs_scores(fitdata_dir, mixture_n=1):
+    fitdata_dir = Path(fitdata_dir)
 
-    total_good = total_total = total_err = 0
-    best_global = None
+    rows = []
 
-    for rd in run_dirs:
-        res = rd / "foxs_results.txt"
-        if not res.exists():
-            continue
+    if mixture_n <= 1:
+        for f in fitdata_dir.glob("allAtomRun*/foxs_results.txt"):
+            for line in f.read_text().splitlines():
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        rows.append({
+                            "source": str(f),
+                            "model": parts[0],
+                            "chi2": float(parts[1]),
+                        })
+                    except ValueError:
+                        pass
+    else:
+        for f in fitdata_dir.glob("allAtomRun*/foxs_mixture_results.txt"):
+            for line in f.read_text().splitlines():
+                m = _MIX_CHI_RE.search(line)
+                if m:
+                    rows.append({
+                        "source": str(f),
+                        "model": line.split()[0],
+                        "chi2": float(m.group(1)),
+                        "line": line,
+                    })
 
-        chis = parse_foxs_results_file(res)
+    return rows
 
-        valid = [c for c in chis if c is not None]
-        good = [c for c in valid if c <= threshold]
+def sweep_quality(fitdata_dir: Path, threshold: float, mixture_n: int = 1):
+    """
+    Count good FoXS-scored predictions.
 
-        total_good += len(good)
-        total_total += len(chis)
-        total_err += sum(c is None for c in chis)
+    For ordinary single-structure runs, read allAtomRun*/foxs_results.txt.
+    For mixture/ensemble runs, read allAtomRun*/foxs_mixture_results.txt,
+    where one line corresponds to one complete mixture state.
+    """
+    rows = read_foxs_scores(fitdata_dir, mixture_n=mixture_n)
 
-        if valid:
-            m = min(valid)
-            best_global = m if best_global is None else min(best_global, m)
+    vals = [r.get("chi2") for r in rows]
+    valid = [v for v in vals if v is not None]
+    good = [v for v in valid if v <= threshold]
 
     return {
-        "good": total_good,
-        "total": total_total,
-        "errors": total_err,
-        "best": best_global,
+        "good": len(good),
+        "total": len(rows),
+        "errors": sum(v is None for v in vals),
+        "best": min(valid) if valid else None,
     }

@@ -1,4 +1,5 @@
 import os
+import sys
 import re
 import subprocess
 import signal
@@ -38,6 +39,26 @@ def modeller_error_message() -> str:
         "    python -c \"from modeller import environ; env=environ(); print('MODELLER OK')\""
     )
 
+def check_biopython_available() -> bool:
+    """Return True if Biopython/Bio.PDB is importable in the current kernel Python."""
+    try:
+        import Bio  # noqa: F401
+        from Bio.PDB import PDBParser, PDBIO  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def biopython_error_message() -> str:
+    return (
+        "Biopython is required by the Carbonara backmapping code, but Bio/Bio.PDB "
+        "is not importable in this Python environment.\n\n"
+        f"Current Python executable: {sys.executable}\n\n"
+        "Install it in this environment with:\n"
+        "    python -m pip install biopython"
+    )
+
+
 
 def detect_backmap_method_from_run_script(script_path: str | Path) -> str | None:
     """
@@ -76,6 +97,95 @@ def detect_backmap_method_from_run_script(script_path: str | Path) -> str | None
     return None
 
 
+def detect_no_structures_from_run_script(script_path: str | Path) -> int:
+    """
+    Read the generated RunMe_*.sh script and extract the Carbonara
+    noStructures value. This is the authoritative mixture/component count
+    used both by predictStructureQvary and the watcher.
+    """
+    script_path = Path(script_path)
+    if not script_path.exists():
+        return 1
+
+    try:
+        text = script_path.read_text(errors="ignore")
+    except Exception:
+        return 1
+
+    # Standard generated form:
+    #   noStructures=2
+    m = re.search(r"(?im)^\s*noStructures\s*=\s*[\"']?(\d+)[\"']?\s*(?:#.*)?$", text)
+    if m:
+        try:
+            return max(1, int(m.group(1)))
+        except Exception:
+            return 1
+
+    # Fallback: watcher arg form:
+    #   --no-structures "$noStructures"  or --no-structures 2
+    m = re.search(r"(?i)--no-structures\s+[\"']?(\d+)[\"']?", text)
+    if m:
+        try:
+            return max(1, int(m.group(1)))
+        except Exception:
+            return 1
+
+    return 1
+
+
+def _read_run_script_text(script_path: str | Path) -> str:
+    script_path = Path(script_path)
+    if not script_path.exists():
+        return ""
+    try:
+        return script_path.read_text(errors="ignore")
+    except Exception:
+        return ""
+
+
+def _detect_bool_assignment(text: str, name: str, default: bool = False) -> bool:
+    m = re.search(rf"(?im)^\s*{re.escape(name)}\s*=\s*[\"']?(True|False|true|false|1|0|yes|no)[\"']?", text)
+    if not m:
+        return default
+    return m.group(1).strip().lower() in {"true", "1", "yes"}
+
+
+def _detect_numeric_assignment(text: str, name: str, default):
+    m = re.search(rf"(?im)^\s*{re.escape(name)}\s*=\s*[\"']?([0-9.eE+-]+)[\"']?", text)
+    if not m:
+        return default
+    try:
+        if isinstance(default, int):
+            return int(float(m.group(1)))
+        return float(m.group(1))
+    except Exception:
+        return default
+
+
+def detect_run_mode_from_run_script(script_path: str | Path) -> dict:
+    """
+    Detect whether a generated RunMe_*.sh is in maximal-exploration mode or
+    terminate-on-FoXS mode. Missing/old scripts are treated as maximal exploration.
+    """
+    text = _read_run_script_text(script_path)
+    terminate_on_foxs = _detect_bool_assignment(text, "TERMINATE_ON_FOXS", default=False)
+
+    # Fallback for scripts that pass the watcher arg directly.
+    if not terminate_on_foxs and re.search(r"(?i)--terminate-on-foxs\b", text):
+        terminate_on_foxs = True
+
+    threshold = _detect_numeric_assignment(text, "TERMINATE_FOXS_THRESHOLD", 2.5)
+    confirmation = _detect_numeric_assignment(text, "TERMINATE_CONFIRMATION_COUNT", 1)
+    confirmation = max(1, int(confirmation))
+
+    return {
+        "terminate_on_foxs": bool(terminate_on_foxs),
+        "mode": "terminate-on-FoXS" if terminate_on_foxs else "maximal exploration",
+        "terminate_threshold": float(threshold),
+        "terminate_confirmation_count": confirmation,
+    }
+
+
 class CarbonaraRunner:
 
     def __init__(
@@ -107,6 +217,12 @@ class CarbonaraRunner:
             "last_update": None,
             "start_time": None,
             "defer_backmap_seconds": 600,
+            "mixture_n": 1,
+            "mode": "maximal exploration",
+            "terminate_on_foxs": False,
+            "terminate_threshold": None,
+            "terminate_confirmation_count": 1,
+            "stopped_runs": 0,
         }
 
     # ------------------------
@@ -141,6 +257,12 @@ class CarbonaraRunner:
 
         method = self._resolve_backmap_method()
 
+        # The generated shell script receives this kernel Python via PYTHON_EXE,
+        # so check core Python-side backmapping dependencies here before launching.
+        if not check_biopython_available():
+            raise RuntimeError(biopython_error_message())
+        print("✅ Biopython/Bio.PDB check passed")
+
         if method == "modeller" and self.require_modeller_check:
             if not check_modeller_available():
                 raise RuntimeError(modeller_error_message())
@@ -159,14 +281,26 @@ class CarbonaraRunner:
 
         self._preflight_checks()
 
+        env = os.environ.copy()
+        env["PYTHON_EXE"] = sys.executable
+
+        # Put the kernel Python directory first so any plain `python` calls inside
+        # child shell scripts also resolve to the same environment. The generated
+        # RunMe script should use PYTHON_EXE explicitly, but this makes older
+        # generated scripts safer too.
+        python_bin = str(Path(sys.executable).resolve().parent)
+        env["PATH"] = python_bin + os.pathsep + env.get("PATH", "")
+
         self.proc = subprocess.Popen(
             ["bash", self.script, self.foxs_cmd],
             preexec_fn=os.setsid,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=env,
         )
 
         print(f"🚀 Carbonara started (PID={self.proc.pid})")
+        print(f"🐍 Watcher/backmapping Python: {sys.executable}")
 
     def stop(self):
         if self.proc is None:
@@ -208,7 +342,15 @@ class CarbonaraRunner:
             else:
                 lines.append("**Status:** Backmapping window active. New eligible predictions should now be picked up.")
 
-        lines.append(f"**Threshold (χ²):** {stats['threshold']}")
+        lines.append(f"**Monitor threshold (χ²):** {stats['threshold']}")
+        lines.append(f"**Mixture components:** {stats.get('mixture_n', 1)}")
+        lines.append(f"**Run mode:** {stats.get('mode', 'maximal exploration')}")
+        if stats.get("terminate_on_foxs"):
+            lines.append(
+                f"**Termination rule:** FoXS χ² ≤ {stats.get('terminate_threshold')} "
+                f"for {stats.get('terminate_confirmation_count', 1)} qualifying score(s)"
+            )
+            lines.append(f"**Early-stopped runs:** {stats.get('stopped_runs', 0)}")
         lines.append(f"**Good models:** {stats['good']} / {stats['total']}")
         lines.append(f"**Errors:** {stats['errors']}")
         if stats["best"] is not None:
@@ -227,6 +369,11 @@ class CarbonaraRunner:
         self._monitor_state["threshold"] = threshold
         self._monitor_state["start_time"] = time.time()
         self._monitor_state["defer_backmap_seconds"] = defer_backmap_seconds
+        mixture_n = detect_no_structures_from_run_script(self.script)
+        self._monitor_state["mixture_n"] = mixture_n
+        mode_info = detect_run_mode_from_run_script(self.script)
+        self._monitor_state.update(mode_info)
+        self._monitor_state["stopped_runs"] = len(list(self.fitdata.glob("run*.stopped")))
 
         initial = Markdown(self._render_monitor_text())
         handle = display(initial, display_id=True)
@@ -235,18 +382,19 @@ class CarbonaraRunner:
         def loop():
             while not self._stop_event.is_set():
                 try:
-                    stats = sweep_quality(self.fitdata, threshold)
+                    stats = sweep_quality(self.fitdata, threshold, mixture_n=mixture_n)
                     self._monitor_state.update(stats)
                 except Exception:
                     self._monitor_state["errors"] += 1
 
+                self._monitor_state["stopped_runs"] = len(list(self.fitdata.glob("run*.stopped")))
                 self._monitor_state["last_update"] = time.strftime("%H:%M:%S")
                 update_display(Markdown(self._render_monitor_text()), display_id=self._display_id)
                 time.sleep(every_s)
 
         self._monitor_thread = threading.Thread(target=loop, daemon=True)
         self._monitor_thread.start()
-        print("📊 Monitoring started")
+        print(f"📊 Monitoring started (mixture_n={mixture_n}, mode={mode_info['mode']})")
 
     def stop_monitor(self):
         self._stop_event.set()

@@ -4,6 +4,8 @@ import pickle
 import shlex
 import subprocess
 import re
+import os
+import tempfile
 from pathlib import Path
 
 try:
@@ -94,16 +96,23 @@ def main():
             ap.error("--backend cg2all requires --cg2all-exec")
         cg2all_exec = shlex.split(args.cg2all_exec)
 
-    backmap_ca_chain_multimer(
-        args.coords,
-        args.fingerprint,
-        str(outdir),
-        args.name,
-        lengths,
-        disulfides=disulfides,
-        method=args.backend,
-        cg2all_exec=cg2all_exec,
-    )
+    old_cwd = os.getcwd()
+
+    with tempfile.TemporaryDirectory(prefix=f"carbonara_backmap_{args.name}_") as tmpdir:
+        os.chdir(tmpdir)
+        try:
+            backmap_ca_chain_multimer(
+                args.coords,
+                args.fingerprint,
+                str(outdir),
+                args.name,
+                lengths,
+                disulfides=disulfides,
+                method=args.backend,
+                cg2all_exec=cg2all_exec,
+            )
+        finally:
+            os.chdir(old_cwd)
 
     aa_pdb_path = outdir / f"{args.name}_AA.pdb"
 
