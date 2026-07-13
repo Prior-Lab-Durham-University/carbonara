@@ -182,6 +182,8 @@ def write_runme(
     curr = os.getcwd()
     script_name = "RunMe_" + str(fit_name) + ".sh"
     run_file = os.path.join(curr, script_name)
+    
+    carbonaradir = os.path.dirname(os.path.realpath(sys.argv[0]))
 
     # Path to the data directory (relative to ROOT)
     data_path = f"carbonara_runs/{fit_name}"
@@ -231,11 +233,15 @@ def write_runme(
 
     lines = [
         "#!/bin/bash",
+        "echo $0",
+        "echo $SHELL",
         "set -euo pipefail",
         "set +m   # ensure background jobs stay in same job-control context",
         "",
         "# Determine the root directory based on the script location",
         'ROOT=$(dirname "$(readlink -f "$0")")',
+        'CARBONARADIR='+str(carbonaradir),
+        'export PATH=$PATH:'+str(carbonaradir),
         "",
         "# Optional first argument: FoXS command",
         f'FOXS_CMD="${{1:-{foxs_cmd_default}}}"',
@@ -341,8 +347,8 @@ def write_runme(
         "# ===========================================",
         "",
         "# ========= NEW: start watcher (background) =========",
-        'WATCHER_SCRIPT="$ROOT/watch_and_backmap.py"',
-        'BACKMAP_SCRIPT="$ROOT/backmap_cli.py"',
+        'WATCHER_SCRIPT="$CARBONARADIR/watch_and_backmap.py"',
+        'BACKMAP_SCRIPT="$CARBONARADIR/backmap_cli.py"',
         'WATCHER_LOG="$predictionFile/watcher.out"',
         "",
         'if [[ ! -f "$WATCHER_SCRIPT" ]]; then',
@@ -396,7 +402,7 @@ def write_runme(
         '    echo ""',
         "",
         '    stdbuf -oL -eL \\',
-        '    "$ROOT/build/bin/predictStructureQvary" \\',
+        '    "$CARBONARADIR/build/bin/predictStructureQvary" \\',
         '        "$ScatterFile" \\',
         '        "$fileLocs" \\',
         '        "$initialCoordsFile" \\',
@@ -457,7 +463,6 @@ def parse_structure_lengths(filename: str) -> dict:
 
 
 def main():
-    print("me me me me me me me")
     parser = argparse.ArgumentParser(description="Setup Carbonara processing pipeline")
     parser.add_argument("-p", "--pdb", required=True, help="Path to input PDB file")
     parser.add_argument("-s", "--saxs", required=True, help="Path to input SAXS data file")
@@ -545,6 +550,9 @@ def main():
                     help="Default FoXS command for the generated RunMe script; user can still override as first shell arg")
     parser.add_argument("--cg2all_exec",default=None,help="Override cg2all executable command string (advanced users only)")
     args = parser.parse_args()
+    
+    print("DIR: "+str(args.dir))
+    print(os.getcwd())
     
     print("new")
     def detect_cg2all_exec(user_value):
@@ -723,6 +731,7 @@ def main():
         print(f"cd {os.path.dirname(run_script)} && ./RunMe_" + str(args.name) + ".sh")
 
     except Exception as e:
+        raise e
         print(f"Error during setup: {str(e)}", file=sys.stderr)
         sys.exit(1)
 

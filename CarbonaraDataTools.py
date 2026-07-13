@@ -15,6 +15,7 @@ import numpy as np
 from scipy.spatial.distance import cdist
 
 import os
+import sys
 import subprocess
 import shutil
 #import math
@@ -928,9 +929,10 @@ def generate_random_structures(coords_file, fingerprint_file):
 
     #print(linker_indices)
     linker_indices =np.asarray(linker_indices)
-    current = os.getcwd()
+    #current = os.getcwd() # this is only correct if the system path is also the carbonara folder
+    current = os.path.dirname(os.path.realpath(sys.argv[0]))
     random = 'rand_structures'
-    random_working = os.path.join(current, random)
+    random_working = os.path.join(os.getcwd(), random)
 
     if os.path.exists(random_working) and os.path.isdir(random_working):
         shutil.rmtree(random_working)
@@ -1189,7 +1191,7 @@ def setup_runs(refine_dir, number_runs = 3):
 
 
 
-# Writing to carbonara format
+# Writing to carbonara format
 
 def write_coordinates_file(coords, working_path, carb_index=1):
 
@@ -2951,6 +2953,7 @@ def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None):
         if max_q is not None:
             cmd += ["--max_q", str(max_q)]
 
+        print(cmd)
         proc = subprocess.run(cmd, capture_output=True, text=True)
 
         stdout = proc.stdout

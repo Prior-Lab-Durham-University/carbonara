@@ -1,9 +1,24 @@
 #include "randomMolGen.h"
 
+std::string get_selfpath() {
+    char buff[PATH_MAX];
+    ssize_t len = ::readlink("/proc/self/exe", buff, sizeof(buff)-1);
+    if (len != -1) {
+      buff[len] = '\0';
+      return std::string(buff);
+    }
+    throw "Can't get executable path"; 
+}
+
 randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
+  std::string exe_path = get_selfpath();
+  const auto pos = exe_path.find_last_of('/');
+  std::string exe_dir = exe_path.substr(0, pos);
+  std::string mixedLinkerYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "mixedLinkerYfromXCumDist.dat";
   rmin =rminIn;rmax = rmaxIn;
   std::ifstream myfile;
-  myfile.open("probabilityInterpolation/mixedLinkerYfromXCumDist.dat");
+  //myfile.open("probabilityInterpolation/mixedLinkerYfromXCumDist.dat");
+  myfile.open(mixedLinkerYfromXCumDist);
   double val,x,y,den;
   std::string output;
   int xindex=0;
@@ -34,7 +49,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
      mixedYfromXInterpolants.push_back(subVecMixedYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/negBetaLinkerYfromXCumDist.dat");
+  std::string negBetaLinkerYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "negBetaLinkerYfromXCumDist.dat";
+  myfile.open(negBetaLinkerYfromXCumDist);
   std::vector<double> subVecNegBetaYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -57,7 +73,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
      negBetaYfromXInterpolants.push_back(subVecNegBetaYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/posBetaLinkerYfromXCumDist.dat");
+  std::string posBetaLinkerYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "posBetaLinkerYfromXCumDist.dat";
+  myfile.open(posBetaLinkerYfromXCumDist);
   std::vector<double> subVecPosBetaYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -80,7 +97,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
      posBetaYfromXInterpolants.push_back(subVecPosBetaYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/alphaLinkerYfromXCumDist.dat");
+  std::string alphaLinkerYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "alphaLinkerYfromXCumDist.dat";
+  myfile.open(alphaLinkerYfromXCumDist);
   std::vector<double> subVecAlphaYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -103,7 +121,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
      alphaYfromXInterpolants.push_back(subVecAlphaYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/alphaStrandYfromXCumDist.dat");
+  std::string alphaStrandYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "alphaStrandYfromXCumDist.dat";
+  myfile.open(alphaStrandYfromXCumDist);
   std::vector<double> subVecAlphaStrandYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -126,7 +145,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
      alphaStrandYfromXInterpolants.push_back(subVecAlphaStrandYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/posBetaStrandYfromXCumDist.dat");
+  std::string posBetaStrandYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "posBetaStrandYfromXCumDist.dat";
+  myfile.open(posBetaStrandYfromXCumDist);
   std::vector<double> subVecPosBetaStrandYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -149,7 +169,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
      posBetaStrandYfromXInterpolants.push_back(subVecPosBetaStrandYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/negBetaStrandYfromXCumDist.dat");
+  std::string negBetaStrandYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "negBetaStrandYfromXCumDist.dat";
+  myfile.open(negBetaStrandYfromXCumDist);
   std::vector<double> subVecNegBetaStrandYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -172,8 +193,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
      negBetaStrandYfromXInterpolants.push_back(subVecNegBetaStrandYFX);
   }
   myfile.close();
-
-  myfile.open("probabilityInterpolation/mixedStrandYfromXCumDist.dat");
+  std::string mixedStrandYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "mixedStrandYfromXCumDist.dat";
+  myfile.open(mixedStrandYfromXCumDist);
   std::vector<double> subVecMixedStrandYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -196,7 +217,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
      mixedStrandYfromXInterpolants.push_back(subVecMixedStrandYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinHelixToLinkerYfromXCumDist.dat");
+  std::string joinHelixToLinkerYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinHelixToLinkerYfromXCumDist.dat";
+  myfile.open(joinHelixToLinkerYfromXCumDist);
   std::vector<double> subVecJHTOLYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -219,7 +241,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
      helixToLinkerYfromXInterpolants.push_back(subVecJHTOLYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinHelixToStrandYfromXCumDist.dat");
+  std::string joinHelixToStrandYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinHelixToStrandYfromXCumDist.dat";
+  myfile.open(joinHelixToStrandYfromXCumDist);
   std::vector<double> subVecJHTOLStrandYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -242,7 +265,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
      helixToStrandYfromXInterpolants.push_back(subVecJHTOLStrandYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinLinkerToHelixYfromXCumDist.dat");
+  std::string joinLinkerToHelixYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinLinkerToHelixYfromXCumDist.dat";
+  myfile.open(joinLinkerToHelixYfromXCumDist);
   std::vector<double> subVecJLTOHYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -265,7 +289,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
      linkerToHelixYfromXInterpolants.push_back(subVecJLTOHYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinStrandToHelixYfromXCumDist.dat");
+  std::string joinStrandToHelixYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinStrandToHelixYfromXCumDist.dat";
+  myfile.open(joinStrandToHelixYfromXCumDist);
   std::vector<double> subVecJSTOHYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -288,7 +313,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
      strandToHelixYfromXInterpolants.push_back(subVecJSTOHYFX);
   }
   myfile.close();
-   myfile.open("probabilityInterpolation/joinStrandToLinkerYfromXCumDist.dat");
+  std::string joinStrandToLinkerYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinStrandToLinkerYfromXCumDist.dat";
+   myfile.open(joinStrandToLinkerYfromXCumDist);
   std::vector<double> subVecJSTOLYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -311,7 +337,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
      strandToLinkerYfromXInterpolants.push_back(subVecJSTOLYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinLinkerToStrandYfromXCumDist.dat");
+  std::string joinLinkerToStrandYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinLinkerToStrandYfromXCumDist.dat";
+  myfile.open(joinLinkerToStrandYfromXCumDist);
   std::vector<double> subVecJLTOSYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -334,7 +361,9 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
      linkerToStrandYfromXInterpolants.push_back(subVecJLTOSYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/mixedLinkerxCumDist.dat");
+  std::string mixedLinkerxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "mixedLinkerxCumDist.dat";
+  std::cout << "FILE PATH:" << mixedLinkerxCumDist << "\n";
+  myfile.open(mixedLinkerxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -346,10 +375,11 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
       mixedXCumInterpolants.push_back(val);
     }
   }else{
-    std::cout<<"failed to open mixedLinkerxCumDist.dat\n";
+    std::cout << "failed to open" << mixedLinkerxCumDist << "\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/mixedStrandxCumDist.dat");
+  std::string mixedStrandxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "mixedStrandxCumDist.dat";
+  myfile.open(mixedStrandxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -364,7 +394,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open mixedStrandxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/negBetaLinkerxCumDist.dat");
+  std::string negBetaLinkerxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "negBetaLinkerxCumDist.dat";
+  myfile.open(negBetaLinkerxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -379,7 +410,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open negBetaLinkerxCumDist.dat\n";
   }
   myfile.close();
-   myfile.open("probabilityInterpolation/negBetaStrandxCumDist.dat");
+  std::string negBetaStrandxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "negBetaStrandxCumDist.dat";
+   myfile.open(negBetaStrandxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -394,7 +426,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open negBetaLinkerxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/posBetaLinkerxCumDist.dat");
+  std::string posBetaLinkerxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "posBetaLinkerxCumDist.dat";
+  myfile.open(posBetaLinkerxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -409,7 +442,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open posBetaLinkerxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/posBetaStrandxCumDist.dat");
+  std::string posBetaStrandxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "posBetaStrandxCumDist.dat";
+  myfile.open(posBetaStrandxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -424,7 +458,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open posBetaStrandxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/alphaLinkerxCumDist.dat");
+  std::string alphaLinkerxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "alphaLinkerxCumDist.dat";
+  myfile.open(alphaLinkerxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -439,7 +474,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open alphaLinkerxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/alphaStrandxCumDist.dat");
+  std::string alphaStrandxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "alphaStrandxCumDist.dat";
+  myfile.open(alphaStrandxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -454,7 +490,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open alphaStrandxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinLinkerToHelixxCumDist.dat");
+  std::string joinLinkerToHelixxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinLinkerToHelixxCumDist.dat";
+  myfile.open(joinLinkerToHelixxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -469,7 +506,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open joinLinkerToHelixxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinStrandToHelixxCumDist.dat");
+  std::string joinStrandToHelixxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinStrandToHelixxCumDist.dat";
+  myfile.open(joinStrandToHelixxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -484,7 +522,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open joinStrandToHelixxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinHelixToLinkerxCumDist.dat");
+  std::string joinHelixToLinkerxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinHelixToLinkerxCumDist.dat";
+  myfile.open(joinHelixToLinkerxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -499,7 +538,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open joinHelixToLinkerxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinHelixToStrandxCumDist.dat");
+  std::string joinHelixToStrandxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinHelixToStrandxCumDist.dat";
+  myfile.open(joinHelixToStrandxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -514,7 +554,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open joinHelixToStrandxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinStrandToLinkerxCumDist.dat");
+  std::string joinStrandToLinkerxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinStrandToLinkerxCumDist.dat";
+  myfile.open(joinStrandToLinkerxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -529,7 +570,8 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open joinHelixToLinkerxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinLinkerToStrandxCumDist.dat");
+  std::string joinLinkerToStrandxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinLinkerToStrandxCumDist.dat";
+  myfile.open(joinLinkerToStrandxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -559,7 +601,11 @@ randomMol::randomMol(double &rminIn,double &rmaxIn,double &lminIn){
 void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
   rmin =rminIn;rmax = rmaxIn;
    std::ifstream myfile;
-  myfile.open("probabilityInterpolation/mixedLinkerYfromXCumDist.dat");
+  std::string exe_path = get_selfpath();
+  const auto pos = exe_path.find_last_of('/');
+  std::string exe_dir = exe_path.substr(0, pos);
+  std::string mixedLinkerYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "mixedLinkerYfromXCumDist.dat";
+  myfile.open(mixedLinkerYfromXCumDist);
   double val,x,y,den;
   std::string output;
   int xindex=0;
@@ -590,7 +636,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
      mixedYfromXInterpolants.push_back(subVecMixedYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/negBetaLinkerYfromXCumDist.dat");
+  std::string negBetaLinkerYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "negBetaLinkerYfromXCumDist.dat";
+  myfile.open(negBetaLinkerYfromXCumDist);
   std::vector<double> subVecNegBetaYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -613,7 +660,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
      negBetaYfromXInterpolants.push_back(subVecNegBetaYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/posBetaLinkerYfromXCumDist.dat");
+  std::string posBetaLinkerYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "posBetaLinkerYfromXCumDist.dat";
+  myfile.open(posBetaLinkerYfromXCumDist);
   std::vector<double> subVecPosBetaYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -636,7 +684,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
      posBetaYfromXInterpolants.push_back(subVecPosBetaYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/alphaLinkerYfromXCumDist.dat");
+  std::string alphaLinkerYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "alphaLinkerYfromXCumDist.dat";
+  myfile.open(alphaLinkerYfromXCumDist);
   std::vector<double> subVecAlphaYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -659,7 +708,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
      alphaYfromXInterpolants.push_back(subVecAlphaYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/alphaStrandYfromXCumDist.dat");
+  std::string alphaStrandYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "alphaStrandYfromXCumDist.dat";
+  myfile.open(alphaStrandYfromXCumDist);
   std::vector<double> subVecAlphaStrandYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -682,7 +732,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
      alphaStrandYfromXInterpolants.push_back(subVecAlphaStrandYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/posBetaStrandYfromXCumDist.dat");
+  std::string posBetaStrandYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "posBetaStrandYfromXCumDist.dat";
+  myfile.open(posBetaStrandYfromXCumDist);
   std::vector<double> subVecPosBetaStrandYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -705,7 +756,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
      posBetaStrandYfromXInterpolants.push_back(subVecPosBetaStrandYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/negBetaStrandYfromXCumDist.dat");
+  std::string negBetaStrandYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "negBetaStrandYfromXCumDist.dat";
+  myfile.open(negBetaStrandYfromXCumDist);
   std::vector<double> subVecNegBetaStrandYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -728,8 +780,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
      negBetaStrandYfromXInterpolants.push_back(subVecNegBetaStrandYFX);
   }
   myfile.close();
-
-  myfile.open("probabilityInterpolation/mixedStrandYfromXCumDist.dat");
+  std::string mixedStrandYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "mixedStrandYfromXCumDist.dat";
+  myfile.open(mixedStrandYfromXCumDist);
   std::vector<double> subVecMixedStrandYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -752,7 +804,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
      mixedStrandYfromXInterpolants.push_back(subVecMixedStrandYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinHelixToLinkerYfromXCumDist.dat");
+  std::string joinHelixToLinkerYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinHelixToLinkerYfromXCumDist.dat";
+  myfile.open(joinHelixToLinkerYfromXCumDist);
   std::vector<double> subVecJHTOLYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -775,7 +828,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
      helixToLinkerYfromXInterpolants.push_back(subVecJHTOLYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinHelixToStrandYfromXCumDist.dat");
+  std::string joinHelixToStrandYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinHelixToStrandYfromXCumDist.dat";
+  myfile.open(joinHelixToStrandYfromXCumDist);
   std::vector<double> subVecJHTOLStrandYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -798,7 +852,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
      helixToStrandYfromXInterpolants.push_back(subVecJHTOLStrandYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinLinkerToHelixYfromXCumDist.dat");
+  std::string joinLinkerToHelixYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinLinkerToHelixYfromXCumDist.dat";
+  myfile.open(joinLinkerToHelixYfromXCumDist);
   std::vector<double> subVecJLTOHYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -821,7 +876,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
      linkerToHelixYfromXInterpolants.push_back(subVecJLTOHYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinStrandToHelixYfromXCumDist.dat");
+  std::string joinStrandToHelixYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinStrandToHelixYfromXCumDist.dat";
+  myfile.open(joinStrandToHelixYfromXCumDist);
   std::vector<double> subVecJSTOHYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -844,7 +900,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
      strandToHelixYfromXInterpolants.push_back(subVecJSTOHYFX);
   }
   myfile.close();
-   myfile.open("probabilityInterpolation/joinStrandToLinkerYfromXCumDist.dat");
+  std::string joinStrandToLinkerYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinStrandToLinkerYfromXCumDist.dat";
+  myfile.open(joinStrandToLinkerYfromXCumDist);
   std::vector<double> subVecJSTOLYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -867,7 +924,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
      strandToLinkerYfromXInterpolants.push_back(subVecJSTOLYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinLinkerToStrandYfromXCumDist.dat");
+  std::string joinLinkerToStrandYfromXCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinLinkerToStrandYfromXCumDist.dat";
+  myfile.open(joinLinkerToStrandYfromXCumDist);
   std::vector<double> subVecJLTOSYFX(nGridSize,0.0);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
@@ -890,7 +948,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
      linkerToStrandYfromXInterpolants.push_back(subVecJLTOSYFX);
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/mixedLinkerxCumDist.dat");
+  std::string mixedLinkerxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "mixedLinkerxCumDist.dat";
+  myfile.open(mixedLinkerxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -902,10 +961,11 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
       mixedXCumInterpolants.push_back(val);
     }
   }else{
-    std::cout<<"failed to open mixedLinkerxCumDist.dat\n";
+    std::cout<<"failed to open " << mixedLinkerxCumDist << "\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/mixedStrandxCumDist.dat");
+  std::string mixedStrandxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "mixedStrandxCumDist.dat";
+  myfile.open(mixedStrandxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -920,7 +980,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open mixedStrandxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/negBetaLinkerxCumDist.dat");
+  std::string negBetaLinkerxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "negBetaLinkerxCumDist.dat";
+  myfile.open(negBetaLinkerxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -935,7 +996,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open negBetaLinkerxCumDist.dat\n";
   }
   myfile.close();
-   myfile.open("probabilityInterpolation/negBetaStrandxCumDist.dat");
+  std::string negBetaStrandxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "negBetaStrandxCumDist.dat";
+   myfile.open(negBetaStrandxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -950,7 +1012,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open negBetaLinkerxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/posBetaLinkerxCumDist.dat");
+  std::string posBetaLinkerxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "posBetaLinkerxCumDist.dat";
+  myfile.open(posBetaLinkerxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -965,7 +1028,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open posBetaLinkerxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/posBetaStrandxCumDist.dat");
+  std::string posBetaStrandxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "posBetaStrandxCumDist.dat";
+  myfile.open(posBetaStrandxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -980,7 +1044,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open posBetaStrandxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/alphaLinkerxCumDist.dat");
+  std::string alphaLinkerxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "alphaLinkerxCumDist.dat";
+  myfile.open(alphaLinkerxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -995,7 +1060,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open alphaLinkerxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/alphaStrandxCumDist.dat");
+  std::string alphaStrandxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "alphaStrandxCumDist.dat";
+  myfile.open(alphaStrandxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -1010,7 +1076,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open alphaStrandxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinLinkerToHelixxCumDist.dat");
+  std::string joinLinkerToHelixxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinLinkerToHelixxCumDist.dat";
+  myfile.open(joinLinkerToHelixxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -1025,7 +1092,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open joinLinkerToHelixxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinStrandToHelixxCumDist.dat");
+  std::string joinStrandToHelixxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinStrandToHelixxCumDist.dat";
+  myfile.open(joinStrandToHelixxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -1040,7 +1108,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open joinStrandToHelixxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinHelixToLinkerxCumDist.dat");
+  std::string joinHelixToLinkerxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinHelixToLinkerxCumDist.dat";
+  myfile.open(joinHelixToLinkerxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -1055,7 +1124,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open joinHelixToLinkerxCumDist.dat\n";
   }
   myfile.close();
-   myfile.open("probabilityInterpolation/joinHelixToStrandxCumDist.dat");
+  std::string joinHelixToStrandxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinHelixToStrandxCumDist.dat";
+   myfile.open(joinHelixToStrandxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -1070,7 +1140,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open joinHelixToStrandxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinStrandToLinkerxCumDist.dat");
+  std::string joinStrandToLinkerxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinStrandToLinkerxCumDist.dat";
+  myfile.open(joinStrandToLinkerxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
@@ -1085,7 +1156,8 @@ void randomMol::setParams(double &rminIn,double &rmaxIn,double &lminIn){
     std::cout<<"failed to open joinStrandToLinkerxCumDist.dat\n";
   }
   myfile.close();
-  myfile.open("probabilityInterpolation/joinLinkerToStrandxCumDist.dat");
+  std::string joinLinkerToStrandxCumDist = exe_dir + "/" + ".." + "/" + ".." + "/" "probabilityInterpolation" + "/" + "joinLinkerToStrandxCumDist.dat";
+  myfile.open(joinLinkerToStrandxCumDist);
   if (myfile.is_open()){ 
     while(!myfile.eof()){
       std::getline(myfile,output);
