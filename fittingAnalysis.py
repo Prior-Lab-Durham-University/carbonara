@@ -1475,23 +1475,314 @@ def radius_of_gyration(pdb_or_cif, atom_selection="all", mass_weighted=False):
     return float(rg_A)
 
 
-def pairwise_structure_metrics(pdb_files, compare_func):
+
+# -----------------------------------------------------------------------------
+# Prediction-record helpers for single-structure and mixture-aware analysis
+# -----------------------------------------------------------------------------
+
+def _is_pathlike_object(x):
+    """True for strings/path objects, but not for lists/tuples/dicts."""
+    return isinstance(x, (str, os.PathLike, Path))
+
+
+def _is_path_sequence(x):
+    """True for a non-empty list/tuple whose entries are all path-like."""
+    return isinstance(x, (list, tuple)) and len(x) > 0 and all(_is_pathlike_object(v) for v in x)
+
+
+_PRED_STEP_PDB_RE = re.compile(
+    r"^mol(?P<run>\d+)_sub_(?P<sub>\d+)_step_(?P<step>\d+)(?:_xyz)?_+AA\.pdb$"
+)
+_PRED_END_PDB_RE = re.compile(
+    r"^mol(?P<run>\d+)_sub_(?P<sub>\d+)_end(?:_xyz)?_+AA\.pdb$"
+)
+
+
+def _parse_prediction_pdb_metadata(path):
+    """
+    Parse both historical and current Carbonara AA PDB names.
+
+    Supported examples
+    ------------------
+    mol7_sub_0_step_12__AA.pdb
+    mol7_sub_0_step_12_xyz_AA.pdb
+    mol7_sub_0_end__AA.pdb
+    mol7_sub_0_end_xyz_AA.pdb
+    """
+    name = Path(path).name
+    m = _PRED_STEP_PDB_RE.match(name)
+    if m:
+        run_no = int(m.group("run"))
+        sub_no = int(m.group("sub"))
+        step_no = int(m.group("step"))
+        return {
+            "runNo": run_no,
+            "run_no": run_no,
+            "subNo": sub_no,
+            "sub_no": sub_no,
+            "predTag": f"step_{step_no}",
+            "pred_tag": f"step_{step_no}",
+            "label": f"mol{run_no}_step_{step_no}",
+        }
+
+    m = _PRED_END_PDB_RE.match(name)
+    if m:
+        run_no = int(m.group("run"))
+        sub_no = int(m.group("sub"))
+        return {
+            "runNo": run_no,
+            "run_no": run_no,
+            "subNo": sub_no,
+            "sub_no": sub_no,
+            "predTag": "end",
+            "pred_tag": "end",
+            "label": f"mol{run_no}_end",
+        }
+
+    return {
+        "runNo": None,
+        "run_no": None,
+        "subNo": None,
+        "sub_no": None,
+        "predTag": None,
+        "pred_tag": None,
+        "label": Path(path).stem,
+    }
+
+
+def _infer_fitdata_dir_from_pdb_paths(pdb_paths):
+    """
+    Infer the fitdata directory from component paths such as
+    .../fitdata/allAtomRun7/mol7_sub_0_step_12_xyz_AA.pdb.
+    """
+    for p in pdb_paths:
+        p = Path(p)
+        for parent in [p.parent] + list(p.parents):
+            if re.fullmatch(r"allAtomRun\d+", parent.name):
+                return parent.parent
+    return None
+
+
+def _match_record_by_pdb_names(candidates, pdb_paths, chi2=None):
+    """Find a FoXS record whose component PDB basenames match ``pdb_paths``."""
+    wanted_names = {Path(p).name for p in pdb_paths}
+    wanted_resolved = set()
+    for p in pdb_paths:
+        try:
+            wanted_resolved.add(Path(p).resolve())
+        except Exception:
+            pass
+
+    for cand in candidates:
+        cand_paths = [Path(p) for p in cand.get("pdb_paths", [])]
+        have_names = {p.name for p in cand_paths}
+        have_resolved = set()
+        for p in cand_paths:
+            try:
+                have_resolved.add(p.resolve())
+            except Exception:
+                pass
+
+        same_paths = bool(wanted_names) and wanted_names == have_names
+        if wanted_resolved and have_resolved:
+            same_paths = same_paths or (wanted_resolved == have_resolved)
+
+        if not same_paths:
+            continue
+
+        if chi2 is not None:
+            try:
+                if abs(float(cand.get("chi2")) - float(chi2)) > 1e-8:
+                    continue
+            except Exception:
+                continue
+        return cand
+
+    return None
+
+
+def _try_recover_prediction_record_from_files(pdb_paths, fitdata_dir=None, chi2=None):
+    """
+    Recover a full record, including mixture weights and fit curve, from
+    foxs_mixture_results.txt/foxs_results.txt when only PDB paths were supplied.
+    """
+    search_dirs = []
+    if fitdata_dir is not None:
+        search_dirs.append(Path(fitdata_dir))
+
+    inferred = _infer_fitdata_dir_from_pdb_paths(pdb_paths)
+    if inferred is not None:
+        search_dirs.append(Path(inferred))
+
+    seen = set()
+    for fd in search_dirs:
+        fd = Path(fd)
+        key = str(fd.resolve()) if fd.exists() else str(fd)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            candidates = read_foxs_prediction_records(fd, mode="auto", require_exists=False)
+            hit = _match_record_by_pdb_names(candidates, pdb_paths, chi2=chi2)
+            if hit is not None:
+                return hit
+        except Exception:
+            pass
+
+    return None
+
+
+def _normalise_prediction_collection(predictions, fitdata_dir: str | Path | None = None):
+    """
+    Convert a mixed collection of records, legacy tuples, paths and mixture path
+    lists into record dictionaries. ``None`` entries are skipped.
+
+    Important compatibility rule: a top-level flat list of paths is treated as
+    the historical input style, i.e. a list of single structures. A nested list
+    of paths is treated as one mixture prediction.
+    """
+    if predictions is None:
+        return []
+
+    if isinstance(predictions, dict) or _is_pathlike_object(predictions):
+        return [_normalise_prediction_record(predictions, fitdata_dir=fitdata_dir)]
+
+    if isinstance(predictions, tuple):
+        # Legacy form: (path_or_paths, chi2)
+        if len(predictions) >= 2 and (_is_pathlike_object(predictions[0]) or _is_path_sequence(predictions[0])):
+            return [_normalise_prediction_record(predictions, fitdata_dir=fitdata_dir)]
+
+    if isinstance(predictions, (list, tuple)):
+        if len(predictions) == 0:
+            return []
+
+        # Historical flat list of PDB files: [pdb1, pdb2, ...]
+        if all(_is_pathlike_object(x) for x in predictions):
+            return [_normalise_prediction_record(p, fitdata_dir=fitdata_dir) for p in predictions]
+
+        records = []
+        for item in predictions:
+            if item is None:
+                continue
+            records.append(_normalise_prediction_record(item, fitdata_dir=fitdata_dir))
+        return records
+
+    return [_normalise_prediction_record(predictions, fitdata_dir=fitdata_dir)]
+
+
+def flatten_prediction_pdbs(predictions, fitdata_dir: str | Path | None = None, keep_metadata: bool = False):
+    """
+    Flatten prediction records/mixtures into individual component PDBs.
+
+    This is the appropriate representation for RMSD, TM-score and GDT analyses:
+    mixtures are not averaged structurally; each component structure is compared
+    one-by-one.
+    """
+    records = _normalise_prediction_collection(predictions, fitdata_dir=fitdata_dir)
+    rows = []
+    for pred_i, rec in enumerate(records):
+        pdb_paths = [Path(p) for p in rec.get("pdb_paths", [])]
+        weights = rec.get("weights")
+        if weights is None or len(weights) != len(pdb_paths):
+            weights = [None] * len(pdb_paths)
+
+        for comp_i, (pdb, weight) in enumerate(zip(pdb_paths, weights)):
+            meta = _parse_prediction_pdb_metadata(pdb)
+            rows.append({
+                "pdb": pdb,
+                "prediction_i": pred_i,
+                "component_i": comp_i,
+                "weight": None if weight is None else float(weight),
+                "chi2": rec.get("chi2"),
+                "type": rec.get("type", "single"),
+                "label": rec.get("label") or meta.get("label"),
+                "runNo": rec.get("run_no", meta.get("runNo")),
+                "run_no": rec.get("run_no", meta.get("run_no")),
+                "subNo": meta.get("subNo"),
+                "sub_no": meta.get("sub_no"),
+                "predTag": meta.get("predTag"),
+                "pred_tag": meta.get("pred_tag"),
+                "record": rec,
+            })
+
+    if keep_metadata:
+        return rows
+    return [r["pdb"] for r in rows]
+
+
+def _weights_for_prediction_record(rec, pred_i, n_components, mixtures=None, default_mixture_weights="error"):
+    """
+    Resolve weights for an Rg weighted average.
+
+    Priority:
+    1. explicit ``mixtures`` argument, if supplied;
+    2. weights stored in the FoXS mixture record;
+    3. [1] for a single structure;
+    4. equal weights only if ``default_mixture_weights='equal'``.
+    """
+    weights = None
+
+    if mixtures is not None:
+        run_no = rec.get("run_no")
+        pred_tag = rec.get("pred_tag") or rec.get("predTag")
+        if pred_tag is None and rec.get("pdb_paths"):
+            pred_tag = _parse_prediction_pdb_metadata(rec["pdb_paths"][0]).get("predTag")
+        if run_no is None and rec.get("pdb_paths"):
+            run_no = _parse_prediction_pdb_metadata(rec["pdb_paths"][0]).get("runNo")
+
+        if isinstance(mixtures, dict):
+            if (run_no, pred_tag) in mixtures:
+                weights = mixtures[(run_no, pred_tag)]
+            elif run_no in mixtures:
+                weights = mixtures[run_no]
+        else:
+            try:
+                weights = mixtures[pred_i]
+            except Exception:
+                weights = None
+
+    if weights is None:
+        weights = rec.get("weights")
+
+    if weights is None or len(weights) != n_components:
+        if n_components == 1:
+            weights = [1.0]
+        elif default_mixture_weights == "equal":
+            weights = np.ones(n_components, dtype=float) / float(n_components)
+        else:
+            raise ValueError(
+                "No valid mixture weights were available for an Rg weighted average. "
+                "Use collect_good_prediction_files(..., return_records=True) or "
+                "collect_best_prediction_per_run_closest_to_one(..., return_records=True), "
+                "or pass fitdata_dir so weights can be recovered from foxs_mixture_results.txt. "
+                "For a fallback only, set default_mixture_weights='equal'."
+            )
+
+    weights = np.asarray(weights, dtype=float)
+    if len(weights) != n_components:
+        raise ValueError(f"Expected {n_components} weights, got {len(weights)}")
+    if np.any(~np.isfinite(weights)):
+        raise ValueError("Mixture weights contain NaN or infinite values")
+    if np.any(weights < 0):
+        raise ValueError("Mixture weights contain negative values")
+    s = float(weights.sum())
+    if s <= 0:
+        raise ValueError("Mixture weights sum to zero")
+    return weights / s
+
+def pairwise_structure_metrics(pdb_files, compare_func, fitdata_dir: str | Path | None = None):
     """
     Compute pairwise RMSD / TM / GDT for all unique structure pairs.
 
-    Parameters
-    ----------
-    pdb_files : list of str
-        Paths to PDB files.
-    compare_func : callable
-        Function like compare_structures_vals(pdb1, pdb2).
-
-    Returns
-    -------
-    results : list of dict
-        Each entry contains indices, filenames, and metrics.
+    Mixture-aware behaviour
+    -----------------------
+    ``pdb_files`` may now be a flat list of PDB paths, records returned by
+    ``collect_*`` with ``return_records=True``, legacy ``(path(s), chi2)``
+    tuples, or a list containing mixture component lists. Mixture entries are
+    flattened and compared component-by-component.
     """
-    n = len(pdb_files)
+    components = flatten_prediction_pdbs(pdb_files, fitdata_dir=fitdata_dir, keep_metadata=True)
+    n = len(components)
     n_pairs = n * (n - 1) // 2
 
     results = []
@@ -1499,8 +1790,10 @@ def pairwise_structure_metrics(pdb_files, compare_func):
     with tqdm(total=n_pairs, desc="Pairwise comparisons", unit="pair") as pbar:
         for i in range(n):
             for j in range(i + 1, n):
-                p1 = pdb_files[i]
-                p2 = pdb_files[j]
+                c1 = components[i]
+                c2 = components[j]
+                p1 = c1["pdb"]
+                p2 = c2["pdb"]
 
                 rmsd, tm, gdt = compare_func(p1, p2)
 
@@ -1509,6 +1802,16 @@ def pairwise_structure_metrics(pdb_files, compare_func):
                     "j": j,
                     "pdb1": p1,
                     "pdb2": p2,
+                    "prediction_i1": c1.get("prediction_i"),
+                    "prediction_i2": c2.get("prediction_i"),
+                    "component_i1": c1.get("component_i"),
+                    "component_i2": c2.get("component_i"),
+                    "weight1": c1.get("weight"),
+                    "weight2": c2.get("weight"),
+                    "chi2_1": c1.get("chi2"),
+                    "chi2_2": c2.get("chi2"),
+                    "label1": c1.get("label"),
+                    "label2": c2.get("label"),
                     "rmsd": float(rmsd),
                     "tm": float(tm),
                     "gdt_ts": float(gdt),
@@ -1518,36 +1821,31 @@ def pairwise_structure_metrics(pdb_files, compare_func):
 
     return results
 
-def structure_metrics_vs_reference(pdb_files, ref_pdb, compare_func):
-    """
-    Compute RMSD / TM / GDT for each structure in `pdb_files`
-    against a single reference structure `ref_pdb`.
 
-    Parameters
-    ----------
-    pdb_files : list of str
-        Paths to PDB files to compare.
-    ref_pdb : str
-        Path to the reference PDB file.
-    compare_func : callable
-        Function like compare_structures_vals(pdb1, pdb2),
-        returning (rmsd, tm, gdt).
-
-    Returns
-    -------
-    results : list of dict
-        Each entry contains index, filenames, and metrics.
+def structure_metrics_vs_reference(pdb_files, ref_pdb, compare_func, fitdata_dir: str | Path | None = None):
     """
+    Compute RMSD / TM / GDT for each structure against ``ref_pdb``.
+
+    Mixture entries are flattened and compared component-by-component; no
+    structural weighted average is attempted.
+    """
+    components = flatten_prediction_pdbs(pdb_files, fitdata_dir=fitdata_dir, keep_metadata=True)
     results = []
 
-    with tqdm(total=len(pdb_files), desc="Comparisons vs reference", unit="pdb") as pbar:
-        for i, pdb in enumerate(pdb_files):
+    with tqdm(total=len(components), desc="Comparisons vs reference", unit="pdb") as pbar:
+        for i, comp in enumerate(components):
+            pdb = comp["pdb"]
             rmsd, tm, gdt = compare_func(pdb, ref_pdb)
 
             results.append({
                 "i": i,
                 "pdb": pdb,
                 "ref_pdb": ref_pdb,
+                "prediction_i": comp.get("prediction_i"),
+                "component_i": comp.get("component_i"),
+                "weight": comp.get("weight"),
+                "chi2": comp.get("chi2"),
+                "label": comp.get("label"),
                 "rmsd": float(rmsd),
                 "tm": float(tm),
                 "gdt_ts": float(gdt),
@@ -1557,23 +1855,12 @@ def structure_metrics_vs_reference(pdb_files, ref_pdb, compare_func):
 
     return results
 
-def structure_metrics_vs_carbonara(pdb_files, carbonara_dir, compare_func):
+
+def structure_metrics_vs_carbonara(pdb_files, carbonara_dir, compare_func, fitdata_dir: str | Path | None = None):
     """
-    Compare each PDB in `pdb_files` against Carbonara coordinate files
-    found in `carbonara_dir`.
+    Compare each component PDB against Carbonara coordinate files.
 
-    Parameters
-    ----------
-    pdb_files : list of str
-        Paths to PDB files to compare.
-    carbonara_dir : str
-        Directory containing coordinates*.dat files.
-    compare_func : callable
-        Function like compare_structures_vals_carbonara(pdb, dat).
-
-    Returns
-    -------
-    results : list of dict
+    Mixture entries are flattened and compared component-by-component.
     """
 
     coord_files = sorted(glob.glob(os.path.join(carbonara_dir, "coordinates*.dat")))
@@ -1581,20 +1868,26 @@ def structure_metrics_vs_carbonara(pdb_files, carbonara_dir, compare_func):
     if not coord_files:
         raise ValueError(f"No coordinates*.dat files found in {carbonara_dir}")
 
-    total = len(pdb_files) * len(coord_files)
+    components = flatten_prediction_pdbs(pdb_files, fitdata_dir=fitdata_dir, keep_metadata=True)
+    total = len(components) * len(coord_files)
     results = []
 
     with tqdm(total=total, desc="Comparisons vs Carbonara", unit="pair") as pbar:
 
         for dat in coord_files:
-            for i, pdb in enumerate(pdb_files):
-
+            for i, comp in enumerate(components):
+                pdb = comp["pdb"]
                 rmsd, tm, gdt = compare_func(pdb, dat)
 
                 results.append({
                     "i": i,
                     "pdb": pdb,
                     "carbonara_dat": dat,
+                    "prediction_i": comp.get("prediction_i"),
+                    "component_i": comp.get("component_i"),
+                    "weight": comp.get("weight"),
+                    "chi2": comp.get("chi2"),
+                    "label": comp.get("label"),
                     "rmsd": float(rmsd),
                     "tm": float(tm),
                     "gdt_ts": float(gdt),
@@ -1603,6 +1896,8 @@ def structure_metrics_vs_carbonara(pdb_files, carbonara_dir, compare_func):
                 pbar.update(1)
 
     return results
+
+
     
 import os
 import multiprocessing as mp
@@ -1626,25 +1921,20 @@ def _worker_compare_pair(args):
     vals = compare_structures_vals(p1, p2)  # returns array-like [rmsd, tm, gdt_ts]
     return i, j, float(vals[0]), float(vals[1]), float(vals[2])
 
-def pairwise_structure_metrics_mp(pdb_files, nprocs=None, chunksize=20, start_method=None):
-    """
-    Parallel pairwise RMSD/TM/GDT over all unique pairs.
 
-    Parameters
-    ----------
-    pdb_files : list[str]
-    nprocs : int | None
-        Defaults to os.cpu_count().
-    chunksize : int
-        Increase to reduce overhead; 20–200 often good.
-    start_method : {"fork","spawn","forkserver", None}
-        On Linux, "fork" is usually fastest. If None, use "fork" on Linux else default.
-
-    Returns
-    -------
-    results : list[dict]
+def pairwise_structure_metrics_mp(pdb_files, nprocs=None, chunksize=20, start_method=None,
+                                  fitdata_dir: str | Path | None = None):
     """
-    n = len(pdb_files)
+    Parallel pairwise RMSD/TM/GDT over all unique component pairs.
+
+    Mixture entries are flattened first. The returned rows include prediction
+    and component indices so the component comparisons can be traced back to
+    their mixture records.
+    """
+    components = flatten_prediction_pdbs(pdb_files, fitdata_dir=fitdata_dir, keep_metadata=True)
+    pdb_flat = [str(c["pdb"]) for c in components]
+
+    n = len(pdb_flat)
     n_pairs = n * (n - 1) // 2
     if n_pairs == 0:
         return []
@@ -1657,26 +1947,37 @@ def pairwise_structure_metrics_mp(pdb_files, nprocs=None, chunksize=20, start_me
         start_method = "fork" if os.name == "posix" else "spawn"
 
     ctx = mp.get_context(start_method)
-
-    # Important: pass pdb_files once (as part of each task args). For 200 files this is fine.
-    tasks = ((i, j, pdb_files) for i, j in _pair_indices(n))
+    tasks = ((i, j, pdb_flat) for i, j in _pair_indices(n))
 
     results = []
     with ctx.Pool(processes=nprocs) as pool:
         it = pool.imap_unordered(_worker_compare_pair, tasks, chunksize=chunksize)
         for i, j, rmsd, tm, gdt in tqdm(it, total=n_pairs, desc="Pairwise comparisons", unit="pair"):
+            c1 = components[i]
+            c2 = components[j]
             results.append({
-                "i": i, "j": j,
-                "pdb1": pdb_files[i],
-                "pdb2": pdb_files[j],
+                "i": i,
+                "j": j,
+                "pdb1": c1["pdb"],
+                "pdb2": c2["pdb"],
+                "prediction_i1": c1.get("prediction_i"),
+                "prediction_i2": c2.get("prediction_i"),
+                "component_i1": c1.get("component_i"),
+                "component_i2": c2.get("component_i"),
+                "weight1": c1.get("weight"),
+                "weight2": c2.get("weight"),
+                "chi2_1": c1.get("chi2"),
+                "chi2_2": c2.get("chi2"),
+                "label1": c1.get("label"),
+                "label2": c2.get("label"),
                 "rmsd": rmsd,
                 "tm": tm,
                 "gdt_ts": gdt,
             })
 
-    # Optional: sort for deterministic order
     results.sort(key=lambda d: (d["i"], d["j"]))
     return results
+
 
 def canonical_mixture_key(mix, decimals=2):
     """
@@ -1745,94 +2046,75 @@ def calc_rg_distribution(
     weighted=False,
     mixtures=None,
     keep_components=True,
+    fitdata_dir: str | Path | None = None,
+    default_mixture_weights="error",
 ):
     """
-    Calculate radius of gyration values from a flat list of PDB files.
+    Calculate radius-of-gyration values from single predictions or mixtures.
 
     Parameters
     ----------
-    pdb_files : list of str
-        Flat list of PDB paths. These may include multiple sub-structures
-        per prediction, e.g.
-            mol5_sub_0_step_10__AA.pdb
-            mol5_sub_1_step_10__AA.pdb
-            mol5_sub_2_step_10__AA.pdb
+    pdb_files : sequence
+        May be a flat list of PDB paths, records returned by
+        ``collect_good_prediction_files(..., return_records=True)`` or
+        ``collect_best_prediction_per_run_closest_to_one(..., return_records=True)``,
+        legacy ``(path(s), chi2)`` tuples, or nested lists of component PDBs.
     rg_func : callable
-        Function like radius_of_gyration(pdb_path) -> float
-    weighted : bool, optional
-        If False, return one result per pdb file.
-        If True, group pdbs by (runNo, predTag) and return one weighted
-        result per prediction.
+        Function like ``radius_of_gyration(pdb_path) -> float``.
+    weighted : bool
+        If False, return one Rg per component structure. This is the direct
+        analogue of RMSD/TM one-by-one analysis.
+        If True, return one Rg per prediction: for mixtures this is
+        ``sum_i weight_i * Rg_i`` using the approximate MultiFoXS weights.
     mixtures : dict or list, optional
-        Required if weighted=True.
-
-        Supported forms:
-        - dict keyed by (runNo, predTag)
-        - dict keyed by runNo
-        - list aligned with sorted grouped predictions
-
-    keep_components : bool, optional
-        If weighted=True, include component pdbs, component Rg values,
-        and weights in the returned records.
+        Optional explicit weights. This overrides weights stored in records.
+        Supported forms are dict keyed by ``(runNo, predTag)`` or ``runNo``, or a
+        list aligned with the sorted/normalised prediction list.
+    keep_components : bool
+        In weighted mode, include component PDBs, component Rg values and weights
+        in each returned record.
+    fitdata_dir : str or Path, optional
+        Used to recover weights/fit metadata when only raw component PDB paths
+        were supplied.
+    default_mixture_weights : {"error", "equal"}
+        What to do if a multi-component prediction has no recoverable weights.
+        The default is to raise an error rather than silently report an
+        unphysical average.
 
     Returns
     -------
-    results : list of dict
-        Unweighted mode:
-            {
-                "i": i,
-                "pdb": pdb,
-                "rg": float(...)
-            }
-
-        Weighted mode:
-            {
-                "i": i,
-                "runNo": runNo,
-                "predTag": predTag,
-                "rg": float(weighted_rg),
-                ...
-            }
-
-        In both cases, the plottable quantity is always under key "rg".
+    list of dict
+        Unweighted mode: one row per component, with key ``"rg"``.
+        Weighted mode: one row per prediction, with key ``"rg"`` equal to the
+        weighted average; component values are in ``"rg_components"`` when
+        ``keep_components=True``.
     """
-
-    pat_step = re.compile(r"mol(\d+)_sub_(\d+)_step_(\d+)__AA\.pdb$")
-    pat_end  = re.compile(r"mol(\d+)_sub_(\d+)_end__AA\.pdb$")
-
-    def parse_pdb_name(path):
-        fname = os.path.basename(path)
-
-        m = pat_step.match(fname)
-        if m:
-            runNo = int(m.group(1))
-            subNo = int(m.group(2))
-            predTag = f"step_{int(m.group(3))}"
-            return runNo, subNo, predTag
-
-        m = pat_end.match(fname)
-        if m:
-            runNo = int(m.group(1))
-            subNo = int(m.group(2))
-            predTag = "end"
-            return runNo, subNo, predTag
-
-        raise ValueError(f"Filename does not match expected pattern: {fname}")
-
+    records = _normalise_prediction_collection(pdb_files, fitdata_dir=fitdata_dir)
     results = []
 
     # --------------------------------------------------
-    # Unweighted mode: one output per pdb
+    # Unweighted mode: one output per component PDB
     # --------------------------------------------------
     if not weighted:
-        with tqdm(total=len(pdb_files), desc="Calculating Rg", unit="pdb") as pbar:
-            for i, pdb in enumerate(pdb_files):
-                rg = float(rg_func(pdb))
+        components = flatten_prediction_pdbs(records, fitdata_dir=fitdata_dir, keep_metadata=True)
+        with tqdm(total=len(components), desc="Calculating Rg", unit="pdb") as pbar:
+            for i, comp in enumerate(components):
+                pdb = comp["pdb"]
+                rg = float(rg_func(str(pdb)))
 
                 results.append({
                     "i": i,
+                    "prediction_i": comp.get("prediction_i"),
+                    "component_i": comp.get("component_i"),
                     "pdb": pdb,
                     "rg": rg,
+                    "weight": comp.get("weight"),
+                    "chi2": comp.get("chi2"),
+                    "label": comp.get("label"),
+                    "type": comp.get("type"),
+                    "runNo": comp.get("runNo"),
+                    "subNo": comp.get("subNo"),
+                    "predTag": comp.get("predTag"),
                 })
 
                 pbar.update(1)
@@ -1840,65 +2122,48 @@ def calc_rg_distribution(
         return results
 
     # --------------------------------------------------
-    # Weighted mode: one output per grouped prediction
+    # Weighted mode: one output per prediction/mixture
     # --------------------------------------------------
-    if mixtures is None:
-        raise ValueError("mixtures must be provided when weighted=True")
+    with tqdm(total=len(records), desc="Calculating weighted Rg", unit="pred") as pbar:
+        for i, rec in enumerate(records):
+            pdb_group = [Path(p) for p in rec.get("pdb_paths", [])]
+            if not pdb_group:
+                pbar.update(1)
+                continue
 
-    grouped = defaultdict(list)
-    for pdb in pdb_files:
-        runNo, subNo, predTag = parse_pdb_name(pdb)
-        grouped[(runNo, predTag)].append((subNo, pdb))
+            rg_components = [float(rg_func(str(pdb))) for pdb in pdb_group]
+            weights = _weights_for_prediction_record(
+                rec,
+                pred_i=i,
+                n_components=len(rg_components),
+                mixtures=mixtures,
+                default_mixture_weights=default_mixture_weights,
+            )
 
-    grouped_sorted = {}
-    for key, vals in grouped.items():
-        grouped_sorted[key] = [pdb for subNo, pdb in sorted(vals, key=lambda x: x[0])]
+            weighted_rg = float(np.sum(weights * np.asarray(rg_components, dtype=float)))
+            meta = _parse_prediction_pdb_metadata(pdb_group[0])
 
-    group_keys = sorted(grouped_sorted.keys(), key=lambda x: (x[0], x[1]))
-
-    with tqdm(total=len(group_keys), desc="Calculating weighted Rg", unit="pred") as pbar:
-        for i, key in enumerate(group_keys):
-            runNo, predTag = key
-            pdb_group = grouped_sorted[key]
-
-            rg_components = [float(rg_func(pdb)) for pdb in pdb_group]
-
-            if isinstance(mixtures, dict):
-                if key in mixtures:
-                    weights = mixtures[key]
-                elif runNo in mixtures:
-                    weights = mixtures[runNo]
-                else:
-                    raise KeyError(f"No mixture weights found for group {key}")
-            else:
-                try:
-                    weights = mixtures[i]
-                except IndexError:
-                    raise IndexError(f"No mixture weights supplied for group {key}")
-
-            if len(weights) != len(rg_components):
-                raise ValueError(
-                    f"Weight length mismatch for group {key}: "
-                    f"{len(weights)} weights but {len(rg_components)} pdbs"
-                )
-
-            weighted_rg = float(sum(r * w for r, w in zip(rg_components, weights)))
-
-            rec = {
+            rec_out = {
                 "i": i,
-                "runNo": runNo,
-                "predTag": predTag,
-                "rg": weighted_rg,   # <- crucial: histogram can use "rg"
+                "runNo": rec.get("run_no", meta.get("runNo")),
+                "run_no": rec.get("run_no", meta.get("run_no")),
+                "predTag": meta.get("predTag"),
+                "pred_tag": meta.get("pred_tag"),
+                "label": rec.get("label") or meta.get("label"),
+                "type": rec.get("type", "single"),
+                "chi2": rec.get("chi2"),
+                "rg": weighted_rg,
             }
 
             if keep_components:
-                rec.update({
+                rec_out.update({
                     "pdbs": pdb_group,
+                    "pdb_paths": pdb_group,
                     "rg_components": rg_components,
-                    "weights": list(weights),
+                    "weights": list(map(float, weights)),
                 })
 
-            results.append(rec)
+            results.append(rec_out)
             pbar.update(1)
 
     return results
@@ -1911,72 +2176,682 @@ def calc_rg_distribution(
 #########################################################
     
 
+def _sort_allatom_run_dir(run_dir: Path) -> int:
+    """Sort allAtomRun<N> directories by N, with unknown names at the end."""
+    m = re.fullmatch(r"allAtomRun(\d+)", Path(run_dir).name)
+    return int(m.group(1)) if m else 10**12
+
+
+_SINGLE_FOXS_LINE_NUM_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+_MIX_CHI_RE = re.compile(r"\bchi2=([0-9.eE+-]+)")
+_MIX_SCALE_RE = re.compile(r"\bscale=([0-9.eE+-]+)")
+_MIX_WEIGHTS_RE = re.compile(r"\bweights=([^\s]+)")
+_MIX_PDBS_RE = re.compile(r"\bpdbs=(.+)$")
+_MIX_LABEL_STEP_RE = re.compile(r"^mol(\d+)_step_(\d+)$")
+_MIX_LABEL_END_RE = re.compile(r"^mol(\d+)_end$")
+_MIX_LABEL_INITIAL_RE = re.compile(r"^mol(\d+)_initial$")
+
+
+def _resolve_recorded_path(path_text: str, cwd: Path | None = None, require_exists: bool = True) -> Path | None:
+    """
+    Resolve a path recorded in a FoXS summary file.
+
+    Older summary files may contain absolute paths from another checkout/session.
+    If the path contains a ``carbonara_runs`` component, rebuild it relative to
+    the current working directory as a fallback.
+    """
+    cwd = Path.cwd() if cwd is None else Path(cwd)
+    p = Path(path_text)
+
+    candidates = []
+    candidates.append(p)
+    if not p.is_absolute():
+        candidates.append(cwd / p)
+
+    try:
+        idx = p.parts.index("carbonara_runs")
+        candidates.append(cwd / Path(*p.parts[idx:]))
+    except ValueError:
+        pass
+
+    seen = set()
+    for cand in candidates:
+        cand = cand.resolve() if cand.exists() else cand
+        key = str(cand)
+        if key in seen:
+            continue
+        seen.add(key)
+        if cand.exists():
+            return cand
+
+    # If existence is not required, return the most portable candidate when possible.
+    if not require_exists:
+        try:
+            idx = p.parts.index("carbonara_runs")
+            return cwd / Path(*p.parts[idx:])
+        except ValueError:
+            return p
+
+    return None
+
+
+def _parse_run_no_from_allatom_dir(run_dir: Path) -> int | None:
+    m = re.fullmatch(r"allAtomRun(\d+)", Path(run_dir).name)
+    return int(m.group(1)) if m else None
+
+
+def _sub_sort_key_from_path(path: Path):
+    m = re.search(r"_sub_(\d+)_", Path(path).name)
+    return int(m.group(1)) if m else 10**9
+
+
+def _infer_mixture_pdbs_from_label(run_dir: Path, label: str) -> list[Path]:
+    """
+    Infer component AA PDBs for a mixture label such as ``mol7_step_12``.
+
+    Supports both the current watcher naming convention
+    ``mol7_sub_0_step_12_xyz_AA.pdb`` and older double-underscore names such as
+    ``mol7_sub_0_step_12__AA.pdb``.
+    """
+    label = str(label).strip()
+    patterns = []
+
+    m = _MIX_LABEL_STEP_RE.match(label)
+    if m:
+        run_no, step = int(m.group(1)), int(m.group(2))
+        patterns.extend([
+            f"mol{run_no}_sub_*_step_{step}_xyz_AA.pdb",
+            f"mol{run_no}_sub_*_step_{step}__AA.pdb",
+            f"mol{run_no}_sub_*_step_{step}_*_AA.pdb",
+        ])
+
+    m = _MIX_LABEL_END_RE.match(label)
+    if m:
+        run_no = int(m.group(1))
+        patterns.extend([
+            f"mol{run_no}_sub_*_end_xyz_AA.pdb",
+            f"mol{run_no}_sub_*_end__AA.pdb",
+            f"mol{run_no}_sub_*_end*_AA.pdb",
+        ])
+
+    m = _MIX_LABEL_INITIAL_RE.match(label)
+    if m:
+        run_no = int(m.group(1))
+        patterns.extend([
+            f"mol{run_no}_sub_*_initial_xyz_AA.pdb",
+            f"mol{run_no}_sub_*_initial__AA.pdb",
+            f"mol{run_no}_sub_*_initial*_AA.pdb",
+        ])
+
+    found = []
+    seen = set()
+    for pat in patterns:
+        for p in run_dir.glob(pat):
+            if p not in seen:
+                found.append(p)
+                seen.add(p)
+
+    return sorted(found, key=_sub_sort_key_from_path)
+
+
+def _parse_float_list_csv(text: str | None) -> list[float] | None:
+    if text is None:
+        return None
+    text = text.strip()
+    if not text:
+        return []
+    vals = []
+    for item in text.split(','):
+        item = item.strip()
+        if not item:
+            continue
+        vals.append(float(item))
+    return vals
+
+
+def _parse_pdb_list_csv(text: str | None, cwd: Path, require_exists: bool) -> list[Path]:
+    if text is None:
+        return []
+    paths = []
+    for item in text.split(','):
+        item = item.strip()
+        if not item:
+            continue
+        p = _resolve_recorded_path(item, cwd=cwd, require_exists=require_exists)
+        if p is not None:
+            paths.append(p)
+    return sorted(paths, key=_sub_sort_key_from_path)
+
+
+def _read_single_foxs_records(run_dir: Path, require_exists: bool = True, cwd: Path | None = None) -> list[dict]:
+    """Read ordinary single-structure FoXS records from ``foxs_results.txt``."""
+    cwd = Path.cwd() if cwd is None else Path(cwd)
+    foxs_file = run_dir / "foxs_results.txt"
+    if not foxs_file.exists():
+        return []
+
+    run_no = _parse_run_no_from_allatom_dir(run_dir)
+    records = []
+
+    for line in foxs_file.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+
+        pdb_path_str, chi_str = parts[0], parts[1]
+        if chi_str.upper() == "ERROR":
+            continue
+        if not _SINGLE_FOXS_LINE_NUM_RE.match(chi_str):
+            continue
+
+        try:
+            chi2 = float(chi_str)
+        except ValueError:
+            continue
+
+        pdb_path = _resolve_recorded_path(pdb_path_str, cwd=cwd, require_exists=require_exists)
+        if pdb_path is None:
+            continue
+
+        records.append({
+            "type": "single",
+            "run_no": run_no,
+            "label": Path(pdb_path).stem,
+            "chi2": chi2,
+            "pdb_path": pdb_path,
+            "pdb_paths": [pdb_path],
+            "weights": [1.0],
+            "scale": None,
+            "fit_file": None,
+            "summary_file": foxs_file,
+            "line": line,
+        })
+
+    return records
+
+
+def _read_mixture_foxs_records(run_dir: Path, require_exists: bool = True, cwd: Path | None = None) -> list[dict]:
+    """
+    Read approximate MultiFoXS-style records from ``foxs_mixture_results.txt``.
+
+    Expected watcher line format:
+        mol7_step_12 chi2=<...> scale=<...> weights=w0,w1,... pdbs=p0,p1,...
+    """
+    cwd = Path.cwd() if cwd is None else Path(cwd)
+    mix_file = run_dir / "foxs_mixture_results.txt"
+    if not mix_file.exists():
+        return []
+
+    records = []
+    fallback_run_no = _parse_run_no_from_allatom_dir(run_dir)
+
+    for line in mix_file.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        parts = line.split(maxsplit=1)
+        if not parts:
+            continue
+        label = parts[0]
+
+        m_chi = _MIX_CHI_RE.search(line)
+        if not m_chi:
+            continue
+        try:
+            chi2 = float(m_chi.group(1))
+        except ValueError:
+            continue
+
+        m_scale = _MIX_SCALE_RE.search(line)
+        scale = None
+        if m_scale:
+            try:
+                scale = float(m_scale.group(1))
+            except ValueError:
+                scale = None
+
+        m_weights = _MIX_WEIGHTS_RE.search(line)
+        weights = _parse_float_list_csv(m_weights.group(1) if m_weights else None)
+
+        m_pdbs = _MIX_PDBS_RE.search(line)
+        pdbs = _parse_pdb_list_csv(m_pdbs.group(1) if m_pdbs else None, cwd=cwd, require_exists=require_exists)
+        if not pdbs:
+            pdbs = _infer_mixture_pdbs_from_label(run_dir, label)
+            if require_exists:
+                pdbs = [p for p in pdbs if p.exists()]
+
+        if require_exists and not pdbs:
+            continue
+
+        if weights is not None and pdbs and len(weights) != len(pdbs):
+            # Keep the record, but make the mismatch visible rather than silently
+            # assigning incorrect component weights.
+            weight_mismatch = True
+        else:
+            weight_mismatch = False
+
+        run_no = fallback_run_no
+        m_label = re.match(r"^mol(\d+)_", label)
+        if m_label:
+            run_no = int(m_label.group(1))
+
+        fit_file = run_dir / f"{label}_foxs_mixture_fit.dat"
+
+        records.append({
+            "type": "mixture",
+            "run_no": run_no,
+            "label": label,
+            "chi2": chi2,
+            "pdb_path": None,
+            "pdb_paths": pdbs,
+            "weights": weights,
+            "scale": scale,
+            "fit_file": fit_file if fit_file.exists() else None,
+            "summary_file": mix_file,
+            "line": line,
+            "weight_mismatch": weight_mismatch,
+        })
+
+    return records
+
+
+def read_foxs_prediction_records(
+    fitdata_dir: str | Path,
+    mode: str = "auto",
+    require_exists: bool = True,
+) -> list[dict]:
+    """
+    Read FoXS scoring records from a Carbonara ``fitdata`` directory.
+
+    Parameters
+    ----------
+    fitdata_dir : str or Path
+        Directory containing ``allAtomRun*/`` folders.
+    mode : {"auto", "single", "mixture", "both"}
+        ``single`` reads ``foxs_results.txt``.
+        ``mixture`` reads ``foxs_mixture_results.txt``.
+        ``auto`` reads mixture results for a run when present, otherwise single
+        results. This is the safest default for mixed old/new analyses.
+        ``both`` reads both files if both exist.
+    require_exists : bool
+        If True, discard records whose PDB paths cannot be found.
+
+    Returns
+    -------
+    list[dict]
+        Each record has at least:
+        ``type`` ("single" or "mixture"), ``run_no``, ``label``, ``chi2``,
+        ``pdb_paths``, ``weights``, ``fit_file`` and ``summary_file``.
+    """
+    fitdata_dir = Path(fitdata_dir)
+    mode = str(mode).lower()
+    if mode not in {"auto", "single", "mixture", "both"}:
+        raise ValueError("mode must be 'auto', 'single', 'mixture', or 'both'")
+
+    records = []
+    cwd = Path.cwd()
+    for run_dir in sorted(fitdata_dir.glob("allAtomRun*"), key=_sort_allatom_run_dir):
+        if not run_dir.is_dir():
+            continue
+
+        has_mix = (run_dir / "foxs_mixture_results.txt").exists()
+        has_single = (run_dir / "foxs_results.txt").exists()
+
+        if mode == "single":
+            records.extend(_read_single_foxs_records(run_dir, require_exists=require_exists, cwd=cwd))
+        elif mode == "mixture":
+            records.extend(_read_mixture_foxs_records(run_dir, require_exists=require_exists, cwd=cwd))
+        elif mode == "both":
+            if has_single:
+                records.extend(_read_single_foxs_records(run_dir, require_exists=require_exists, cwd=cwd))
+            if has_mix:
+                records.extend(_read_mixture_foxs_records(run_dir, require_exists=require_exists, cwd=cwd))
+        else:  # auto
+            if has_mix:
+                records.extend(_read_mixture_foxs_records(run_dir, require_exists=require_exists, cwd=cwd))
+            elif has_single:
+                records.extend(_read_single_foxs_records(run_dir, require_exists=require_exists, cwd=cwd))
+
+    records.sort(key=lambda r: (
+        10**12 if r.get("run_no") is None else int(r.get("run_no")),
+        str(r.get("label", "")),
+        float(r.get("chi2", np.inf)),
+    ))
+    return records
+
+
+def _legacy_prediction_tuple(record: dict):
+    """
+    Convert a prediction record into the historical return style.
+
+    Single records become ``(Path, chi2)``.
+    Mixture records become ``([Path, ...], chi2)`` because a mixture prediction
+    has several component structures.
+    """
+    if record.get("type") == "mixture":
+        return (list(record.get("pdb_paths", [])), float(record["chi2"]))
+    return (Path(record["pdb_paths"][0]), float(record["chi2"]))
+
+
 def collect_good_prediction_files(
     fitdata_dir: str | Path,
     chi2_threshold: float,
     require_exists: bool = True,
     sort_by_chi2: bool = True,
-) -> List[Tuple[Path, float]]:
+    mode: str = "auto",
+    return_records: bool = False,
+):
     """
-    Collect AA PDB files whose FoXS chi^2 is <= chi2_threshold.
+    Collect predictions whose FoXS chi^2 is <= ``chi2_threshold``.
+
+    This now supports both Carbonara output modes:
+
+    - ordinary single-structure scoring in ``allAtomRun*/foxs_results.txt``;
+    - approximate MultiFoXS-style mixture scoring in
+      ``allAtomRun*/foxs_mixture_results.txt``.
 
     Parameters
     ----------
-    fitdata_dir : str | Path
-        Path to the fitdata directory containing allAtomRun*/foxs_results.txt
+    fitdata_dir : str or Path
+        Path to the ``fitdata`` directory containing ``allAtomRun*`` folders.
     chi2_threshold : float
         Maximum chi^2 to accept.
     require_exists : bool
-        If True, only return PDB paths that currently exist on disk.
+        If True, only return predictions whose PDB files can be found.
     sort_by_chi2 : bool
         If True, sort results by increasing chi^2.
-
-    Returns
-    -------
-    List[Tuple[Path, float]]
-        List of (pdb_path, chi2) tuples.
+    mode : {"auto", "single", "mixture", "both"}
+        Which result files to read. In ``auto`` mode, a run uses mixture results
+        when ``foxs_mixture_results.txt`` is present, otherwise ordinary single
+        FoXS results.
+    return_records : bool
+        If False, preserve the old style as far as possible:
+        single predictions return ``(Path, chi2)`` and mixture predictions return
+        ``([Path, ...], chi2)``.
+        If True, return dictionaries with metadata including weights and the
+        mixture fit curve file.
     """
-    fitdata_dir = Path(fitdata_dir)
-    good = []
-
-    for run_dir in sorted(fitdata_dir.glob("allAtomRun*")):
-        if not run_dir.is_dir():
-            continue
-
-        foxs_file = run_dir / "foxs_results.txt"
-        if not foxs_file.exists():
-            continue
-
-        for line in foxs_file.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-
-            parts = line.split()
-            if len(parts) < 2:
-                continue
-
-            pdb_path_str, chi_str = parts[0], parts[1]
-
-            if chi_str.upper() == "ERROR":
-                continue
-
-            try:
-                chi2 = float(chi_str)
-            except ValueError:
-                continue
-
-            if chi2 <= chi2_threshold:
-                pdb_path = Path(pdb_path_str)
-                if (not require_exists) or pdb_path.exists():
-                    good.append((pdb_path, chi2))
+    records = [
+        rec for rec in read_foxs_prediction_records(
+            fitdata_dir,
+            mode=mode,
+            require_exists=require_exists,
+        )
+        if float(rec["chi2"]) <= float(chi2_threshold)
+    ]
 
     if sort_by_chi2:
-        good.sort(key=lambda x: x[1])
+        records.sort(key=lambda r: float(r["chi2"]))
 
-    return good
+    if return_records:
+        return records
+    return [_legacy_prediction_tuple(rec) for rec in records]
 
 
+def _normalise_prediction_record(prediction, fitdata_dir: str | Path | None = None) -> dict:
+    """
+    Convert a prediction specification into the internal record dictionary form.
+
+    Accepted inputs
+    ---------------
+    - record dicts returned by ``collect_*`` with ``return_records=True``;
+    - legacy ``(Path, chi2)`` or ``([Path, ...], chi2)`` tuples;
+    - a single PDB path;
+    - a raw list of component PDB paths for one mixture prediction.
+    """
+    if isinstance(prediction, dict):
+        return prediction
+
+    # Raw list of component PDB paths for one mixture prediction.
+    if _is_path_sequence(prediction):
+        pdb_paths = [Path(p) for p in prediction]
+        recovered = _try_recover_prediction_record_from_files(
+            pdb_paths,
+            fitdata_dir=fitdata_dir,
+            chi2=None,
+        )
+        if recovered is not None:
+            return recovered
+
+        meta = _parse_prediction_pdb_metadata(pdb_paths[0]) if pdb_paths else {}
+        rec_type = "mixture" if len(pdb_paths) > 1 else "single"
+        return {
+            "type": rec_type,
+            "run_no": meta.get("runNo"),
+            "label": meta.get("label"),
+            "chi2": None,
+            "pdb_path": pdb_paths[0] if rec_type == "single" and pdb_paths else None,
+            "pdb_paths": pdb_paths,
+            "weights": [1.0] if rec_type == "single" else None,
+            "scale": None,
+            "fit_file": None,
+            "summary_file": None,
+            "line": "",
+        }
+
+    # Legacy collect_* style: (path_or_paths, chi2)
+    if isinstance(prediction, tuple) and len(prediction) >= 2:
+        paths, chi2 = prediction[0], float(prediction[1])
+        if _is_path_sequence(paths):
+            pdb_paths = [Path(p) for p in paths]
+            rec_type = "mixture" if len(pdb_paths) > 1 else "single"
+        else:
+            pdb_paths = [Path(paths)]
+            rec_type = "single"
+
+        recovered = _try_recover_prediction_record_from_files(
+            pdb_paths,
+            fitdata_dir=fitdata_dir,
+            chi2=chi2,
+        )
+        if recovered is not None:
+            return recovered
+
+        meta = _parse_prediction_pdb_metadata(pdb_paths[0]) if pdb_paths else {}
+        return {
+            "type": rec_type,
+            "run_no": meta.get("runNo"),
+            "label": meta.get("label"),
+            "chi2": chi2,
+            "pdb_path": pdb_paths[0] if rec_type == "single" and pdb_paths else None,
+            "pdb_paths": pdb_paths,
+            "weights": [1.0] if rec_type == "single" else None,
+            "scale": None,
+            "fit_file": None,
+            "summary_file": None,
+            "line": "",
+        }
+
+    if _is_pathlike_object(prediction):
+        p = Path(prediction)
+        recovered = _try_recover_prediction_record_from_files([p], fitdata_dir=fitdata_dir, chi2=None)
+        if recovered is not None:
+            return recovered
+
+        meta = _parse_prediction_pdb_metadata(p)
+        return {
+            "type": "single",
+            "run_no": meta.get("runNo"),
+            "label": meta.get("label") or p.stem,
+            "chi2": None,
+            "pdb_path": p,
+            "pdb_paths": [p],
+            "weights": [1.0],
+            "scale": None,
+            "fit_file": None,
+            "summary_file": None,
+            "line": "",
+        }
+
+    raise TypeError(
+        "prediction must be a record dict, a legacy (path(s), chi2) tuple, "
+        "a path, or a raw list of component paths"
+    )
+
+
+def load_foxs_fit_curve(fit_file: str | Path, max_q: float | None = None):
+    """
+    Load a FoXS or mixture-fit curve file and return plotting arrays.
+
+    Supported column layouts:
+    - mixture curve: ``q I_exp sigma I_fit``;
+    - FoXS-like 4-column curve: ``q I_exp sigma I_fit``;
+    - FoXS-like 3-column curve: ``q I_exp I_fit``.
+    """
+    fit_file = Path(fit_file)
+    data = np.loadtxt(fit_file)
+    if data.ndim == 1:
+        data = data[None, :]
+    if data.shape[1] < 3:
+        raise ValueError(f"Fit curve must have at least 3 columns: {fit_file}")
+
+    q = data[:, 0].astype(float)
+    if data.shape[1] >= 4:
+        i_exp = data[:, 1].astype(float)
+        sigma = data[:, 2].astype(float)
+        i_fit = data[:, 3].astype(float)
+        sigma = np.where(sigma <= 0, 1.0, sigma)
+        residual = (i_exp - i_fit) / sigma
+    else:
+        i_exp = data[:, 1].astype(float)
+        sigma = None
+        i_fit = data[:, 2].astype(float)
+        residual = i_exp - i_fit
+
+    if max_q is not None:
+        mask = q <= float(max_q)
+        q = q[mask]
+        i_exp = i_exp[mask]
+        i_fit = i_fit[mask]
+        residual = residual[mask]
+        if sigma is not None:
+            sigma = sigma[mask]
+
+    return {
+        "q": q,
+        "i_exp": i_exp,
+        "sigma": sigma,
+        "i_fit": i_fit,
+        "residual": residual,
+        "fit_file": fit_file,
+    }
+
+
+def plot_foxs_fit_curve(
+    fit_file: str | Path,
+    chi2: float | None = None,
+    title: str | None = None,
+    max_q: float | None = None,
+    figsize=(6.0, 6.0),
+    show=True,
+    save_path=None,
+):
+    """
+    Plot a stored FoXS fit curve, including approximate MultiFoXS curves written
+    by the watcher as ``*_foxs_mixture_fit.dat``.
+    """
+    curve = load_foxs_fit_curve(fit_file, max_q=max_q)
+    q = curve["q"]
+    i_exp = curve["i_exp"]
+    i_fit = curve["i_fit"]
+    residual = curve["residual"]
+
+    fig = plt.figure(figsize=figsize)
+    gs = fig.add_gridspec(2, 1, height_ratios=[3, 1], hspace=0.08)
+    ax1 = fig.add_subplot(gs[0])
+    ax2 = fig.add_subplot(gs[1], sharex=ax1)
+
+    ax1.plot(q, i_exp, "o", ms=4, label="Experimental")
+    ax1.plot(q, i_fit, "-", lw=2, label="Approx. MultiFoXS fit" if "mixture" in Path(fit_file).name else "FoXS fit")
+    ax1.set_yscale("log")
+    ax1.set_ylabel("Intensity")
+
+    if title is None:
+        title = "FoXS fit"
+    if chi2 is not None:
+        title += f"  (chi² = {float(chi2):.4g})"
+    ax1.set_title(title)
+    ax1.legend()
+    ax1.tick_params(axis="x", labelbottom=False)
+
+    ax2.axhline(0.0, lw=1)
+    ax2.plot(q, residual, "o", ms=3)
+    ax2.set_xlabel("q")
+    ax2.set_ylabel("Residual")
+
+    plt.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig
+
+
+def plot_prediction_foxs_fit(prediction, fitdata_dir: str | Path | None = None, max_q=None, **kwargs):
+    """
+    Plot the stored SAXS/FoXS fit for a prediction record.
+
+    For mixture records this uses the watcher's precomputed
+    ``*_foxs_mixture_fit.dat`` file, i.e. the approximate MultiFoXS fit. For
+    ordinary single records, a stored fit curve is only available if ``fit_file``
+    is present in the record; otherwise use ``show_structure_and_foxs_side_by_side``
+    to rerun FoXS for that single PDB.
+    """
+    rec = _normalise_prediction_record(prediction, fitdata_dir=fitdata_dir)
+    fit_file = rec.get("fit_file")
+    if fit_file is None:
+        raise ValueError(
+            "No stored fit curve is associated with this prediction. "
+            "For single-PDB predictions, use show_structure_and_foxs_side_by_side(...) "
+            "to rerun FoXS, or pass a record with fit_file set."
+        )
+    return plot_foxs_fit_curve(
+        fit_file,
+        chi2=rec.get("chi2"),
+        title=("Approx. MultiFoXS fit: " + str(rec.get("label"))) if rec.get("type") == "mixture" else None,
+        max_q=max_q,
+        **kwargs,
+    )
+
+
+def visualisePredictionMixture(pdb_paths, weights=None, ncols=3, panel_width=350, panel_height=300, show_labels=True):
+    """
+    Visualise the component structures of one mixture prediction.
+
+    ``pdb_paths`` may be a list of paths or a prediction record returned by
+    ``collect_good_prediction_files(..., return_records=True)``.
+    """
+    if isinstance(pdb_paths, dict):
+        rec = pdb_paths
+        weights = rec.get("weights") if weights is None else weights
+        pdb_paths = rec.get("pdb_paths", [])
+    elif isinstance(pdb_paths, tuple) and len(pdb_paths) >= 1:
+        # Legacy collect_good_prediction_files tuple: ([pdbs], chi2)
+        first = pdb_paths[0]
+        if isinstance(first, (list, tuple)):
+            pdb_paths = first
+
+    pdb_paths = [Path(p) for p in pdb_paths]
+    if not pdb_paths:
+        raise ValueError("No component PDB files supplied for mixture visualisation.")
+
+    if show_labels and weights is not None and len(weights) == len(pdb_paths):
+        print("Mixture weights:")
+        for p, w in zip(pdb_paths, weights):
+            print(f"  {Path(p).name}: {float(w):.4g}")
+
+    return visualisePrediction_panel(
+        pdb_paths,
+        ncols=ncols,
+        panel_width=panel_width,
+        panel_height=panel_height,
+        show_labels=show_labels,
+        color_by_chain=True,
+    )
 
 
 ############################################
@@ -1987,6 +2862,33 @@ def collect_good_prediction_files(
 
 
 def visualisePredictionIndividual(aa_path):
+    """
+    Visualise a single AA PDB, or the component PDBs of a mixture prediction.
+
+    Backwards compatible behaviour:
+      visualisePredictionIndividual("model_AA.pdb")
+
+    New mixture-aware behaviour:
+      visualisePredictionIndividual(record)
+      visualisePredictionIndividual([pdb0, pdb1, ...])
+      visualisePredictionIndividual(([pdb0, pdb1, ...], chi2))
+    """
+    if isinstance(aa_path, dict):
+        if aa_path.get("type") == "mixture" or len(aa_path.get("pdb_paths", [])) > 1:
+            return visualisePredictionMixture(aa_path)
+        paths = aa_path.get("pdb_paths", [])
+        if paths:
+            aa_path = paths[0]
+
+    elif isinstance(aa_path, tuple) and len(aa_path) >= 1:
+        first = aa_path[0]
+        if isinstance(first, (list, tuple)):
+            return visualisePredictionMixture(first)
+        aa_path = first
+
+    elif isinstance(aa_path, (list, tuple)) and not isinstance(aa_path, (str, bytes)):
+        return visualisePredictionMixture(aa_path)
+
     if not HAS_PY3DMOL:
         _warn_missing_py3dmol()
         return None
@@ -2009,6 +2911,7 @@ def visualisePredictionIndividual(aa_path):
 
     view.zoomTo()
     view.show()
+    return view
 
 
 def visualisePredictionComp(pdb1, pdb2, do_superpose=True):
@@ -2448,97 +3351,1097 @@ def show_structure_and_foxs_side_by_side(
                 pass
 
 
-def collect_best_prediction_per_run_closest_to_one(
-    fitdata_dir: str | Path,
-    require_exists: bool = True,
+def show_prediction_record_and_foxs_side_by_side(
+    prediction,
+    saxs_name=None,
+    foxs_cmd="pyfoxs",
+    max_q=None,
+    fitdata_dir: str | Path | None = None,
+    structure_width=480,
+    structure_height=420,
+    plot_width=520,
 ):
     """
-    For each run number from 1 up to the maximum detected allAtomRun*,
-    select the prediction whose FoXS chi^2 is closest to 1.
+    Display a prediction plus its SAXS fit.
 
-    Missing runs or runs with no valid prediction return None.
+    For ordinary single-PDB predictions this delegates to
+    ``show_structure_and_foxs_side_by_side`` and reruns FoXS unless a stored
+    ``fit_file`` is supplied in the record.
+
+    For mixture predictions this displays all component structures in a panel
+    and plots the stored approximate MultiFoXS curve
+    ``*_foxs_mixture_fit.dat``.
+    """
+    rec = _normalise_prediction_record(prediction, fitdata_dir=fitdata_dir)
+
+    if rec.get("type") != "mixture" and len(rec.get("pdb_paths", [])) <= 1:
+        pdb = rec.get("pdb_path") or rec.get("pdb_paths", [None])[0]
+        if rec.get("fit_file") is None:
+            if saxs_name is None:
+                raise ValueError("saxs_name is required to rerun FoXS for a single-PDB prediction.")
+            return show_structure_and_foxs_side_by_side(
+                pdb,
+                saxs_name,
+                foxs_cmd=foxs_cmd,
+                max_q=max_q,
+                structure_width=structure_width,
+                structure_height=structure_height,
+                plot_width=plot_width,
+            )
+
+    pdbs = [Path(p) for p in rec.get("pdb_paths", [])]
+    if not pdbs:
+        raise ValueError("Prediction record contains no PDB paths.")
+
+    fit_file = rec.get("fit_file")
+    if fit_file is None:
+        raise ValueError(
+            "No stored mixture fit curve found for this prediction. "
+            "Use collect_good_prediction_files(..., return_records=True) so the "
+            "record includes fit_file, or pass fitdata_dir to recover it."
+        )
+
+    # Build structure panel HTML.
+    if not HAS_PY3DMOL:
+        _warn_missing_py3dmol()
+        viewer_html = "<div style='padding:20px;border:1px solid #ddd;border-radius:6px;'>py3Dmol is not available.</div>"
+    else:
+        n = len(pdbs)
+        ncols = min(3, max(1, n))
+        nrows = (n + ncols - 1) // ncols
+        view = py3Dmol.view(
+            viewergrid=(nrows, ncols),
+            width=ncols * structure_width,
+            height=nrows * structure_height,
+            linked=False,
+        )
+        weights = rec.get("weights")
+        palette = ["blue", "green", "red", "yellow", "cyan", "magenta", "orange", "purple", "lime", "gray"]
+
+        for k, pdb in enumerate(pdbs):
+            r = k // ncols
+            c = k % ncols
+            viewer = (r, c)
+            structure_data, fmt = _read_structure_for_viewer(pdb)
+            view.addModel(structure_data, fmt, viewer=viewer)
+            chains = _chains_present_in_structure(structure_data, fmt)
+            if chains:
+                for chain_i, ch in enumerate(chains):
+                    view.setStyle(
+                        {"model": 0, "chain": ch},
+                        {"cartoon": {"color": palette[chain_i % len(palette)], "opacity": 0.9}},
+                        viewer=viewer,
+                    )
+            else:
+                view.setStyle({"model": 0}, {"cartoon": {"color": palette[k % len(palette)], "opacity": 0.9}}, viewer=viewer)
+            label = Path(pdb).name
+            if weights is not None and k < len(weights):
+                label += f"\nw={float(weights[k]):.3g}"
+            view.addLabel(
+                label,
+                {"fontSize": 10, "backgroundColor": "white", "backgroundOpacity": 0.7, "fontColor": "black", "borderThickness": 0, "inFront": True},
+                viewer=viewer,
+            )
+            view.zoomTo(viewer=viewer)
+
+        silent_out = io.StringIO()
+        silent_err = io.StringIO()
+        with contextlib.redirect_stdout(silent_out), contextlib.redirect_stderr(silent_err):
+            viewer_html = view._make_html()
+
+    # Build SAXS plot HTML from stored mixture curve.
+    curve = load_foxs_fit_curve(fit_file, max_q=max_q)
+    fig = plt.figure(figsize=(6.0, 6.0))
+    gs = fig.add_gridspec(2, 1, height_ratios=[3, 1], hspace=0.08)
+    ax1 = fig.add_subplot(gs[0])
+    ax2 = fig.add_subplot(gs[1], sharex=ax1)
+    ax1.plot(curve["q"], curve["i_exp"], "o", ms=4, label="Experimental")
+    ax1.plot(curve["q"], curve["i_fit"], "-", lw=2, label="Approx. MultiFoXS fit")
+    ax1.set_yscale("log")
+    ax1.set_ylabel("Intensity")
+    title = f"Approx. MultiFoXS fit: {rec.get('label', '')}"
+    if rec.get("chi2") is not None:
+        title += f"  (chi² = {float(rec['chi2']):.4g})"
+    ax1.set_title(title)
+    ax1.legend()
+    ax1.tick_params(axis="x", labelbottom=False)
+    ax2.axhline(0.0, lw=1)
+    ax2.plot(curve["q"], curve["residual"], "o", ms=3)
+    ax2.set_xlabel("q")
+    ax2.set_ylabel("Residual")
+    plt.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    plot_b64 = base64.b64encode(buf.read()).decode("utf-8")
+    plot_html = f'<img src="data:image/png;base64,{plot_b64}" style="width:{plot_width}px; max-width:100%;">'
+
+    html = f"""
+    <div style="display:flex; flex-wrap:wrap; gap:20px; align-items:flex-start; margin-top:10px; margin-bottom:10px;">
+        <div style="flex:0 0 auto;">
+            <div style="font-weight:600; margin-bottom:8px;">Mixture component structures</div>
+            {viewer_html}
+        </div>
+        <div style="flex:0 0 auto;">
+            <div style="font-weight:600; margin-bottom:8px;">Approx. MultiFoXS fit</div>
+            {plot_html}
+        </div>
+    </div>
+    """
+    display(HTML(html))
+    return {"record": rec, "fit_file": fit_file}
+
+
+def visualisePrediction_panel(
+    file_list,
+    ncols=3,
+    panel_width=350,
+    panel_height=300,
+    max_panels=None,
+    show_labels=True,
+    color_by_chain=True,
+):
+    """
+    Display a set of structures side by side in a py3Dmol viewer grid.
+
+    Each panel contains one independent structure. No alignment or
+    comparison against a reference structure is performed.
 
     Parameters
     ----------
-    fitdata_dir : str | Path
-        Path to the fitdata directory containing allAtomRun*/foxs_results.txt
-    require_exists : bool
-        If True, only consider PDB paths that currently exist on disk.
+    file_list : sequence of str or Path
+        Structure files to display.
+
+    ncols : int
+        Number of columns in the viewer grid.
+
+    panel_width, panel_height : int
+        Approximate dimensions of each panel in pixels.
+
+    max_panels : int or None
+        Maximum number of structures to display.
+
+    show_labels : bool
+        Show the filename in each panel.
+
+    color_by_chain : bool
+        If True, assign a different colour to each chain.
+        If False, display the whole structure in one colour.
+
+    Returns
+    -------
+    py3Dmol.view or None
+    """
+    if not HAS_PY3DMOL:
+        _warn_missing_py3dmol()
+        return None
+
+    file_list = list(file_list)
+
+    if max_panels is not None:
+        file_list = file_list[:max_panels]
+
+    n = len(file_list)
+
+    if n == 0:
+        print("No files to display.")
+        return None
+
+    ncols = max(1, int(ncols))
+    nrows = (n + ncols - 1) // ncols
+
+    view = py3Dmol.view(
+        viewergrid=(nrows, ncols),
+        width=ncols * panel_width,
+        height=nrows * panel_height,
+        linked=False,
+    )
+
+    palette = [
+        "blue",
+        "green",
+        "red",
+        "yellow",
+        "cyan",
+        "magenta",
+        "orange",
+        "purple",
+        "lime",
+        "gray",
+    ]
+
+    for k, structure_file in enumerate(file_list):
+        r = k // ncols
+        c = k % ncols
+        viewer = (r, c)
+
+        try:
+            structure_data, structure_fmt = _read_structure_for_viewer(
+                structure_file
+            )
+
+            view.addModel(
+                structure_data,
+                structure_fmt,
+                viewer=viewer,
+            )
+
+            chains = _chains_present_in_structure(
+                structure_data,
+                structure_fmt,
+            )
+
+            if color_by_chain and chains:
+                for chain_i, chain_id in enumerate(chains):
+                    view.setStyle(
+                        {
+                            "model": 0,
+                            "chain": chain_id,
+                        },
+                        {
+                            "cartoon": {
+                                "color": palette[chain_i % len(palette)],
+                                "opacity": 0.9,
+                            }
+                        },
+                        viewer=viewer,
+                    )
+            else:
+                view.setStyle(
+                    {"model": 0},
+                    {
+                        "cartoon": {
+                            "color": palette[k % len(palette)],
+                            "opacity": 0.9,
+                        }
+                    },
+                    viewer=viewer,
+                )
+
+            view.zoomTo(viewer=viewer)
+
+            if show_labels:
+                view.addLabel(
+                    Path(structure_file).name,
+                    {
+                        "fontSize": 10,
+                        "backgroundColor": "white",
+                        "backgroundOpacity": 0.7,
+                        "fontColor": "black",
+                        "borderThickness": 0,
+                        "inFront": True,
+                    },
+                    viewer=viewer,
+                )
+
+        except Exception as e:
+            print(f"Failed for {structure_file}: {e}")
+
+            view.addLabel(
+                f"Failed:\n{Path(structure_file).name}",
+                {
+                    "fontSize": 12,
+                    "backgroundColor": "mistyrose",
+                    "backgroundOpacity": 0.8,
+                    "fontColor": "black",
+                    "borderThickness": 0,
+                    "inFront": True,
+                },
+                viewer=viewer,
+            )
+
+    view.show()
+    return view
+
+def collect_best_prediction_per_run_closest_to_one(
+    fitdata_dir: str | Path,
+    require_exists: bool = True,
+    mode: str = "auto",
+    return_records: bool = False,
+    target_chi2: float = 1.0,
+):
+    """
+    For each run number from 1 up to the maximum detected ``allAtomRun*``,
+    select the prediction whose FoXS chi^2 is closest to ``target_chi2``.
+
+    This now supports both ordinary single-structure FoXS summaries
+    (``foxs_results.txt``) and mixture summaries
+    (``foxs_mixture_results.txt``). In ``mode='auto'`` a run uses the mixture
+    summary when it exists, otherwise the ordinary single summary.
+
+    Missing runs or runs with no valid prediction return ``None``.
 
     Returns
     -------
     list
-        List indexed by run number - 1.
-        Each entry is either:
-            (pdb_path: Path, chi2: float)
-        or:
-            None
+        If ``return_records=False``:
+            single run entry   -> ``(Path, chi2)``
+            mixture run entry  -> ``([Path, ...], chi2)``
+        If ``return_records=True``:
+            each non-missing entry is a metadata dictionary containing
+            ``pdb_paths``, ``weights``, ``fit_file`` and ``chi2``.
     """
     fitdata_dir = Path(fitdata_dir)
 
-    run_map = {}
+    run_dirs = {}
     max_run = 0
-
     for p in fitdata_dir.glob("allAtomRun*"):
         if not p.is_dir():
             continue
-        m = re.match(r"allAtomRun(\d+)$", p.name)
+        m = re.fullmatch(r"allAtomRun(\d+)", p.name)
         if not m:
             continue
-
         run_no = int(m.group(1))
-        run_map[run_no] = p
+        run_dirs[run_no] = p
         max_run = max(max_run, run_no)
 
     if max_run == 0:
         return []
 
+    all_records = read_foxs_prediction_records(
+        fitdata_dir,
+        mode=mode,
+        require_exists=require_exists,
+    )
+    by_run = defaultdict(list)
+    for rec in all_records:
+        run_no = rec.get("run_no")
+        if run_no is not None:
+            by_run[int(run_no)].append(rec)
+
     results = []
-
     for run_no in range(1, max_run + 1):
-        run_dir = run_map.get(run_no)
-
-        if run_dir is None:
+        recs = by_run.get(run_no, [])
+        if not recs:
             results.append(None)
             continue
 
-        foxs_file = run_dir / "foxs_results.txt"
-        if not foxs_file.exists():
-            results.append(None)
-            continue
-
-        best_entry = None
-        best_score = None  # smaller is better, score = abs(chi2 - 1)
-
-        for line in foxs_file.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-
-            parts = line.split()
-            if len(parts) < 2:
-                continue
-
-            pdb_path_str, chi_str = parts[0], parts[1]
-
-            if chi_str.upper() == "ERROR":
-                continue
-
-            try:
-                chi2 = float(chi_str)
-            except ValueError:
-                continue
-
-            pdb_path = Path(pdb_path_str)
-            if require_exists and not pdb_path.exists():
-                continue
-
-            score = abs(chi2 - 1.0)
-
-            if best_score is None or score < best_score:
-                best_score = score
-                best_entry = (pdb_path, chi2)
-
-        results.append(best_entry)
+        best = min(recs, key=lambda r: abs(float(r["chi2"]) - float(target_chi2)))
+        results.append(best if return_records else _legacy_prediction_tuple(best))
 
     return results
+
+#########################################################
+#
+# Weighted, diversity-constrained selection of structures
+# for seeding a new Carbonara run
+#
+#########################################################
+
+
+def pairwise_results_to_matrices(pdb_files, pairwise_results):
+    """Convert ``pairwise_structure_metrics`` output into dense matrices.
+
+    Parameters
+    ----------
+    pdb_files : sequence of path-like
+        Structures in the same order used for the pairwise calculation.
+    pairwise_results : sequence of dict
+        Output from ``pairwise_structure_metrics`` or
+        ``pairwise_structure_metrics_mp``.
+
+    Returns
+    -------
+    rmsd_matrix, tm_matrix, gdt_matrix : np.ndarray
+        Symmetric ``(N, N)`` matrices. Their diagonals are 0, 1 and 100,
+        respectively.
+    """
+    n = len(pdb_files)
+    rmsd = np.full((n, n), np.nan, dtype=float)
+    tm = np.full((n, n), np.nan, dtype=float)
+    gdt = np.full((n, n), np.nan, dtype=float)
+
+    np.fill_diagonal(rmsd, 0.0)
+    np.fill_diagonal(tm, 1.0)
+    np.fill_diagonal(gdt, 100.0)
+
+    for rec in pairwise_results:
+        i = int(rec["i"])
+        j = int(rec["j"])
+        if not (0 <= i < n and 0 <= j < n and i != j):
+            raise ValueError(f"Invalid pair indices ({i}, {j}) for N={n}.")
+
+        rmsd[i, j] = rmsd[j, i] = float(rec["rmsd"])
+        tm[i, j] = tm[j, i] = float(rec["tm"])
+        gdt[i, j] = gdt[j, i] = float(rec["gdt_ts"])
+
+    missing = np.argwhere(np.isnan(rmsd))
+    if len(missing):
+        i, j = map(int, missing[0])
+        raise ValueError(
+            "The pairwise results are incomplete; "
+            f"the first missing RMSD is for pair ({i}, {j})."
+        )
+
+    return rmsd, tm, gdt
+
+
+def _passes_seed_separation(
+    candidate,
+    selected,
+    rmsd_matrix,
+    tm_matrix,
+    min_rmsd=None,
+    max_tm=None,
+    separation_rule="both",
+):
+    """Return True when a candidate is sufficiently distinct from all seeds."""
+    if separation_rule not in {"both", "either"}:
+        raise ValueError("separation_rule must be 'both' or 'either'.")
+
+    for other in selected:
+        tests = []
+        if min_rmsd is not None:
+            tests.append(rmsd_matrix[candidate, other] >= float(min_rmsd))
+        if max_tm is not None:
+            tests.append(tm_matrix[candidate, other] <= float(max_tm))
+
+        if not tests:
+            continue
+
+        pair_ok = all(tests) if separation_rule == "both" else any(tests)
+        if not pair_ok:
+            return False
+
+    return True
+
+
+def _medoid_objective(distance_matrix, weights, medoids, distance_power=2.0):
+    """Weighted distance-to-nearest-medoid objective."""
+    medoids = np.asarray(medoids, dtype=int)
+    nearest = np.min(distance_matrix[:, medoids], axis=1)
+    return float(np.sum(weights * nearest**float(distance_power)))
+
+
+def _constrained_weighted_kmedoids(
+    distance_matrix,
+    weights,
+    n_select,
+    rmsd_matrix,
+    tm_matrix,
+    min_rmsd=None,
+    max_tm=None,
+    separation_rule="both",
+    distance_power=2.0,
+    n_starts=20,
+    max_swap_passes=50,
+):
+    """PAM-like weighted k-medoids with pairwise seed-separation constraints.
+
+    This is deliberately dependency-free. It uses several deterministic greedy
+    starts followed by medoid/non-medoid swap refinement.
+    """
+    distance_matrix = np.asarray(distance_matrix, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    n = len(weights)
+
+    if distance_matrix.shape != (n, n):
+        raise ValueError("distance_matrix has the wrong shape.")
+    if not 1 <= int(n_select) <= n:
+        raise ValueError("n_select must lie between 1 and the retained ensemble size.")
+
+    n_select = int(n_select)
+    n_starts = max(1, min(int(n_starts), n))
+
+    # Prefer good one-medoid solutions as deterministic starting points.
+    singleton_cost = np.sum(
+        weights[:, None] * distance_matrix**float(distance_power), axis=0
+    )
+    start_candidates = np.argsort(singleton_cost, kind="stable")[:n_starts]
+
+    best_medoids = None
+    best_objective = np.inf
+
+    for first in start_candidates:
+        medoids = [int(first)]
+
+        # Greedily add the candidate giving the greatest objective reduction.
+        while len(medoids) < n_select:
+            best_add = None
+            best_add_obj = np.inf
+
+            for candidate in range(n):
+                if candidate in medoids:
+                    continue
+                if not _passes_seed_separation(
+                    candidate,
+                    medoids,
+                    rmsd_matrix,
+                    tm_matrix,
+                    min_rmsd=min_rmsd,
+                    max_tm=max_tm,
+                    separation_rule=separation_rule,
+                ):
+                    continue
+
+                trial = medoids + [candidate]
+                obj = _medoid_objective(
+                    distance_matrix, weights, trial, distance_power=distance_power
+                )
+                if obj < best_add_obj - 1e-12:
+                    best_add_obj = obj
+                    best_add = candidate
+
+            if best_add is None:
+                medoids = None
+                break
+            medoids.append(int(best_add))
+
+        if medoids is None:
+            continue
+
+        # Standard PAM-style local swap refinement, respecting separation.
+        current_obj = _medoid_objective(
+            distance_matrix, weights, medoids, distance_power=distance_power
+        )
+
+        for _ in range(int(max_swap_passes)):
+            swap_medoids = None
+            swap_obj = current_obj
+            medoid_set = set(medoids)
+
+            for pos in range(n_select):
+                fixed = medoids[:pos] + medoids[pos + 1 :]
+                for candidate in range(n):
+                    if candidate in medoid_set:
+                        continue
+                    if not _passes_seed_separation(
+                        candidate,
+                        fixed,
+                        rmsd_matrix,
+                        tm_matrix,
+                        min_rmsd=min_rmsd,
+                        max_tm=max_tm,
+                        separation_rule=separation_rule,
+                    ):
+                        continue
+
+                    trial = list(medoids)
+                    trial[pos] = candidate
+                    obj = _medoid_objective(
+                        distance_matrix,
+                        weights,
+                        trial,
+                        distance_power=distance_power,
+                    )
+                    if obj < swap_obj - 1e-12:
+                        swap_obj = obj
+                        swap_medoids = trial
+
+            if swap_medoids is None:
+                break
+
+            medoids = swap_medoids
+            current_obj = swap_obj
+
+        if current_obj < best_objective - 1e-12:
+            best_objective = current_obj
+            best_medoids = list(map(int, medoids))
+
+    if best_medoids is None:
+        raise ValueError(
+            f"Could not find {n_select} mutually separated structures. "
+            "Reduce n_select, lower min_rmsd, raise max_tm, or use "
+            "separation_rule='either'."
+        )
+
+    medoids = np.asarray(best_medoids, dtype=int)
+    labels = np.argmin(distance_matrix[:, medoids], axis=1)
+
+    return medoids, labels, best_objective
+
+
+def _highest_weight_representatives_with_separation(
+    labels,
+    medoids,
+    weights,
+    rmsd_matrix,
+    tm_matrix,
+    min_rmsd=None,
+    max_tm=None,
+    separation_rule="both",
+):
+    """Choose one high-weight member per cluster without breaking separation.
+
+    The globally best feasible combination is found by a small branch-and-bound
+    search. For the intended M=3--4 this is inexpensive. The medoid combination
+    is always a feasible fallback because the clustering itself was constrained.
+    """
+    labels = np.asarray(labels, dtype=int)
+    medoids = np.asarray(medoids, dtype=int)
+    weights = np.asarray(weights, dtype=float)
+    n_clusters = len(medoids)
+
+    candidates = []
+    for cluster in range(n_clusters):
+        members = np.flatnonzero(labels == cluster)
+        # Ensure the medoid remains available even under pathological ties.
+        if medoids[cluster] not in members:
+            members = np.append(members, medoids[cluster])
+        members = sorted(
+            set(map(int, members)),
+            key=lambda i: (-weights[i], i),
+        )
+        candidates.append(members)
+
+    # Search clusters with fewer choices first, retaining original cluster IDs.
+    cluster_order = sorted(range(n_clusters), key=lambda c: len(candidates[c]))
+    upper_best = [max(weights[i] for i in candidates[c]) for c in cluster_order]
+    remaining_upper = np.cumsum(upper_best[::-1])[::-1]
+
+    best_score = -np.inf
+    best_by_cluster = None
+    chosen = []
+    chosen_by_cluster = {}
+
+    def recurse(depth, score):
+        nonlocal best_score, best_by_cluster
+
+        if depth == n_clusters:
+            if score > best_score + 1e-15:
+                best_score = score
+                best_by_cluster = dict(chosen_by_cluster)
+            return
+
+        if score + remaining_upper[depth] <= best_score + 1e-15:
+            return
+
+        cluster = cluster_order[depth]
+        for candidate in candidates[cluster]:
+            if not _passes_seed_separation(
+                candidate,
+                chosen,
+                rmsd_matrix,
+                tm_matrix,
+                min_rmsd=min_rmsd,
+                max_tm=max_tm,
+                separation_rule=separation_rule,
+            ):
+                continue
+
+            chosen.append(candidate)
+            chosen_by_cluster[cluster] = candidate
+            recurse(depth + 1, score + weights[candidate])
+            chosen.pop()
+            del chosen_by_cluster[cluster]
+
+    recurse(0, 0.0)
+
+    if best_by_cluster is None:
+        # This should not normally occur, but gives a safe deterministic fallback.
+        return medoids.copy()
+
+    return np.asarray(
+        [best_by_cluster[c] for c in range(n_clusters)], dtype=int
+    )
+
+
+def select_weighted_carbonara_seeds(
+    pdb_files,
+    weights,
+    n_select=4,
+    cumulative_weight=0.95,
+    compare_func=compare_structures_vals,
+    pairwise_results=None,
+    use_multiprocessing=False,
+    nprocs=None,
+    chunksize=20,
+    distance_metric="rmsd",
+    distance_power=2.0,
+    min_rmsd=None,
+    max_tm=None,
+    separation_rule="both",
+    representative="highest_weight",
+    n_starts=20,
+):
+    """Select diverse, SAXS-weighted structures for a new Carbonara run.
+
+    Workflow
+    --------
+    1. Normalize the SAXS weights.
+    2. Retain the smallest high-weight subset containing ``cumulative_weight``.
+    3. Compute C-alpha RMSD/TM/GDT matrices for that retained subset.
+    4. Run weighted k-medoids subject to a hard minimum-separation rule.
+    5. Return either the weighted medoids or the highest-weight feasible member
+       of each cluster.
+
+    Parameters
+    ----------
+    pdb_files : sequence of str/path-like
+        The MD snapshots, ordered exactly as ``weights``.
+    weights : sequence of float
+        Non-negative SAXS/BME weights.
+    n_select : int, default 4
+        Number of Carbonara seed structures.
+    cumulative_weight : float or None, default 0.95
+        Retain the smallest descending-weight subset carrying this fraction of
+        the full posterior weight. Use None to retain every positive-weight
+        snapshot.
+    pairwise_results : sequence of dict or None
+        Optional precomputed pairwise results for the *full* ``pdb_files`` list.
+        If omitted, pairwise metrics are calculated only for retained snapshots.
+    distance_metric : {'rmsd', 'tm'}, default 'rmsd'
+        Clustering distance. TM uses ``1 - TM``. RMSD is recommended here.
+    distance_power : float, default 2
+        Power in sum_i w_i min_k d(i,k)^p.
+    min_rmsd : float or None
+        Require chosen seeds to be at least this many Angstrom apart.
+    max_tm : float or None
+        Require chosen seeds to have pairwise TM-score no larger than this.
+    separation_rule : {'both', 'either'}, default 'both'
+        With both thresholds active, 'both' requires every pair to pass both
+        tests. This is the conservative redundancy guard.
+    representative : {'medoid', 'highest_weight'}, default 'highest_weight'
+        Which real snapshot to return from each cluster.
+
+    Returns
+    -------
+    dict
+        Includes ``selected_pdbs``, ``selection_table``, ``assignments``,
+        pairwise matrices, medoids, cluster weights and effective sample sizes.
+    """
+    pdb_files = [str(p) for p in pdb_files]
+    weights = np.asarray(weights, dtype=float)
+    n = len(pdb_files)
+
+    if len(weights) != n:
+        raise ValueError("pdb_files and weights must have the same length.")
+    if n == 0:
+        raise ValueError("No structures were supplied.")
+    if not np.all(np.isfinite(weights)) or np.any(weights < 0):
+        raise ValueError("weights must be finite and non-negative.")
+    if weights.sum() <= 0:
+        raise ValueError("At least one weight must be positive.")
+    if representative not in {"medoid", "highest_weight"}:
+        raise ValueError("representative must be 'medoid' or 'highest_weight'.")
+    if distance_metric not in {"rmsd", "tm"}:
+        raise ValueError("distance_metric must be 'rmsd' or 'tm'.")
+
+    weights_full = weights / weights.sum()
+    n_eff_full = float(1.0 / np.sum(weights_full**2))
+
+    positive = np.flatnonzero(weights_full > 0)
+    weight_order = positive[np.argsort(-weights_full[positive], kind="stable")]
+
+    if cumulative_weight is None:
+        retained_indices = weight_order
+    else:
+        cumulative_weight = float(cumulative_weight)
+        if not 0 < cumulative_weight <= 1:
+            raise ValueError("cumulative_weight must lie in (0, 1].")
+        cumulative = np.cumsum(weights_full[weight_order])
+        n_keep = int(np.searchsorted(cumulative, cumulative_weight, side="left") + 1)
+        n_keep = max(int(n_select), n_keep)
+        n_keep = min(n_keep, len(weight_order))
+        retained_indices = weight_order[:n_keep]
+
+    if len(retained_indices) < int(n_select):
+        raise ValueError(
+            f"Only {len(retained_indices)} positive-weight snapshots remain, "
+            f"fewer than n_select={n_select}."
+        )
+
+    # Keep retained structures in descending posterior-weight order. This makes
+    # output deterministic and keeps local index 0 as the highest-weight member.
+    retained_indices = np.asarray(retained_indices, dtype=int)
+    retained_pdbs = [pdb_files[i] for i in retained_indices]
+    retained_mass = float(weights_full[retained_indices].sum())
+    retained_weights = weights_full[retained_indices] / retained_mass
+    n_eff_retained = float(1.0 / np.sum(retained_weights**2))
+
+    if pairwise_results is None:
+        if use_multiprocessing:
+            retained_pairwise = pairwise_structure_metrics_mp(
+                retained_pdbs,
+                nprocs=nprocs,
+                chunksize=chunksize,
+            )
+        else:
+            retained_pairwise = pairwise_structure_metrics(
+                retained_pdbs,
+                compare_func,
+            )
+        rmsd, tm, gdt = pairwise_results_to_matrices(
+            retained_pdbs, retained_pairwise
+        )
+    else:
+        full_rmsd, full_tm, full_gdt = pairwise_results_to_matrices(
+            pdb_files, pairwise_results
+        )
+        ix = np.ix_(retained_indices, retained_indices)
+        rmsd = full_rmsd[ix]
+        tm = full_tm[ix]
+        gdt = full_gdt[ix]
+        retained_pairwise = None
+
+    distance = rmsd if distance_metric == "rmsd" else 1.0 - tm
+
+    medoids_local, labels, objective = _constrained_weighted_kmedoids(
+        distance,
+        retained_weights,
+        n_select=n_select,
+        rmsd_matrix=rmsd,
+        tm_matrix=tm,
+        min_rmsd=min_rmsd,
+        max_tm=max_tm,
+        separation_rule=separation_rule,
+        distance_power=distance_power,
+        n_starts=n_starts,
+    )
+
+    if representative == "medoid":
+        selected_local = medoids_local.copy()
+    else:
+        selected_local = _highest_weight_representatives_with_separation(
+            labels,
+            medoids_local,
+            retained_weights,
+            rmsd,
+            tm,
+            min_rmsd=min_rmsd,
+            max_tm=max_tm,
+            separation_rule=separation_rule,
+        )
+
+    selected_global = retained_indices[selected_local]
+    medoids_global = retained_indices[medoids_local]
+
+    assignment_rows = []
+    selection_rows = []
+
+    for cluster in range(int(n_select)):
+        members_local = np.flatnonzero(labels == cluster)
+        cluster_full_weight = float(weights_full[retained_indices[members_local]].sum())
+        cluster_retained_weight = float(retained_weights[members_local].sum())
+        medoid = int(medoids_local[cluster])
+        selected = int(selected_local[cluster])
+        member_rmsd = rmsd[members_local, medoid]
+
+        selection_rows.append({
+            "cluster": cluster,
+            "selected_index": int(retained_indices[selected]),
+            "selected_pdb": pdb_files[int(retained_indices[selected])],
+            "selected_weight": float(weights_full[int(retained_indices[selected])]),
+            "medoid_index": int(retained_indices[medoid]),
+            "medoid_pdb": pdb_files[int(retained_indices[medoid])],
+            "medoid_weight": float(weights_full[int(retained_indices[medoid])]),
+            "cluster_weight_full": cluster_full_weight,
+            "cluster_weight_retained": cluster_retained_weight,
+            "n_members": int(len(members_local)),
+            "mean_rmsd_to_medoid": float(np.average(
+                member_rmsd, weights=retained_weights[members_local]
+            )),
+            "max_rmsd_to_medoid": float(np.max(member_rmsd)),
+        })
+
+        for member in members_local:
+            global_i = int(retained_indices[member])
+            assignment_rows.append({
+                "cluster": cluster,
+                "index": global_i,
+                "pdb": pdb_files[global_i],
+                "weight_full": float(weights_full[global_i]),
+                "weight_within_retained": float(retained_weights[member]),
+                "rmsd_to_medoid": float(rmsd[member, medoid]),
+                "tm_to_medoid": float(tm[member, medoid]),
+                "is_medoid": bool(member == medoid),
+                "is_selected": bool(member == selected),
+            })
+
+    pair_rows = []
+    for a in range(int(n_select)):
+        for b in range(a + 1, int(n_select)):
+            ia = int(selected_local[a])
+            ib = int(selected_local[b])
+            pair_rows.append({
+                "cluster_a": a,
+                "cluster_b": b,
+                "index_a": int(retained_indices[ia]),
+                "index_b": int(retained_indices[ib]),
+                "rmsd": float(rmsd[ia, ib]),
+                "tm": float(tm[ia, ib]),
+                "gdt_ts": float(gdt[ia, ib]),
+            })
+
+    selection_table = pd.DataFrame(selection_rows).sort_values(
+        "cluster_weight_full", ascending=False
+    ).reset_index(drop=True)
+    assignments = pd.DataFrame(assignment_rows).sort_values(
+        ["cluster", "weight_full"], ascending=[True, False]
+    ).reset_index(drop=True)
+    selected_pair_metrics = pd.DataFrame(pair_rows)
+
+    return {
+        "selected_indices": list(map(int, selected_global)),
+        "selected_pdbs": [pdb_files[i] for i in selected_global],
+        "selected_weights": [float(weights_full[i]) for i in selected_global],
+        "medoid_indices": list(map(int, medoids_global)),
+        "medoid_pdbs": [pdb_files[i] for i in medoids_global],
+        "retained_indices": list(map(int, retained_indices)),
+        "retained_pdbs": retained_pdbs,
+        "retained_weight_mass": retained_mass,
+        "n_eff_full": n_eff_full,
+        "n_eff_retained": n_eff_retained,
+        "objective": float(objective),
+        "distance_metric": distance_metric,
+        "selection_table": selection_table,
+        "assignments": assignments,
+        "selected_pair_metrics": selected_pair_metrics,
+        "rmsd_matrix_retained": rmsd,
+        "tm_matrix_retained": tm,
+        "gdt_matrix_retained": gdt,
+        "pairwise_results_retained": retained_pairwise,
+    }
+
+
+
+
+def read_and_align_saxs_weights(
+    weights_file,
+    pdb_files,
+    base_dir=None,
+    normalize=True,
+    require_all=True,
+):
+    """
+    Read a two-column SAXS weights file and align the weights with an
+    independently generated list of PDB files.
+
+    Parameters
+    ----------
+    weights_file : str or Path
+        Text file containing:
+            path/to/frame1.pdb   weight
+            path/to/frame2.pdb   weight
+
+    pdb_files : sequence of str or Path
+        PDB files whose order should be preserved.
+
+    base_dir : str or Path or None
+        Directory relative to which paths in the weights file are interpreted.
+        If None, the current working directory is used.
+
+    normalize : bool
+        Normalize the aligned weights so they sum to one.
+
+    require_all : bool
+        If True, raise an error when a PDB has no matching weight.
+        If False, unmatched PDBs are omitted.
+
+    Returns
+    -------
+    aligned_pdbs : list[Path]
+        PDB files in the same order as the input `pdb_files`, excluding
+        unmatched files when require_all=False.
+
+    aligned_weights : np.ndarray
+        Weight corresponding to each returned PDB.
+
+    unmatched_pdbs : list[Path]
+        PDB files for which no weight was found.
+    """
+    weights_file = Path(weights_file)
+    base_dir = Path.cwd() if base_dir is None else Path(base_dir)
+
+    # --------------------------------------------------
+    # Read the weights file
+    # --------------------------------------------------
+    weight_by_resolved_path = {}
+    weight_by_name = {}
+
+    with weights_file.open("r", encoding="utf-8") as f:
+        for line_no, raw_line in enumerate(f, start=1):
+            line = raw_line.strip()
+
+            if not line or line.startswith("#"):
+                continue
+
+            # Split from the right, so paths containing spaces still work.
+            try:
+                path_text, weight_text = line.rsplit(maxsplit=1)
+                weight = float(weight_text)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Could not parse line {line_no} of {weights_file}:\n"
+                    f"{raw_line.rstrip()}"
+                ) from exc
+
+            path = Path(path_text).expanduser()
+
+            if not path.is_absolute():
+                path = base_dir / path
+
+            resolved = path.resolve()
+
+            if resolved in weight_by_resolved_path:
+                raise ValueError(
+                    f"Duplicate path in weights file: {resolved}"
+                )
+
+            weight_by_resolved_path[resolved] = weight
+
+            # Basename fallback, e.g. frame57.pdb.
+            weight_by_name.setdefault(path.name, []).append(
+                (resolved, weight)
+            )
+
+    # --------------------------------------------------
+    # Align weights to the PDB-list order
+    # --------------------------------------------------
+    aligned_pdbs = []
+    aligned_weights = []
+    unmatched_pdbs = []
+
+    for pdb in pdb_files:
+        pdb = Path(pdb).expanduser()
+        resolved_pdb = pdb.resolve()
+
+        # First choice: exact resolved-path match.
+        if resolved_pdb in weight_by_resolved_path:
+            weight = weight_by_resolved_path[resolved_pdb]
+
+        else:
+            # Fallback: match by filename only, provided it is unique.
+            basename_matches = weight_by_name.get(pdb.name, [])
+
+            if len(basename_matches) == 1:
+                weight = basename_matches[0][1]
+
+            elif len(basename_matches) > 1:
+                raise ValueError(
+                    f"Ambiguous basename match for {pdb.name}: "
+                    f"{len(basename_matches)} entries occur in the weights file."
+                )
+
+            else:
+                unmatched_pdbs.append(pdb)
+                continue
+
+        aligned_pdbs.append(pdb)
+        aligned_weights.append(weight)
+
+    if unmatched_pdbs and require_all:
+        missing = "\n".join(f"  {p}" for p in unmatched_pdbs)
+        raise ValueError(
+            f"{len(unmatched_pdbs)} PDB files have no matching SAXS weight:\n"
+            f"{missing}"
+        )
+
+    aligned_weights = np.asarray(aligned_weights, dtype=float)
+
+    if np.any(~np.isfinite(aligned_weights)):
+        raise ValueError("The aligned weights contain NaN or infinite values.")
+
+    if np.any(aligned_weights < 0):
+        raise ValueError("The aligned weights contain negative values.")
+
+    if normalize:
+        total = aligned_weights.sum()
+
+        if total <= 0:
+            raise ValueError("The aligned weights sum to zero.")
+
+        aligned_weights = aligned_weights / total
+
+    return aligned_pdbs, aligned_weights, unmatched_pdbs
