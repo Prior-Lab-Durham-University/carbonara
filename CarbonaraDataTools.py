@@ -2905,7 +2905,8 @@ def _find_foxs_fit_file(pdb_path, saxs_path):
     candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
     return candidates[0][2]
 
-def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None):
+def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None,
+                           plot_out=None):
     """
     Run pyFoXS, extract chi^2, locate the fit file, and plot
     the fit with a FoXS-style residual panel.
@@ -2923,6 +2924,8 @@ def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None):
             ["python3", "/path/to/foxs.py"]
     max_q : float or None
         Optional maximum q-value to pass to pyFoXS.
+    plot_out: str or None
+        Output path for the plot
 
     Returns
     -------
@@ -3050,7 +3053,10 @@ def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None):
             # ax2.set_ylabel(residual_label)
 
             plt.tight_layout()
-            plt.show()
+            if plot_out:
+                plt.savefig(plot_out)
+            else:
+                plt.show()
 
         except Exception as e:
             print(f"FoXS ran, but plotting failed: {e}")

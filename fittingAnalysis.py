@@ -2494,6 +2494,7 @@ def collect_best_prediction_per_run_closest_to_one(
         return []
 
     results = []
+    print(run_map)
 
     for run_no in range(1, max_run + 1):
         run_dir = run_map.get(run_no)
