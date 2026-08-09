@@ -90,7 +90,7 @@ void determineVaryingSections(const char* argv[], std::vector<std::vector<int>>&
 
 
 // Loads in (if availible) contanct constraints to referenced mol class
-void readFixedDistancesConstraints(const char* argv[], std::vector<ktlMolecule>& mol) {
+void readFixedDistancesConstraints(const char* argv[], std::vector<ktlMolecule>& mol, ModelParameters& params) {
 
     int noStructures = std::atoi(argv[6]);
 
@@ -100,6 +100,7 @@ void readFixedDistancesConstraints(const char* argv[], std::vector<ktlMolecule>&
         std::string contactPredictions = std::string(argv[2]) + "fixedDistanceConstraints" + std::to_string(i + 1) + ".dat";
 	std::cout<<contactPredictions<<"\n";
         mol[i].loadContactPredictions(contactPredictions.c_str());
+        mol[i].setDistanceConstraintCap(params.distanceConstraintCap);
       }
     }
 }
@@ -184,7 +185,7 @@ std::vector<moleculeFitAndState> makeHistoricalStateSet(moleculeFitAndState molS
 
 
 void increaseKmax(std::pair<double,double>& scatterFit, std::vector<moleculeFitAndState>& molFitAndStateSet,
-                  experimentalData& ed,  ModelParameters& params, Logger& logger) {
+                  experimentalData& ed,  ModelParameters& params, Logger& logger, const FitMode &mode) {
 
     // if we have achieved a sufficiently good fit include more data.
     params.kmaxCurr=params.kmaxCurr+0.01;
@@ -196,8 +197,11 @@ void increaseKmax(std::pair<double,double>& scatterFit, std::vector<moleculeFitA
     logger.consoleChange("krangeIncrease", params);
 
     params.improvementIndexTest=0;
-    // generate a new first fit.
-    scatterFit = molFitAndStateSet[0].getOverallFit(ed, params.mixtureList,params.kmin,params.kmaxCurr);
+    // generate a new first fit, using the *same* fitting procedure the rest of this run is
+    // using (previously hardcoded to the plain, non-ChiSq/non-ForceConnection variant
+    // regardless of the run's actual mode -- a real inconsistency, fixed by threading the
+    // caller's FitMode through instead of picking one implicitly).
+    scatterFit = molFitAndStateSet[0].computeOverallFit(ed, params.mixtureList,params.kmin,params.kmaxCurr,mode);
 
 }
 
@@ -227,7 +231,8 @@ void updateAndLog(int& improvementIndex, std::vector<ktlMolecule>& mol, ktlMolec
 
     logger.logEntry(improvementIndex, k, overallFit.first, molState.getWrithePenalty(), molState.getOverlapPenalty(),
                     molState.getDistanceConstraints(), params.kmaxCurr, scatterNameMain, moleculeNameMain,
-                    molState.C2);
+                    molState.C2, molState.getWritheDiffPenalty(), overallFit.second,
+                    molState.getHardConstraintsSatisfied(), molState.getHardConstraintsMaxViolation());
 
 }
 
@@ -248,7 +253,8 @@ void updateAndLog_ChiSq(int& improvementIndex, std::vector<ktlMolecule>& mol, kt
 
     logger.logEntry(improvementIndex, k, overallFit.first, molState.getWrithePenalty(), molState.getOverlapPenalty(),
                     molState.getDistanceConstraints(), params.kmaxCurr, scatterNameMain, moleculeNameMain,
-                    molState.C2);
+                    molState.C2, molState.getWritheDiffPenalty(), overallFit.second,
+                    molState.getHardConstraintsSatisfied(), molState.getHardConstraintsMaxViolation());
 
 }
 

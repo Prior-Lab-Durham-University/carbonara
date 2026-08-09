@@ -89,6 +89,9 @@ public:
   std::vector<double> solMolDists(std::vector<std::vector<point> > &pts1);
   void loadContactPredictions(const char* contactloc);
   double getLennardJonesContact();
+  std::vector<double> getSoftContactPenaltiesPerPair();
+  bool hardConstraintsSatisfied(double &maxViolation);
+  void setDistanceConstraintCap(double cap);
   void loadFixedSections(const char* fixedsecloc);
 
   double getBetaSheetProximityReward();
@@ -119,6 +122,26 @@ private:
   std::vector<double> distSets;
   double kapvallink,kapvalbeta,kapvalalpha,tauvallink,tauvalbeta,tauvalalpha,alvallink,alvalbeta,alvalalpha,maxDistChange;
   std::vector<std::tuple<std::pair<int,int>,std::pair<int,int>,std::pair<double,double> > > contactPairList;
+  // parallel to contactPairList: 0 = two-sided (penalise both closer and farther
+  // than the target distance, the original behaviour), 1 = upper-bound-only
+  // (penalise only if the actual distance exceeds the target -- for restraints
+  // like crosslinks where being closer than the measured reach is not a violation).
+  std::vector<int> contactBoundType;
+  // parallel to contactPairList: 0 = soft (default, contributes a bounded penalty via
+  // getLennardJonesContact), 1 = hard (a feasibility filter via hardConstraintsSatisfied --
+  // excluded from the soft penalty sum, moves violating it are rejected outright).
+  std::vector<int> contactHardFlag;
+  // parallel to contactPairList: 0 = default (soft penalty summed across every mixture
+  // state, i.e. every conformation pressured to satisfy it), 1 = ensemble-OR (excluded
+  // from that per-state sum; only the single best mixture state's penalty for this pair
+  // counts -- see getSoftContactPenaltiesPerPair / moleculeFitAndState::applyDistanceConstraints).
+  std::vector<int> contactEnsembleOrFlag;
+  // ceiling on a single soft contact pair's penalty contribution (see getLennardJonesContact);
+  // set via setDistanceConstraintCap, defaults to a sane value so behaviour is unchanged for
+  // callers that never call the setter.
+  double distanceConstraintCap = 50.0;
+  double contactPairDistFrac(int i);
+  double cappedSoftPenaltyForPair(int i);
   std::vector<int> unchangedSections;
 };
 

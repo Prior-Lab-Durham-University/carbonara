@@ -5,6 +5,7 @@
 #include <string.h>
 #include "moleculeFitAndState.h"
 #include <cstring>
+#include <cstdlib>
 #include <chrono>
 #include <tuple>
 
@@ -39,6 +40,29 @@ using namespace std::chrono;
   argv[17] last line of the previous fit log, this is only used for a restart if argv[3] = True
   argv[18] is true if we want to apply affine rotations, false if not.
   argv[19] is true if the user wants to use error weightings
+
+  Optional, appended -- absent (argc <= 20/21) leaves this restraint disabled,
+  so every pre-existing invocation behaves exactly as before:
+  argv[20] max writhe-difference allowed between ensemble members (mixture_states > 1
+           fits only); <= 0 or omitted disables it. See moleculeFitAndState::
+           applyWritheDiffConstraint.
+  argv[21] CA-backbone stride used for that calculation (e.g. 2 or 4); omitted
+           or <= 0 means no striding (every residue).
+  argv[22] penalty weight for the fit objective: currFit = chi2 * (1 +
+           penaltyWeight * (overlap + distance + writhe + writheDiff
+           penalties)). Proportional rather than additive, so the
+           penalties' share of the objective stays roughly constant across
+           the whole search instead of vanishing whenever chi2 is large.
+           Omitted/empty keeps ModelParameters' default (5.0). How strict
+           this should be is dataset-dependent (a high chi2 can mean "very
+           wrong structure" or just "noisy SAXS data"), so tune per system.
+  argv[23] cap on a single *soft* distance-constraint pair's penalty contribution
+           (ktlMolecule::getLennardJonesContact). Identical to the uncapped quartic
+           for small violations, saturates for large ones. Does not apply to
+           *hard*-flagged pairs (disulfides, strict posts) -- those are a true
+           feasibility filter (moleculeFitAndState::applyHardConstraints), rejected
+           outright if violated regardless of chi2, and unaffected by this value.
+           Omitted/empty keeps ModelParameters' default (50.0).
  --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- */
 
 int main(int argc, const char* argv[]) {
@@ -47,7 +71,7 @@ int main(int argc, const char* argv[]) {
   Logger logger(argv[16]);
 
   /* Set up model parameters */
-  ModelParameters params = loadParameters(argv);
+  ModelParameters params = loadParameters(argv, argc);
 
   /* Determine initial model: Two options no initial prediction, we must generate a structure
    or some initial structure provided. Actually we need a half-half option */
@@ -61,13 +85,24 @@ int main(int argc, const char* argv[]) {
   determineVaryingSections(argv, vary_sec_list_list);
 
   /* Read in any fixed distances constraints (contact predictions/sulfide bonds) */
-  readFixedDistancesConstraints(argv, moleculeStructures);
+  readFixedDistancesConstraints(argv, moleculeStructures, params);
 
   /* Read in the permissible mixture list */
   readPermissibleMixtures(argv, params);
 
   /* Read in the scattering and set up the scattering model */
   experimentalData ed(argv[1]);
+
+  // Which fitting procedure(s) this run uses -- replaces the old pattern of picking among
+  // 8 differently-named getOverallFit* functions at each call site via ad-hoc if/else on
+  // these same two flags. Three distinct FitModes are genuinely needed here (not one
+  // reused everywhere): forceConnection tracks the *move type*, not just affineTrans --
+  // the per-loop-reshape trial move never uses ForceConnection even when affineTrans is on
+  // (matches the original code's actual behaviour, confirmed by reading it directly).
+  const bool weightedChiSq = (strcmp(argv[19], "True") == 0);
+  FitMode baseMode{weightedChiSq, params.affineTrans};   // baseline (initial + kmax-increase) computation
+  FitMode rotationMode{weightedChiSq, true};             // rigid-rotation trial moves (only reached when affineTrans==true)
+  FitMode reshapeMode{weightedChiSq, false};             // per-loop-reshape trial moves -- never ForceConnection
 
   /* Random generator */
   RandomGenerator rng;
@@ -81,20 +116,7 @@ int main(int argc, const char* argv[]) {
     improvementIndex = std::atoi(argv[17]);
   }
 
-  std::pair<double, double> overallFit;
-  if (params.affineTrans == true) {
-    if ((strcmp(argv[19], "True") == 0)) {
-      overallFit = molState.getOverallFitForceConnection_ChiSq(ed, params.mixtureList, params.kmin, params.kmaxCurr);
-    }else{
-      overallFit = molState.getOverallFitForceConnection(ed, params.mixtureList, params.kmin, params.kmaxCurr);
-    }
-  } else {
-     if ((strcmp(argv[19], "True") == 0)) {
-      overallFit = molState.getOverallFit_ChiSq(ed, params.mixtureList, params.kmin, params.kmaxCurr);
-    }else{
-      overallFit = molState.getOverallFit(ed, params.mixtureList, params.kmin, params.kmaxCurr);
-    }
-  }
+  std::pair<double, double> overallFit = molState.computeOverallFit(ed, params.mixtureList, params.kmin, params.kmaxCurr, baseMode);
   logger.logMetadata(argv[16], params);
   std::string scatterNameInitial;
   if(strcmp(argv[19], "True") == 0) {
@@ -105,8 +127,11 @@ int main(int argc, const char* argv[]) {
   std::string xyzNameInitial = write_molecules(argv[12], improvementIndex, moleculeStructures, "initial");
    // log starting point
   logger.logEntry(0, 0, overallFit.first, molState.getWrithePenalty(), molState.getOverlapPenalty(),
-                  molState.getDistanceConstraints(), params.kmaxCurr, scatterNameInitial, xyzNameInitial, molState.C2);
-  logger.consoleInitial(overallFit.first, molState.getWrithePenalty(), molState.getOverlapPenalty(), molState.getDistanceConstraints());
+                  molState.getDistanceConstraints(), params.kmaxCurr, scatterNameInitial, xyzNameInitial, molState.C2,
+                  molState.getWritheDiffPenalty(), overallFit.second,
+                  molState.getHardConstraintsSatisfied(), molState.getHardConstraintsMaxViolation());
+  logger.consoleInitial(overallFit.first, molState.getWrithePenalty(), molState.getOverlapPenalty(), molState.getDistanceConstraints(),
+                        overallFit.second, molState.getHardConstraintsSatisfied(), molState.getHardConstraintsMaxViolation());
   /* Main algorithm */
 
   // numberOfChainsInEachStructure vector tells us how many chains are in each structure
@@ -127,7 +152,7 @@ int main(int argc, const char* argv[]) {
 
       if (overallFit.second < 0.0002) {
 
-      increaseKmax(overallFit, molStateSet, ed, params, logger);
+      increaseKmax(overallFit, molStateSet, ed, params, logger, baseMode);
     }
 
     params.improvementIndexTest = params.improvementIndexTest + 1;
@@ -166,14 +191,12 @@ int main(int argc, const char* argv[]) {
 
             // calculate the new fit for this
             moleculeFitAndState newMolState = molState;
-            std::pair<double, double> newOverallFit;
-            if ((strcmp(argv[19], "True") == 0)) {
-            newOverallFit = newMolState.getOverallFitForceConnection_ChiSq(ed, params.mixtureList, molCopyR, params.kmin, params.kmaxCurr, structureIndex);
-            }else{
-              newOverallFit = newMolState.getOverallFitForceConnection(ed, params.mixtureList, molCopyR, params.kmin, params.kmaxCurr, structureIndex);
-            }
+            std::pair<double, double> newOverallFit = newMolState.computeOverallFit(ed, params.mixtureList, molCopyR, params.kmin, params.kmaxCurr, structureIndex, rotationMode);
             double uProb = rng.getDistributionR();
-            if (checkTransition(newOverallFit.first, overallFit.first, uProb, fitStep, params.noScatterFitSteps)) {
+            // Hard constraints (disulfides, strict posts) are a feasibility filter, not a
+            // penalty: no chi2 improvement can buy past one, so it's required in addition to
+            // (not instead of) the normal combined-objective acceptance check.
+            if (checkTransition(newOverallFit.first, overallFit.first, uProb, fitStep, params.noScatterFitSteps) && newMolState.getHardConstraintsSatisfied()) {
               improvementIndex++;
                if ((strcmp(argv[19], "True") == 0)) {
                 updateAndLog_ChiSq(improvementIndex, moleculeStructures, molCopyR, molState, newMolState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
@@ -211,16 +234,34 @@ int main(int argc, const char* argv[]) {
 
               moleculeFitAndState newmolState = molState;
 
-              // calculate the fitting of changed molecule
-              std::pair<double, double> newOverallFit;
-              if ((strcmp(argv[19], "True") == 0)) {
-               newOverallFit= newmolState.getOverallFit_ChiSq(ed, params.mixtureList, newMol, params.kmin, params.kmaxCurr, structureIndex);
-               }else{
-		newOverallFit= newmolState.getOverallFit(ed, params.mixtureList, newMol, params.kmin, params.kmaxCurr, structureIndex);
-               }
+              // calculate the fitting of changed molecule (never ForceConnection, regardless of affineTrans)
+              std::pair<double, double> newOverallFit = newmolState.computeOverallFit(ed, params.mixtureList, newMol, params.kmin, params.kmaxCurr, structureIndex, reshapeMode);
 	      //std::cout<<"improve ever ? "<<indexCh<<" "<<newOverallFit.second<<" "<<newOverallFit.first<<" "<<overallFit.first<<"\n";
+	      // Diagnostic only, zero-cost/zero-behavior-change unless the env var is
+	      // set: dumps every trial evaluation (accepted or not) so the relative
+	      // scale of chi2 vs. each penalty term can be inspected across a run.
+	      if (std::getenv("CARBONARA_DEBUG_FIT") != nullptr) {
+	        std::cerr << "TRIAL fitStep=" << fitStep << " structureIndex=" << structureIndex
+	                  << " chi2=" << newOverallFit.second
+	                  << " overlap=" << newmolState.getOverlapPenalty()
+	                  << " distance=" << newmolState.getDistanceConstraints()
+	                  << " writhe=" << newmolState.getWrithePenalty()
+	                  << " writheDiff=" << newmolState.getWritheDiffPenalty()
+	                  << " currFit=" << newOverallFit.first
+	                  << " prevFit=" << overallFit.first
+	                  << " hardOK=" << newmolState.getHardConstraintsSatisfied()
+	                  << " hardMaxViolation=" << newmolState.getHardConstraintsMaxViolation()
+	                  // matches the real acceptance check below exactly -- both conditions,
+	                  // not just the chi2/combined-objective comparison, since a hard
+	                  // violation rejects a move regardless of how much currFit improved.
+	                  << " willAccept=" << ((newOverallFit.first < overallFit.first && newmolState.getHardConstraintsSatisfied()) ? 1 : 0)
+	                  << "\n";
+	      }
               double uProb = rng.getDistributionR();
-              if (checkTransition(newOverallFit.first, overallFit.first, uProb, fitStep, params.noScatterFitSteps)) {
+              // Hard constraints (disulfides, strict posts) are a feasibility filter, not a
+              // penalty: no chi2 improvement can buy past one, so it's required in addition to
+              // (not instead of) the normal combined-objective acceptance check.
+              if (checkTransition(newOverallFit.first, overallFit.first, uProb, fitStep, params.noScatterFitSteps) && newmolState.getHardConstraintsSatisfied()) {
 
                 // Success! Add to the update index
                 improvementIndex++;
@@ -252,7 +293,8 @@ int main(int argc, const char* argv[]) {
     sortVec(molStateSet);
 
     // Print out to terminal window
-    logger.consoleFitAttempt(fitStep, improvementIndex, params, overallFit.first, overallFit.second);
+    logger.consoleFitAttempt(fitStep, improvementIndex, params, overallFit.first, overallFit.second,
+                             molState.getHardConstraintsSatisfied(), molState.getHardConstraintsMaxViolation());
 
     fitStep++;
   }
@@ -270,6 +312,8 @@ int main(int argc, const char* argv[]) {
   std::cout << " overallFitBest fit: " << overallFit.first << "\n";
 
   logger.logEntry(improvementIndex, fitStep, overallFit.first, molState.getWrithePenalty(), molState.getOverlapPenalty(),
-                  molState.getDistanceConstraints(), params.kmaxCurr, scatterNameEnd, moleculeNameEnd, molState.C2);
+                  molState.getDistanceConstraints(), params.kmaxCurr, scatterNameEnd, moleculeNameEnd, molState.C2,
+                  molState.getWritheDiffPenalty(), overallFit.second,
+                  molState.getHardConstraintsSatisfied(), molState.getHardConstraintsMaxViolation());
 
 } // end of main

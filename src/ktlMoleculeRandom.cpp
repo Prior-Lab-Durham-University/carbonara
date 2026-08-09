@@ -1,5 +1,7 @@
 #include "ktlMoleculeRandom.h"
 #include "point.h"
+#include <cstdlib>
+#include <iostream>
 
 ktlMolecule::ktlMolecule(){
   kapvallink = 0.36932;
@@ -1147,48 +1149,139 @@ void ktlMolecule::loadContactPredictions(const char* contactloc){
        std::tuple<std::pair<int,int>,std::pair<int,int>,std::pair<double,double> > tp;
        std::get<0>(tp) = pr1;std::get<1>(tp) = pr2;std::get<2>(tp) = pr3;
        contactPairList.push_back(tp);
+       // optional 7th column: bound type (0=two-sided target [default], 1=upper-bound-only)
+       int boundType = 0;
+       ss>>boundType;
+       contactBoundType.push_back(boundType);
+       // optional 8th column: hard (0=soft/penalty [default], 1=hard/feasibility filter --
+       // moves violating this pair beyond its tolerance are rejected outright, regardless
+       // of chi2 gain, and it is excluded from the soft-penalty sum entirely)
+       int hardFlag = 0;
+       ss>>hardFlag;
+       contactHardFlag.push_back(hardFlag);
+       // optional 9th column: ensembleOr (0=default [default] -- this pair's soft penalty
+       // is summed across every mixture state, i.e. every conformation is pressured to
+       // satisfy it; 1=ensemble-OR -- excluded from that per-state sum, and instead only
+       // the single best (least-violating) mixture state's penalty for this pair counts,
+       // giving "satisfied by any one conformation" semantics. Only meaningful when
+       // mixture_n > 1 and the same constraint file is replicated across states -- see
+       // moleculeFitAndState::applyDistanceConstraints. No effect on hard pairs.
+       int ensembleOrFlag = 0;
+       ss>>ensembleOrFlag;
+       contactEnsembleOrFlag.push_back(ensembleOrFlag);
+       if(hardFlag==1 && ensembleOrFlag==1){
+         // hard silently wins (see getLennardJonesContact/getSoftContactPenaltiesPerPair --
+         // hard pairs are checked first and skip the ensemble-OR path entirely), which is
+         // easy to trip over by accident when hand-editing a constraint file, so say so
+         // rather than letting it look like ensemble-OR is in effect when it isn't.
+         std::cerr << "WARNING: contact pair " << (contactPairList.size()-1)
+                   << " has both hard=1 and ensembleOr=1 -- ensembleOr is ignored for hard "
+                   << "pairs (enforced per-state instead, see ktlMolecule::hardConstraintsSatisfied).\n";
+       }
        }
      }
      int cpls =contactPairList.size();
   }
 }
 
+// signed fractional deviation of a contact pair's actual distance from its target,
+// upper-bound-aware (contactBoundType[i]==1 clamps a too-close distance to zero deviation).
+double ktlMolecule::contactPairDistFrac(int i){
+  std::tuple<std::pair<int,int>,std::pair<int,int>,std::pair<double,double>> tp = contactPairList[i];
+  std::pair<int,int> pr1 =  std::get<0>(tp);
+  std::pair<int,int> pr2 =  std::get<1>(tp);
+  point cd1 = coords[pr1.first][pr1.second];
+  point cd2 = coords[pr2.first][pr2.second];
+  double prWiseDist = cd1.eDist(cd2);
+  double distFrac=(prWiseDist-std::get<2>(tp).first)/(std::get<2>(tp).first);
+  if(i<contactBoundType.size() && contactBoundType[i]==1){
+    // upper-bound-only: being closer than the target is not a violation
+    distFrac = std::max(0.0,distFrac);
+  }
+  return distFrac;
+}
+
+// capped soft-penalty contribution for a single pair (same formula previously inlined in
+// getLennardJonesContact); shared by the per-state sum and the per-pair ensemble-OR path.
+double ktlMolecule::cappedSoftPenaltyForPair(int i){
+  std::tuple<std::pair<int,int>,std::pair<int,int>,std::pair<double,double>> tp = contactPairList[i];
+  double distFrac = contactPairDistFrac(i);
+  double distFracWeighted = distFrac/(std::get<2>(tp).second);
+  double raw = 0.0001*distFracWeighted*distFracWeighted*distFracWeighted*distFracWeighted;
+  // saturating cap: identical to the raw quartic for small violations (near convergence,
+  // this is a no-op), but asymptotes to distanceConstraintCap instead of growing
+  // unboundedly for large violations/strict tolerances -- keeps a single tolerance choice
+  // from being able to produce an arbitrarily large penalty that swamps chi2 unpredictably.
+  return distanceConstraintCap*(1.0 - std::exp(-raw/distanceConstraintCap));
+}
+
 double ktlMolecule::getLennardJonesContact(){
   double ljval =0.0;
   for(int i=0;i<contactPairList.size();i++){
-    std::tuple<std::pair<int,int>,std::pair<int,int>,std::pair<double,double>> tp = contactPairList[i];
-    std::pair<int,int> pr1 =  std::get<0>(tp);
-    std::pair<int,int> pr2 =  std::get<1>(tp);
-    point cd1 = coords[pr1.first][pr1.second];
-    point cd2 = coords[pr2.first][pr2.second];
-    double prWiseDist = cd1.eDist(cd2);
-    //std::cout<<"pair "<<i<<"\n";
-    //std::cout<<pr1.first<<" "<<pr1.second<<" "<<pr2.first<<" "<<pr2.second<<"\n";
-    //cd1.printPoint();
-    //cd2.printPoint();
-    //std::cout<<"size1 "<<coords[pr1.first].size()<<"\n";
-    //std::cout<<"size2 "<<coords[pr2.first].size()<<"\n";
-    //std::cout<<"d comp "<<prWiseDist<<" "<<std::get<2>(tp).first<<"\n";
-    double distFrac=(prWiseDist-std::get<2>(tp).first)/(std::get<2>(tp).first);
-    //std::cout<<distFrac<<"\n";
-    double distFracWeighted = distFrac/(std::get<2>(tp).second);
-    //std::cout<<distFracWeighted<<" "<<std::get<2>(tp).second<<"\n";
-    //std::cout<<"\n";
-    ljval = ljval + 0.0001*distFracWeighted*distFracWeighted*distFracWeighted*distFracWeighted;
-    //std::cout<<"pen bounded ?"<<distFracWeighted<<"\n";
-    //cd1.printPoint();
-    //cd2.printPoint();
-    //double drat = prWiseDist/std::get<2>(tp);
-    //double indrat  = 1.0/(std::sqrt(2.0)*drat);
-    //ljval =ljval+ (4.0*(indrat*indrat*indrat*indrat -indrat*indrat)+1.0);
+    if(i<contactHardFlag.size() && contactHardFlag[i]==1){
+      // hard pairs are enforced as a feasibility filter (hardConstraintsSatisfied), not
+      // encouraged via a penalty -- excluded from the soft sum entirely.
+      continue;
+    }
+    if(i<contactEnsembleOrFlag.size() && contactEnsembleOrFlag[i]==1){
+      // ensemble-OR pairs are handled separately, per-pair, across mixture states (see
+      // getSoftContactPenaltiesPerPair / moleculeFitAndState::applyDistanceConstraints) --
+      // excluded from this per-state sum so they aren't double-counted or pressured onto
+      // every state.
+      continue;
+    }
+    ljval = ljval + cappedSoftPenaltyForPair(i);
   }
-  /*if(contactPairList.size()>0){
-    return ljval;
-  }else{
-    return ljval;
-    }*/
   return ljval;
 }
+
+// per-pair capped soft penalty, for ensemble-OR aggregation across mixture states.
+// Returns a vector the same length as contactPairList; entries for pairs that are hard
+// or not flagged ensembleOr are 0.0 (harmless in a min-across-states aggregation, since
+// they're either handled elsewhere or would trivially win the min at 0).
+std::vector<double> ktlMolecule::getSoftContactPenaltiesPerPair(){
+  std::vector<double> out(contactPairList.size(), 0.0);
+  for(int i=0;i<contactPairList.size();i++){
+    if(i<contactHardFlag.size() && contactHardFlag[i]==1){ continue; }
+    if(!(i<contactEnsembleOrFlag.size() && contactEnsembleOrFlag[i]==1)){ continue; }
+    out[i] = cappedSoftPenaltyForPair(i);
+  }
+  return out;
+}
+
+// checks only hard-flagged pairs' raw distance vs. tolerance (no quartic/weighting) --
+// a true feasibility filter. Returns false if any hard pair is violated beyond its
+// tolerance; maxViolation is the worst |distFrac| among hard pairs (0.0 if all satisfied
+// or there are no hard pairs).
+bool ktlMolecule::hardConstraintsSatisfied(double &maxViolation){
+  maxViolation = 0.0;
+  bool ok = true;
+  if(std::getenv("CARBONARA_DEBUG_HARD") != nullptr){
+    std::cerr << "HARDCHECK contactPairList.size()=" << contactPairList.size()
+              << " contactHardFlag.size()=" << contactHardFlag.size() << "\n";
+  }
+  for(int i=0;i<contactPairList.size();i++){
+    if(!(i<contactHardFlag.size() && contactHardFlag[i]==1)){
+      continue;
+    }
+    std::tuple<std::pair<int,int>,std::pair<int,int>,std::pair<double,double>> tp = contactPairList[i];
+    double distFrac = std::abs(contactPairDistFrac(i));
+    double tolerance = std::get<2>(tp).second;
+    if(std::getenv("CARBONARA_DEBUG_HARD") != nullptr){
+      std::cerr << "HARDCHECK pair " << i << " distFrac=" << distFrac << " tolerance=" << tolerance << "\n";
+    }
+    if(distFrac > tolerance){
+      ok = false;
+      if(distFrac > maxViolation){ maxViolation = distFrac; }
+    }
+  }
+  return ok;
+}
+
+void ktlMolecule::setDistanceConstraintCap(double cap){
+  distanceConstraintCap = cap;
+}
+
 void ktlMolecule::loadFixedSections(const char* fixedsecloc){
   std::ifstream fsfile;
   fsfile.open(fixedsecloc);

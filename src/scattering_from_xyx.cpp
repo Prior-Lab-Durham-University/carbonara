@@ -149,7 +149,7 @@ int main(int argc, const char* argv[]) {
   Logger logger(argv[16]);
 
   /* Set up model parameters */
-  ModelParameters params = loadParameters(argv);
+  ModelParameters params = loadParameters(argv, argc);
 
   /* Initialise the molecule(s) vector */
   std::vector<ktlMolecule> moleculeStructures;

@@ -136,6 +136,33 @@ double writheFP::DIAbs(std::vector<point>& pointList){
   return sigsum/(2*PI);
 }
 
+std::vector<point> writheFP::strideList(std::vector<point>& pointList, int stride){
+  std::vector<point> out;
+  if(stride < 1) stride = 1;
+  int n = pointList.size();
+  for(int i=0;i<n;i+=stride) out.push_back(pointList[i]);
+  // Always keep the true endpoint, even when (n-1) isn't a multiple of
+  // stride -- otherwise a large stride can silently chop a chunk off the
+  // end of the chain rather than just coarsening it.
+  int lastKept = n>0 ? ((n-1)/stride)*stride : 0;
+  if(n>0 && lastKept != n-1) out.push_back(pointList[n-1]);
+  return out;
+}
+
+double writheFP::writheMatrixAbsDiff(std::vector<point>& pointList1, std::vector<point>& pointList2){
+  // Both curves must be the same (strided) chain from two conformers of the
+  // identical sequence, so they're the same length in the normal case; the
+  // min() below is just a defensive guard, not an expected path.
+  int n = std::min(pointList1.size(), pointList2.size());
+  double sigsum=0.0;
+  for(int i=0;i<n-1;i++){
+    for(int j=i+1;j<n-1;j++){
+      sigsum = sigsum + std::abs(wij(pointList1,n,i,j) - wij(pointList2,n,i,j));
+    }
+  }
+  return sigsum/(2*PI);
+}
+
 double writheFP::DIClosed(std::vector<point>& pointList){
   pointList.push_back(pointList[0]);
   int listSize = pointList.size();

@@ -1,0 +1,18 @@
+{
+  "baseline_chi2": {
+    "chi2": 203.68,
+    "scatter_first": 203.68
+  },
+  "ensemble_or": {
+    "or_off": 50,
+    "or_on": 0
+  },
+  "hard_satisfied_initially": {
+    "distance_constraints": 0,
+    "hard_max_violation": 0,
+    "hard_satisfied": true
+  },
+  "soft_cap": {
+    "distance_constraints_capped": 50
+  }
+}

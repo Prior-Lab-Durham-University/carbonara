@@ -156,12 +156,17 @@ bool experimentalData::binDataCheck(double &dMax,double &qmin,double &qmax){
     double qmaxBin = qmin + j*dq;
     std::vector<double> intensities;
     // if we have selected a higher q than the lowest experimental data, seacrch for the minimum point
-    while(scatVec[k][0]<qminBin){
+    // k is bounds-checked against scatVec.size() here and below: with noDistBins
+    // pushed high enough (the multi-structure/mixture fit path can do this),
+    // qminBin can exceed every q value scatVec actually has, and an unguarded
+    // k++ walks off the end into unmapped memory (crashes reliably with 3+
+    // mixture states even though the data itself hasn't changed).
+    while(k < (int)scatVec.size() && scatVec[k][0]<qminBin){
       k++;
     }
     // std::cout << "\n j: " << j << ", qminBin: " << qminBin << ", qmaxBin: " << qmaxBin <<", scatVec[k] first: " << scatVec[k].first << ", scatVec[k] second: " << scatVec[k].second << "\n";
 
-    while(scatVec[k][0]>=qminBin &&scatVec[k][0]<=qmaxBin){
+    while(k < (int)scatVec.size() && scatVec[k][0]>=qminBin &&scatVec[k][0]<=qmaxBin){
 
           intensities.push_back(scatVec[k][1]);
           k++;
@@ -251,10 +256,12 @@ int experimentalData::setPhases(double &dMax,double &qmin,double &qmax){
 	  int noIntensities=0;
 	  std::vector<double> loggedIntensities;
 	  // if we have selected a higher q than the lowest experimental data, seacrch for the minimum point
-	  while(scatVec[k][0]<qminBin){
+	  // Same unguarded-walk issue as binDataCheck above: k has to stay
+	  // within scatVec's bounds or this reads past the end of the array.
+	  while(k < (int)scatVec.size() && scatVec[k][0]<qminBin){
 	    k++;
 	  }
-	  while(scatVec[k][0]>=qminBin &&scatVec[k][0]<=qmaxBin){
+	  while(k < (int)scatVec.size() && scatVec[k][0]>=qminBin &&scatVec[k][0]<=qmaxBin){
 	    intensities.push_back(scatVec[k][1]);
 	    if(scatVec[k][1]>0.0){
 	      double loggedInten = std::log(scatVec[k][1]);
@@ -267,8 +274,17 @@ int experimentalData::setPhases(double &dMax,double &qmin,double &qmax){
 	  //get the median
 	  std::sort(intensities.begin(),intensities.end());
 	  int size = intensities.size();
-	  int medPt =int(std::round(float(size)/2.0));
-	  experimentalIntensity.push_back(intensities[medPt-1]);
+	  if(size==0){
+	    // No experimental point fell in this q-bin (used to read
+	    // intensities[-1] here and crash). qvals already grew by one this
+	    // iteration regardless, so experimentalIntensity has to grow too or
+	    // the two fall out of step; reuse the previous bin's value rather
+	    // than fabricate a new one. First-bin edge case falls back to 0.0.
+	    experimentalIntensity.push_back(experimentalIntensity.empty() ? 0.0 : experimentalIntensity.back());
+	  } else {
+	    int medPt =int(std::round(float(size)/2.0));
+	    experimentalIntensity.push_back(intensities[medPt-1]);
+	  }
 	  // calulate the mean
 	  double mean = intensitySum/double(noIntensities);
 	}

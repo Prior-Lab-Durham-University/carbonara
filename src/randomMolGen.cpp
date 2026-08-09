@@ -2993,14 +2993,27 @@ double randomMol::getMaxDistChange(std::vector<point> &oldPts,std::vector<point>
       if(nextType=="Helix"){
 	std::vector<point> prevSec = newSection;
 	if(prevSec.size()==2){
-	  std::vector<point> prevPrevSec = molPos[index-1];
-	  newNewSection = blendLoopToHelix(prevPrevSec[prevPrevSec.size()-1],prevSec[prevSec.size()-2],prevSec[prevSec.size()-1],alphaKap,alphaTau,alphaAl,alphaCl,molDat[index+1].second,generator,suceeded,newIndex);
-	}else if(prevSec.size()==1){
-	  std::vector<point> prevPrevSec = molPos[index-1];
-	  if(prevPrevSec.size()==1){
-	    std::cout<<"problem two length 1 sections in a row\n";
+	  // index-1 is only meaningful if a section actually precedes index; without
+	  // that guard this reads molPos[-1] (undefined behaviour) whenever a freshly
+	  // regenerated first section of a chain is this short -- see randomMol::reshapeMol.
+	  if(index<1){
+	    suceeded=false;
+	    newNewSection = molPos[index+1];
+	  }else{
+	    std::vector<point> prevPrevSec = molPos[index-1];
+	    newNewSection = blendLoopToHelix(prevPrevSec[prevPrevSec.size()-1],prevSec[prevSec.size()-2],prevSec[prevSec.size()-1],alphaKap,alphaTau,alphaAl,alphaCl,molDat[index+1].second,generator,suceeded,newIndex);
 	  }
-	  newNewSection = blendLoopToHelix(prevPrevSec[prevPrevSec.size()-2],prevPrevSec[prevPrevSec.size()-1],prevSec[prevSec.size()-1],alphaKap,alphaTau,alphaAl,alphaCl,molDat[index+1].second,generator,suceeded,newIndex);
+	}else if(prevSec.size()==1){
+	  if(index<1){
+	    suceeded=false;
+	    newNewSection = molPos[index+1];
+	  }else{
+	    std::vector<point> prevPrevSec = molPos[index-1];
+	    if(prevPrevSec.size()==1){
+	      std::cout<<"problem two length 1 sections in a row\n";
+	    }
+	    newNewSection = blendLoopToHelix(prevPrevSec[prevPrevSec.size()-2],prevPrevSec[prevPrevSec.size()-1],prevSec[prevSec.size()-1],alphaKap,alphaTau,alphaAl,alphaCl,molDat[index+1].second,generator,suceeded,newIndex);
+	  }
 	}
 	else{
 	  newNewSection = blendLoopToHelix(prevSec[prevSec.size()-3],prevSec[prevSec.size()-2],prevSec[prevSec.size()-1],alphaKap,alphaTau,alphaAl,alphaCl,molDat[index+1].second,generator,suceeded,newIndex);
@@ -3008,16 +3021,26 @@ double randomMol::getMaxDistChange(std::vector<point> &oldPts,std::vector<point>
       }else if(nextType=="Strand"){
 	std::vector<point> prevSec = newSection;
 	if(prevSec.size()==2){
-	  std::vector<point> prevPrevSec = molPos[index-1];
-	  int loopOrStrand =1;
-	  newNewSection=blendLoopWithStrand(prevPrevSec[prevPrevSec.size()-1],prevSec[prevSec.size()-2],prevSec[prevSec.size()-1],molDat[index+1].second,generator,loopOrStrand,suceeded);
-	}else if(prevSec.size()==1){
-	  std::vector<point> prevPrevSec = molPos[index-1];
-	  if(prevPrevSec.size()==1){
-	    std::cout<<"problem two length 1 sections in a row\n";
+	  if(index<1){
+	    suceeded=false;
+	    newNewSection = molPos[index+1];
+	  }else{
+	    std::vector<point> prevPrevSec = molPos[index-1];
+	    int loopOrStrand =1;
+	    newNewSection=blendLoopWithStrand(prevPrevSec[prevPrevSec.size()-1],prevSec[prevSec.size()-2],prevSec[prevSec.size()-1],molDat[index+1].second,generator,loopOrStrand,suceeded);
 	  }
-	  int loopOrStrand =1;
-	  newNewSection=blendLoopWithStrand(prevPrevSec[prevPrevSec.size()-2],prevPrevSec[prevPrevSec.size()-1],prevSec[prevSec.size()-1],molDat[index+1].second,generator,loopOrStrand,suceeded);
+	}else if(prevSec.size()==1){
+	  if(index<1){
+	    suceeded=false;
+	    newNewSection = molPos[index+1];
+	  }else{
+	    std::vector<point> prevPrevSec = molPos[index-1];
+	    if(prevPrevSec.size()==1){
+	      std::cout<<"problem two length 1 sections in a row\n";
+	    }
+	    int loopOrStrand =1;
+	    newNewSection=blendLoopWithStrand(prevPrevSec[prevPrevSec.size()-2],prevPrevSec[prevPrevSec.size()-1],prevSec[prevSec.size()-1],molDat[index+1].second,generator,loopOrStrand,suceeded);
+	  }
 	}
 	else{
 	  int loopOrStrand =1;
@@ -3027,16 +3050,26 @@ double randomMol::getMaxDistChange(std::vector<point> &oldPts,std::vector<point>
 	// here it is a strand to loop transistion
 	std::vector<point> prevSec = newSection;
 	if(prevSec.size()==2){
-	  std::vector<point> prevPrevSec = molPos[index-1];
-	  int loopOrStrand =0;
-	  newNewSection=blendLoopWithStrand(prevPrevSec[prevPrevSec.size()-1],prevSec[prevSec.size()-2],prevSec[prevSec.size()-1],molDat[index+1].second,generator,loopOrStrand,suceeded);
-	}else if(prevSec.size()==1){
-	  std::vector<point> prevPrevSec = molPos[index-1];
-	  if(prevPrevSec.size()==1){
-	    std::cout<<"problem two length 1 sections in a row\n";
+	  if(index<1){
+	    suceeded=false;
+	    newNewSection = molPos[index+1];
+	  }else{
+	    std::vector<point> prevPrevSec = molPos[index-1];
+	    int loopOrStrand =0;
+	    newNewSection=blendLoopWithStrand(prevPrevSec[prevPrevSec.size()-1],prevSec[prevSec.size()-2],prevSec[prevSec.size()-1],molDat[index+1].second,generator,loopOrStrand,suceeded);
 	  }
-	  int loopOrStrand =0;
-	  newNewSection=blendLoopWithStrand(prevPrevSec[prevPrevSec.size()-2],prevPrevSec[prevPrevSec.size()-1],prevSec[prevSec.size()-1],molDat[index+1].second,generator,loopOrStrand,suceeded);
+	}else if(prevSec.size()==1){
+	  if(index<1){
+	    suceeded=false;
+	    newNewSection = molPos[index+1];
+	  }else{
+	    std::vector<point> prevPrevSec = molPos[index-1];
+	    if(prevPrevSec.size()==1){
+	      std::cout<<"problem two length 1 sections in a row\n";
+	    }
+	    int loopOrStrand =0;
+	    newNewSection=blendLoopWithStrand(prevPrevSec[prevPrevSec.size()-2],prevPrevSec[prevPrevSec.size()-1],prevSec[prevSec.size()-1],molDat[index+1].second,generator,loopOrStrand,suceeded);
+	  }
 	}
 	else{
 	  int loopOrStrand =0;

@@ -54,7 +54,7 @@ int main(int argc, const char* argv[]) {
     // Perform single fit
     std::vector<std::vector<double>> dummyMixtureList = {{1.0}}; // 100% of single structure
     std::vector<double> dummyHelRatList = {0.5}; // Dummy helix ratio
-    std::pair<double, double> fit = molState.getOverallFit_ChiSq(ed, dummyMixtureList, params.kmin, params.kmaxCurr);
+    std::pair<double, double> fit = molState.computeOverallFit(ed, dummyMixtureList, params.kmin, params.kmaxCurr, FitMode{true, false});
 
     std::cout<<"fit quality "<<fit.second<<"\n";
 			    

@@ -174,10 +174,15 @@ def write_runme(
     max_backmap: int = 3,
     defer_backmap_seconds: int = 600,
     do_foxs: bool = True,
+    do_backmap: bool = True,
     backend: str = "modeller",
     cg2all_exec: str = "./bin/micromamba run -p /root/micromamba/envs/cg2all convert_cg2all",
     disulfide_constraints_file: str = "",
     foxs_cmd_default: str = "pyfoxs",
+    max_writhe_diff: float = -1.0,
+    writhe_diff_stride: int = 1,
+    penalty_weight: float = 5.0,
+    distance_constraint_cap: float = 50.0,
 ):
     curr = os.getcwd()
     script_name = "RunMe_" + str(fit_name) + ".sh"
@@ -334,59 +339,101 @@ def write_runme(
         "### argv[19] use errors in scattering calculation",
         'useErrors="True"',
         "",
-        "# ========= NEW: backmapping backend =========",
-        f'BACKMAP_BACKEND="{backend}"',
-        f'CG2ALL_EXEC="{cg2all_exec}"',
-        f'DISULFIDE_CONSTRAINTS_FILE="{disulfide_constraints_file}"',
-        "# ===========================================",
+        "### argv[20] max writhe-difference allowed between ensemble members (<=0 disables)",
+        f"maxWritheDiff={max_writhe_diff}",
         "",
-        "# ========= NEW: start watcher (background) =========",
-        'WATCHER_SCRIPT="$ROOT/watch_and_backmap.py"',
-        'BACKMAP_SCRIPT="$ROOT/backmap_cli.py"',
-        'WATCHER_LOG="$predictionFile/watcher.out"',
+        "### argv[21] CA-backbone stride for the writhe-difference calculation above",
+        f"writheDiffStride={int(writhe_diff_stride)}",
         "",
-        'if [[ ! -f "$WATCHER_SCRIPT" ]]; then',
-        '    echo "ERROR: watcher script not found: $WATCHER_SCRIPT"',
-        "    exit 1",
-        "fi",
-        'if [[ ! -f "$BACKMAP_SCRIPT" ]]; then',
-        '    echo "ERROR: backmap script not found: $BACKMAP_SCRIPT"',
-        "    exit 1",
-        "fi",
+        "### argv[22] penalty weight: currFit = chi2 * (1 + penaltyWeight * penalties)",
+        f"penaltyWeight={penalty_weight}",
         "",
-        "WATCHER_ARGS=(",
-        '    --watch-dir "$predictionFile"',
-        f'    --scenario-root "$ROOT/{data_path}"',
-        '    --backmap-script "$BACKMAP_SCRIPT"',
-        f'    --max-backmap {int(max_backmap)}',
-        '    --no-structures "$noStructures"',
-        f'    --defer-backmap-seconds {int(defer_backmap_seconds)}',
-        '    --backend "$BACKMAP_BACKEND"',
+        "### argv[23] cap on a single soft distance-constraint pair's penalty contribution",
+        "### (hard-flagged pairs -- disulfides, strict posts -- are unaffected; they're a",
+        "### feasibility filter, not a penalty)",
+        f"distanceConstraintCap={distance_constraint_cap}",
+        "",
     ]
 
-    if do_foxs:
+    if do_backmap:
         lines.extend([
-            '    --do-foxs',
-            '    --foxs-py "$FOXS_CMD"',
-            '    --saxs "$ScatterFile"',
-            '    --max-q "$kmax"',
+            "# ========= NEW: backmapping backend =========",
+            f'BACKMAP_BACKEND="{backend}"',
+            f'CG2ALL_EXEC="{cg2all_exec}"',
+            f'DISULFIDE_CONSTRAINTS_FILE="{disulfide_constraints_file}"',
+            "# ===========================================",
+            "",
+            "# ========= NEW: start watcher (background) =========",
+            'WATCHER_SCRIPT="$ROOT/watch_and_backmap.py"',
+            'BACKMAP_SCRIPT="$ROOT/backmap_cli.py"',
+            'WATCHER_LOG="$predictionFile/watcher.out"',
+            "",
+            'if [[ ! -f "$WATCHER_SCRIPT" ]]; then',
+            '    echo "ERROR: watcher script not found: $WATCHER_SCRIPT"',
+            "    exit 1",
+            "fi",
+            'if [[ ! -f "$BACKMAP_SCRIPT" ]]; then',
+            '    echo "ERROR: backmap script not found: $BACKMAP_SCRIPT"',
+            "    exit 1",
+            "fi",
+            "",
+            "WATCHER_ARGS=(",
+            '    --watch-dir "$predictionFile"',
+            f'    --scenario-root "$ROOT/{data_path}"',
+            '    --backmap-script "$BACKMAP_SCRIPT"',
+            f'    --max-backmap {int(max_backmap)}',
+            '    --no-structures "$noStructures"',
+            f'    --defer-backmap-seconds {int(defer_backmap_seconds)}',
+            '    --backend "$BACKMAP_BACKEND"',
+        ])
+
+        if do_foxs:
+            lines.extend([
+                '    --do-foxs',
+                '    --foxs-py "$FOXS_CMD"',
+                '    --saxs "$ScatterFile"',
+                '    --max-q "$kmax"',
+            ])
+
+        lines.extend([
+            ")",
+            "",
+            'if [[ "$BACKMAP_BACKEND" == "cg2all" ]]; then',
+            '    WATCHER_ARGS+=(--cg2all-exec "$CG2ALL_EXEC")',
+            "fi",
+            "",
+            'if [[ -n "$DISULFIDE_CONSTRAINTS_FILE" ]]; then',
+            '    WATCHER_ARGS+=(--disulfide-file "$DISULFIDE_CONSTRAINTS_FILE")',
+            "fi",
+            "",
+            'python "$WATCHER_SCRIPT" "${WATCHER_ARGS[@]}" > "$WATCHER_LOG" 2>&1 &',
+            'WATCHER_PID=$!',
+            'echo "Watcher started (PID=$WATCHER_PID)"',
+            "# ==================================================",
+            "",
+        ])
+    else:
+        lines.extend([
+            "# Backmapping/FoXS watcher disabled (--no_backmap): raw Carbonara search only.",
+            "# WATCHER_PID stays empty (declared above), so the shutdown trap is unaffected.",
+            'echo "Backmapping disabled -- running raw search only, no all-atom reconstruction or FoXS scoring."',
+            "",
         ])
 
     lines.extend([
-        ")",
-        "",
-        'if [[ "$BACKMAP_BACKEND" == "cg2all" ]]; then',
-        '    WATCHER_ARGS+=(--cg2all-exec "$CG2ALL_EXEC")',
+        # stdbuf is GNU coreutils only; macOS/BSD has no equivalent. It only
+        # forces line-buffered stdout/stderr for live tailing, so skip it
+        # rather than failing the whole (backgrounded, silently-swallowed) run.
+        # A plain (possibly empty) string, not an array: bash 3.2 (macOS's
+        # default /bin/bash) treats an empty array expanded as "${arr[@]}"
+        # as an unbound-variable error under `set -u`, which — since this
+        # invocation is backgrounded — silently kills just the child and
+        # the run never starts.
+        "if command -v stdbuf >/dev/null 2>&1; then",
+        '    RUN_PREFIX="stdbuf -oL -eL"',
+        "else",
+        '    RUN_PREFIX=""',
         "fi",
-        "",
-        'if [[ -n "$DISULFIDE_CONSTRAINTS_FILE" ]]; then',
-        '    WATCHER_ARGS+=(--disulfide-file "$DISULFIDE_CONSTRAINTS_FILE")',
-        "fi",
-        "",
-        'python "$WATCHER_SCRIPT" "${WATCHER_ARGS[@]}" > "$WATCHER_LOG" 2>&1 &',
-        'WATCHER_PID=$!',
-        'echo "Watcher started (PID=$WATCHER_PID)"',
-        "# ==================================================",
         "",
         f"for i in {{1..{fit_n_times}}}",
         "do",
@@ -396,7 +443,7 @@ def write_runme(
         '    echo "Max number of fitting steps: " $maxNoFitSteps',
         '    echo ""',
         "",
-        '    stdbuf -oL -eL \\',
+        "    $RUN_PREFIX \\",
         '    "$ROOT/build/bin/predictStructureQvary" \\',
         '        "$ScatterFile" \\',
         '        "$fileLocs" \\',
@@ -417,6 +464,10 @@ def write_runme(
         '        "$endLinePrevLog" \\',
         '        "$affineTrans" \\',
         '        "$useErrors" \\',
+        '        "$maxWritheDiff" \\',
+        '        "$writheDiffStride" \\',
+        '        "$penaltyWeight" \\',
+        '        "$distanceConstraintCap" \\',
         '        > "$predictionFile/run$i.out" 2> "$predictionFile/run$i.err" &',
         "",
         '    PIDS+=($!)',
@@ -537,6 +588,13 @@ def main():
                     help="Ignore early structures for this many seconds before backmapping starts (default: 600)")
     parser.add_argument("--no_foxs", action="store_true",
                     help="Do not enable FoXS in the generated run script")
+    parser.add_argument("--no_backmap", action="store_true",
+                    help="Do not start the backmapping/FoXS watcher at all -- the generated run "
+                         "script just runs the raw Carbonara search (no all-atom reconstruction, "
+                         "no FoXS scoring, no MODELLER/cg2all dependency). Live progress is still "
+                         "visible in fitLog<i>.dat, written directly by the search regardless of "
+                         "this flag; runner.start_monitor() has nothing to report without the "
+                         "watcher, so skip calling it when this is set.")
     parser.add_argument("--backend", choices=["modeller", "cg2all"], default="modeller",
                     help="Backmapping backend for the generated RunMe script")
     parser.add_argument("--disulfide_constraints_file", default="",
@@ -544,6 +602,31 @@ def main():
     parser.add_argument("--foxs_cmd_default", default="pyfoxs",
                     help="Default FoXS command for the generated RunMe script; user can still override as first shell arg")
     parser.add_argument("--cg2all_exec",default=None,help="Override cg2all executable command string (advanced users only)")
+    parser.add_argument("--max_writhe_diff", type=float, default=-1.0,
+                    help="Ensemble fitting only (mixture_n > 1): soft-penalise a candidate "
+                         "structure if the L1 distance between its full pairwise-writhe "
+                         "matrix and another ensemble member's exceeds this. <= 0 disables "
+                         "it (default) -- existing single-state runs are unaffected either way.")
+    parser.add_argument("--writhe_diff_stride", type=int, default=1,
+                    help="Stride the CA backbone by this many residues before the "
+                         "--max_writhe_diff calculation (e.g. 2 or 4): cheaper, and coarser "
+                         "-- filters out local wiggle so the comparison reflects overall fold "
+                         "changes more than backbone jitter. Only used when --max_writhe_diff is set.")
+    parser.add_argument("--penalty_weight", type=float, default=5.0,
+                    help="Weight on the soft constraint penalties (overlap, distance, writhe, "
+                         "writhe-diff) relative to chi2: currFit = chi2 * (1 + penalty_weight * "
+                         "penalties). Proportional, so penalties keep the same relative influence "
+                         "whether chi2 is small (near convergence) or large (early in a hard fit, "
+                         "or just a noisy/high-chi2 dataset) -- tune per system, there's no single "
+                         "correct value (default: 5.0).")
+    parser.add_argument("--distance_constraint_cap", type=float, default=50.0,
+                    help="Ceiling on a single *soft* distance-constraint pair's penalty "
+                         "contribution -- identical to the uncapped quartic for small "
+                         "violations, saturates for large ones instead of growing unboundedly. "
+                         "Keeps a strict tolerance from producing a penalty that swamps chi2 "
+                         "unpredictably. Does not apply to *hard*-flagged pairs (disulfides, "
+                         "strict posts), which are enforced as a true feasibility filter "
+                         "instead and are unaffected by this value (default: 50.0).")
     args = parser.parse_args()
     
     def detect_cg2all_exec(user_value):
@@ -637,7 +720,22 @@ def main():
         else:
             # auto select flexible linker chains that dont break inter-beta sheets
             for coord_file in coords_files:
-                varying_linker_chains.append(cdt.auto_select_varying_linker(coord_file, fingerprint_file))
+                varying = cdt.auto_select_varying_linker(coord_file, fingerprint_file)
+                # Don't propose a loop that would stretch a real Cys-Cys bond
+                # when reshaped -- reuses the same 25-sample-per-loop
+                # rand_structures/ output the sheet check above just
+                # generated, and measures the real CA-CA distance for each
+                # disulfide pair in each sample, same idea as the sheet
+                # check's own bond-count measurement.
+                try:
+                    disulfide_pdb = (
+                        args.pdb if args.pdb.lower().endswith(".pdb")
+                        else cdt._carbonara_cif_to_pdb(args.pdb)
+                    )
+                    varying = cdt.disulfide_safe_linkers(varying, disulfide_pdb, coord_file, fingerprint_file)
+                except Exception as exc:
+                    print(f"disulfide-aware linker filtering skipped: {exc}")
+                varying_linker_chains.append(varying)
 
         # write flexible linkers to files (varysections1.dat, varysections2.dat, etc [each file is for a different chain])
         varying_section_files = []
@@ -706,10 +804,15 @@ def main():
             max_backmap=args.max_backmap,
             defer_backmap_seconds=args.defer_backmap_seconds,
             do_foxs=(not args.no_foxs),
+            do_backmap=(not args.no_backmap),
             backend=args.backend,
             cg2all_exec=args.cg2all_exec,
             disulfide_constraints_file=args.disulfide_constraints_file,
             foxs_cmd_default=args.foxs_cmd_default,
+            max_writhe_diff=args.max_writhe_diff,
+            writhe_diff_stride=args.writhe_diff_stride,
+            penalty_weight=args.penalty_weight,
+            distance_constraint_cap=args.distance_constraint_cap,
         )
 
 

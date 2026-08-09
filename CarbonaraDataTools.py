@@ -1592,8 +1592,32 @@ def read_triplets_from_file(filename):
                 continue  # Skip non-numeric lines
     return np.array(data)
 
-def translate_distance_constraints(contactPredsIn,coords,working_path,fixedDistList=[]):
+def translate_distance_constraints(contactPredsIn,coords,working_path,fixedDistList=[],toleranceList=[],boundTypeList=[],hardList=[],ensembleOrList=[]):
     # shift the coordinates back one to fit [0,1, array labelling
+    # toleranceList: per-constraint tolerance (smaller = stricter). Defaults to 0.5 for
+    # every row if not given, matching the original behaviour.
+    # boundTypeList: per-constraint 0=two-sided target distance (default, penalises both
+    # closer and farther), 1=upper-bound-only (penalises only if the actual distance
+    # exceeds the target -- for restraints like crosslinks where being closer than the
+    # measured reach is not a violation). Requires a Carbonara build with the matching
+    # ktlMoleculeRandom.cpp patch; ignored (treated as 0) by older builds.
+    # hardList: per-constraint 0=soft (default -- contributes a bounded penalty, can be
+    # traded against chi2), 1=hard (a true feasibility filter -- moves violating it beyond
+    # its tolerance are rejected outright, no matter how much chi2 improves; excluded from
+    # the soft-penalty sum entirely). Use this for restraints that must never break --
+    # disulfides, a strict circular-permutation post -- rather than relying on an very small
+    # tolerance alone, which only makes breaking it *expensive*, not impossible.
+    # ensembleOrList: mixture_n > 1 (ensemble fitting) only. Per-constraint 0=default (soft
+    # penalty summed across every mixture state -- every conformation pressured to satisfy
+    # it), 1=ensemble-OR (only the single best/least-violating mixture state's penalty for
+    # this pair counts -- "satisfied by any one conformation", e.g. a crosslink that might
+    # only form in one state of a solution ensemble). No effect on hard pairs, and no effect
+    # at all when mixture_n==1 (min across one state == that state). Requires
+    # replicate_numbered_files' normal behaviour (identical constraint file per state, same
+    # pair order) -- don't hand-edit individual fixedDistanceConstraints{i}.dat files
+    # differently if you're using this. Requires a
+    # Carbonara build with the matching ktlMoleculeRandom.cpp patch; ignored (treated as 0,
+    # i.e. soft) by older builds.
     contactPreds =contactPredsIn
     dists= []
     for i in range(len(contactPredsIn)):
@@ -1625,12 +1649,15 @@ def translate_distance_constraints(contactPredsIn,coords,working_path,fixedDistL
             dist = fixedDistList[i]
         else:
             dist = np.linalg.norm(coords[contactPreds[i][1]-1]-coords[contactPreds[i][0]-1])
-        # contactPredNara.append(pair1+pair2+[dist])
-        contactPredNara.append(pair1+pair2+[dist]+[0.5])
+        tol = toleranceList[i] if len(toleranceList)>0 else 0.5
+        boundType = boundTypeList[i] if len(boundTypeList)>0 else 0
+        hard = hardList[i] if len(hardList)>0 else 0
+        ensembleOr = ensembleOrList[i] if len(ensembleOrList)>0 else 0
+        contactPredNara.append(pair1+pair2+[dist]+[tol]+[boundType]+[hard]+[ensembleOr])
         dists.append(dist)
 
         # now write to file
-    np.savetxt(working_path+"/fixedDistanceConstraints1.dat",contactPredNara,fmt="%i %i %i %i %1.10f %1.10f")
+    np.savetxt(working_path+"/fixedDistanceConstraints1.dat",contactPredNara,fmt="%i %i %i %i %1.10f %1.10f %i %i %i")
 
 
 def get_secondary(fingerprint_file):
@@ -2610,6 +2637,158 @@ def auto_select_varying_linker(coords_file, fingerprint_file):
             varying_linker_indices.append(section_index)
 
     return varying_linker_indices
+
+
+def find_disulfide_bonds_from_pdb(pdb_path, thr_min=1.8, thr_max=2.5):
+    """
+    Cys SG-SG pairs at real disulfide bond distance (standard S-S length is
+    ~2.05 A; thr_min/thr_max give normal refinement strain some room either
+    side), read straight from the raw PDB ATOM records -- before any of
+    Carbonara's own sanitizing/renumbering/chain-splitting.
+
+    Returns a list of ((chain, resSeq), (chain, resSeq)) tuples using the
+    PDB's own chain letters and residue numbers. Callers map these onto
+    Carbonara's post-split section numbering via disulfide_bonded_section_pairs,
+    since that mapping needs the same coordinate arrays the caller already
+    has for other reasons.
+    """
+    sg = {}
+    with open(pdb_path) as fh:
+        for line in fh:
+            if not line.startswith(("ATOM", "HETATM")):
+                continue
+            if line[17:20].strip() != "CYS" or line[12:16].strip() != "SG":
+                continue
+            try:
+                key = (line[21:22], int(line[22:26]))
+                xyz = np.array([float(line[30:38]), float(line[38:46]), float(line[46:54])])
+            except ValueError:
+                continue
+            sg[key] = xyz
+
+    keys = list(sg.keys())
+    bonds = []
+    for i in range(len(keys)):
+        for j in range(i + 1, len(keys)):
+            d = np.linalg.norm(sg[keys[i]] - sg[keys[j]])
+            if thr_min <= d <= thr_max:
+                bonds.append((keys[i], keys[j]))
+    return bonds
+
+
+def _read_cys_ca_from_pdb(pdb_path):
+    """Cys CA coordinates keyed by (chain, resSeq), same key space as
+    find_disulfide_bonds_from_pdb -- used to relocate a bonded Cys inside
+    Carbonara's post-split coordinate arrays, since SG atoms don't survive
+    into the CA-only coarse-grained representation."""
+    ca = {}
+    with open(pdb_path) as fh:
+        for line in fh:
+            if not line.startswith(("ATOM", "HETATM")):
+                continue
+            if line[17:20].strip() != "CYS" or line[12:16].strip() != "CA":
+                continue
+            try:
+                key = (line[21:22], int(line[22:26]))
+                xyz = np.array([float(line[30:38]), float(line[38:46]), float(line[46:54])])
+            except ValueError:
+                continue
+            ca[key] = xyz
+    return ca
+
+
+def disulfide_safe_linkers(varying_indices, pdb_path, coords_file, fingerprint_file,
+                            rand_dir='rand_structures', thr=1.5):
+    """
+    Empirical companion to find_non_varying_linkers' sheet check, for
+    disulfide bonds: reshaping one loop rebuilds the backbone as a chain of
+    local frames, so everything after the reshaped section gets rigidly
+    repositioned relative to everything before it (see
+    randomMolGen.cpp:reshapeMol, the `for(int j=index+2; ...)` loop) -- a
+    disulfide bond can get stretched by reshaping a loop that sits nowhere
+    near either bonded Cys, as long as the loop falls between them in
+    sequence. Rather than guess which loops that is from sequence position,
+    this reuses the SAME 25-sample-per-loop output
+    generate_random_structures already wrote to rand_dir (a side effect of
+    the auto_select_varying_linker call this must run right after, in the
+    same cwd, before anything cleans rand_dir up) and measures the real
+    CA-CA distance for every known disulfide pair in every sample. A loop
+    is only kept if none of its real trials stretched a pair's distance by
+    more than `thr` Angstrom beyond the reference structure.
+
+    Best-effort: returns varying_indices unfiltered if there are no
+    disulfide bonds, or if pdb_path/rand_dir can't be read.
+    """
+    bonds = find_disulfide_bonds_from_pdb(pdb_path)
+    if not bonds:
+        return list(varying_indices)
+
+    secondary = get_secondary(fingerprint_file)
+    chain_lengths = [len(ss) for ss in secondary]
+
+    try:
+        ref_coords_full = read_coords_from_file(coords_file)
+    except OSError:
+        return list(varying_indices)
+    ref_frag_coords, offset = [], 0
+    for n in chain_lengths:
+        ref_frag_coords.append(ref_coords_full[offset:offset + n])
+        offset += n
+
+    def find_pos(xyz):
+        for chain_i, arr in enumerate(ref_frag_coords):
+            if len(arr) == 0:
+                continue
+            d2 = np.sum((arr - xyz) ** 2, axis=1)
+            idx = int(np.argmin(d2))
+            if d2[idx] < 0.01:  # same atom, not just nearby -- sanitizing never moves coordinates
+                return chain_i, idx
+        return None
+
+    ca = _read_cys_ca_from_pdb(pdb_path)
+    flat_offsets = np.cumsum([0] + chain_lengths)
+    pairs = []  # (flat_index_a, flat_index_b, reference_distance)
+    for key1, key2 in bonds:
+        if key1 not in ca or key2 not in ca:
+            continue
+        loc1, loc2 = find_pos(ca[key1]), find_pos(ca[key2])
+        if loc1 is None or loc2 is None:
+            continue
+        flat1 = flat_offsets[loc1[0]] + loc1[1]
+        flat2 = flat_offsets[loc2[0]] + loc2[1]
+        ref_dist = np.linalg.norm(ref_coords_full[flat1] - ref_coords_full[flat2])
+        pairs.append((flat1, flat2, ref_dist))
+    if not pairs:
+        return list(varying_indices)
+
+    try:
+        rand_files = os.listdir(rand_dir)
+    except OSError:
+        return list(varying_indices)
+
+    safe = []
+    for l in varying_indices:
+        li = int(l)
+        sample_files = [f for f in rand_files if len(f.split('_')) > 1 and f.split('_')[1] == str(li)]
+        stretched = False
+        for fname in sample_files:
+            try:
+                sample_coords = read_coords_from_file(os.path.join(rand_dir, fname))
+            except OSError:
+                continue
+            if len(sample_coords) != len(ref_coords_full):
+                continue  # a repeat that failed the CA-CA check writes nothing; a length
+                          # mismatch here means something else is off -- skip, don't guess
+            for flat1, flat2, ref_dist in pairs:
+                d = np.linalg.norm(sample_coords[flat1] - sample_coords[flat2])
+                if d > ref_dist + thr:
+                    stretched = True
+                    break
+            if stretched:
+                break
+        if not stretched:
+            safe.append(l)
+    return safe
 
 def choose_sections_by_number(fullPoss, selected_ids):
     """

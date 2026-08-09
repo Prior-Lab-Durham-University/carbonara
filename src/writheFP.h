@@ -17,6 +17,17 @@ public:
   double acosC(double temp);
   double DI(std::vector<point>& pointList);
   double DIAbs(std::vector<point>& pointList);
+  // Ensemble writhe-difference restraint (mixture_states > 1 fitting):
+  // strideList thins a CA trace to every `stride`-th point (always keeping
+  // the last), trading resolution for speed and for how much local wiggle
+  // feeds into the comparison below. writheMatrixAbsDiff is the L1 distance
+  // between two same-length curves' full pairwise-segment writhe matrices --
+  // sum_{i<j} |wij(curve1) - wij(curve2)| -- i.e. the "sum(abs(Wr_a-Wr_b))
+  // over all segment pairs" quantity, not just a difference of two global
+  // scalars, so two structures with the same net writhe but different local
+  // crossing patterns still register as different.
+  std::vector<point> strideList(std::vector<point>& pointList, int stride);
+  double writheMatrixAbsDiff(std::vector<point>& pointList1, std::vector<point>& pointList2);
   //std::vector<double>  DI(std::vector<point>& pointList);
   double DIClosed(std::vector<point>& pointList);
   double muLink(std::vector<point>& pointList,std::vector<point>& pointList2,int size,int size2,int i, int j);

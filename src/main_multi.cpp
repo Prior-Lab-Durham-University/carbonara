@@ -58,7 +58,7 @@ void run_instance(int threadId, int argc, const char* argv[]) {
   Logger logger(logFilePath);
 
   /* Set up model parameters */
-  ModelParameters params = loadParameters(argv);
+  ModelParameters params = loadParameters(argv, argc);
 
   /* >> determine initial model: Two options no initial prediction, we must generate a structure
    or some initial structure provided. Actually we need a half-half option */
@@ -72,7 +72,7 @@ void run_instance(int threadId, int argc, const char* argv[]) {
   determineVaryingSections(argv, vary_sec_list_list);
     
   /* Read in any fixed distances constraints (contact predictions/sulfide bonds) */
-  readFixedDistancesConstraints(argv, mol);
+  readFixedDistancesConstraints(argv, mol, params);
 
   /* Read in the permissible mixture list */
   readPermissibleMixtures(argv, params);

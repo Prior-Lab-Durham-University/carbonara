@@ -21,7 +21,7 @@ void readInStructures(const char* argv[], std::vector<ktlMolecule>& mol, ModelPa
 void determineVaryingSections(const char* argv[], std::vector<std::vector<int>>& vary_sec_list_list);
 
 // Loads in (if availible) contanct constraints to referenced mol class
-void readFixedDistancesConstraints(const char* argv[], std::vector<ktlMolecule>& mol);
+void readFixedDistancesConstraints(const char* argv[], std::vector<ktlMolecule>& mol, ModelParameters& params);
 
 // Loads in mixture file into parameters
 void readPermissibleMixtures(const char* argv[], ModelParameters& params);
@@ -33,9 +33,11 @@ std::vector<int> findNumberSections(std::vector<ktlMolecule>& mol);
 std::vector<moleculeFitAndState> makeHistoricalStateSet(moleculeFitAndState molState, ModelParameters& params);
 
 
-// Increase kmax range logic - changes made in place with reference
+// Increase kmax range logic - changes made in place with reference. mode should be the
+// same FitMode the calling run is using elsewhere, so this recomputation is consistent
+// with the rest of the run instead of silently using a different fitting procedure.
 void increaseKmax(std::pair<double,double>& scatterFit, std::vector<moleculeFitAndState>& molFitAndStateSet,
-                  experimentalData& ed,  ModelParameters& params, Logger& logger);
+                  experimentalData& ed,  ModelParameters& params, Logger& logger, const FitMode &mode);
 
 
 // make referenced change to the newMol, return bool for c-alpha check
