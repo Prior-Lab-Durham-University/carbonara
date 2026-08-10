@@ -361,7 +361,9 @@ fitdata/allAtomRun7/mol7_sub_2_step_12_xyz_AA.pdb
 
 For `mixture_n > 1`, Carbonara does not simply score each component independently. Instead, it performs an approximate MultiFoXS-style fit. Each component is converted into a pyFoXS partial profile, and the grouped state is fitted as
 
-<p align="center"><code>I_mix(q) = C Σ_i w_i I_i(q; c1, c2)</code></p>
+$$
+I_{\mathrm{mix}}(q) = C \sum_i w_i I_i(q; c_1, c_2)
+$$
 
 where
 
