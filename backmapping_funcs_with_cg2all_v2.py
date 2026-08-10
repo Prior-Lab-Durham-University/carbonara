@@ -1608,11 +1608,13 @@ def CA2AA_cg2all(filename, outputname, disulfides=None, cg_model='CalphaBasedMod
     cmd += ['-p', filename, '-o', outputname, '--cg', cg_model]
     if extra_args:
         cmd += [str(x) for x in extra_args]
-
-    if stout:
-        subprocess.run(cmd, check=True)
-    else:
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    print(cmd)
+    with open("out.sh", "w") as file:
+        file.writelines(["source ~/miniforge3/bin/activate carbonara\nconda activate carbonara\n", " ".join(cmd)] )
+    #os.system("bash out.sh")
+    subprocess.run(["chmod", "+x", "out.sh"])
+    subprocess.run(["bash", "out.sh"])
+    print("done")
 
 
 def backmap_ca_chain(coords_file, fingerprint_file, write_directory, name,
