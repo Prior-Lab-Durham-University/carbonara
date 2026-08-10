@@ -24,10 +24,36 @@ For most users, we recommend the notebook/front-end workflow rather than calling
 Use:
 
 - `runCarbonara.ipynb` for a standard monomer or single-chain guided run;
-- `runCarbonaraUserFlex.ipynb` when you want to manually choose flexible/fixed sections;
-- `runCarbonaraMultimer.ipynb` for multimers, locked rigid-body units, distance constraints, and multi-structure SAXS fitting.
+- `runCarbonaraUserflex.ipynb` when you want to manually choose flexible/fixed sections;
+- `runCarbonaraMultimer.ipynb` for multimers, locked rigid-body units and distance constraints;
+- `runCarbonaraMultimerMultiStructure.ipynb` for automated multi-structure fitting with `mixture_n` and approximate MultiFoXS-style scoring.
 
 The core C++ executable can still be run directly from generated `RunMe_*.sh` scripts, but this is mainly useful for reproducing prepared runs or for advanced users.
+
+---
+
+## What should Carbonara outputs be used for?
+
+The paper frames Carbonara as a **SAXS-guided seeding framework** for exploring protein solution-state dynamics. The intended use is therefore not to treat a single Carbonara output as a final atomistic dynamical model. Instead, Carbonara should be used to generate experimentally plausible conformations or small ensembles that can seed more detailed downstream modelling.
+
+Recommended uses of Carbonara outputs include:
+
+- selecting SAXS-consistent starting conformations for molecular dynamics simulations;
+- launching independent MD replicas from several distinct Carbonara conformations;
+- seeding MD from conformations that would be difficult to reach from the AlphaFold or crystal structure alone;
+- generating candidate states for subsequent MD relaxation, ensemble refinement or Bayesian/maximum-entropy reweighting;
+- testing whether SAXS data support large-scale domain rearrangements, hinge motions or multimeric opening/closing motions.
+
+A practical workflow is:
+
+1. Start from an AlphaFold, crystallographic or other structural model.
+2. Use Carbonara to search large-scale Cα conformational changes guided by SAXS.
+3. Backmap selected Cα predictions to all-atom structures.
+4. Use the selected all-atom PDBs as starting structures for MD simulations.
+5. Analyse the resulting MD trajectories against SAXS and other experimental data.
+6. Reweight or refine the MD ensemble where appropriate.
+
+In this interpretation, Carbonara is a bridge between static structural predictions and fully atomistic dynamical modelling. It helps identify experimentally relevant regions of conformational space quickly, while MD is used afterwards to test stability, local relaxation, side-chain packing, solvent effects and physically realistic dynamics.
 
 ---
 
@@ -40,7 +66,7 @@ The core C++ executable can still be run directly from generated `RunMe_*.sh` sc
 | Full notebook / all-atom workflow | You want live monitoring, all-atom models, pyFoXS scoring, custom flexibility, constraints, multimers or mixtures | Guided setup, watcher, backmapping, FoXS scoring, visualisation and analysis |
 | Multimer / multi-state workflow | You have multiple chains, locked domains, constrained assemblies or conformational mixtures | Rigid-body rotations, distance constraints, `mixture_n`, and approximate MultiFoXS-style ensemble scoring |
 
-For new users, start with the notebook workflow. For complex systems, use `runCarbonaraMultimer.ipynb`.
+For new users, start with the notebook workflow. For complex systems, use `runCarbonaraMultimer.ipynb` or `runCarbonaraMultimerMultiStructure.ipynb`.
 
 ---
 
@@ -69,17 +95,25 @@ For `mixture_n > 1`, the watcher groups structures belonging to the same run and
 | Notebook | Best for | Demonstrates |
 |---|---|---|
 | `runCarbonara.ipynb` | Standard guided Carbonara setup | Single-state SAXS-guided refinement |
-| `runCarbonaraUserFlex.ipynb` | User-defined flexibility | Manual flexible/fixed section selection |
-| `runCarbonaraMultimer.ipynb` | Multimers, constrained assemblies and multi-state fitting | Locked rotations, distance constraints, `mixture_n`, and approximate MultiFoXS-style scoring |
+| `runCarbonaraUserflex.ipynb` | User-defined flexibility | Manual flexible/fixed section selection |
+| `runCarbonaraMultimer.ipynb` | Multimers and constrained assemblies | Locked rotations, distance constraints and multimer setup |
+| `runCarbonaraMultimerMultiStructure.ipynb` | Multimers, constrained assemblies and multi-state fitting | `mixture_n`, grouped all-atom monitoring, mixture weights and approximate MultiFoXS-style scoring |
+
+### `runCarbonara.ipynb`
+
+This notebook provides the standard guided Carbonara setup. It is the best starting point for most users and demonstrates a single-state SAXS-guided refinement workflow.
+
+### `runCarbonaraUserflex.ipynb`
+
+This notebook is for cases where the user wants to manually define flexible and fixed regions, rather than relying entirely on automatic flexible-section selection.
 
 ### `runCarbonaraMultimer.ipynb`
 
-This notebook demonstrates the advanced workflow for multimeric systems and conformational mixtures. It is the recommended route when:
+This notebook demonstrates the advanced workflow for multimeric systems and constrained assemblies. It is recommended when chains or domains should move as locked rigid units, or when motion is restricted by hinges, disulfides, contacts or other constraints.
 
-- chains or domains should move as locked rigid units;
-- motion is restricted by hinges, disulfides, contacts or other constraints;
-- the experimental SAXS profile may represent a mixture of states;
-- several structures should be fitted together using `mixture_n`.
+### `runCarbonaraMultimerMultiStructure.ipynb`
+
+This notebook demonstrates the automated multi-structure workflow. It is recommended when the experimental SAXS profile may represent a mixture of states, or when several structures should be fitted together using `mixture_n`.
 
 The notebook shows how to prepare repeated coordinate/fingerprint/constraint files for multi-structure fitting, launch the monitored all-atom workflow, inspect mixture weights, plot approximate MultiFoXS-style fits, and export selected PDBs.
 
@@ -92,6 +126,12 @@ Clone the repository:
 ```bash
 git clone https://github.com/Prior-Lab-Durham-University/carbonara.git
 cd carbonara
+```
+
+If you are using a specific branch, for example the current WAXSiS/pyFoXS workflow branch:
+
+```bash
+git checkout pseudoWaxsis
 ```
 
 Build the C++ executable:
@@ -110,21 +150,52 @@ The expected executable location is:
 build/bin/predictStructureQvary
 ```
 
-Set up the Python environment used by the notebooks and watcher. The exact setup depends on your system, but the environment should include at least:
+For the full interactive/all-atom workflow, run:
 
 ```bash
-python -m pip install numpy scipy pandas matplotlib tqdm biopython mdtraj py3Dmol pdbfixer openmm numba
+bash setupPython.sh
 ```
 
-The pyFoXS wrapper must use the same Python environment as the notebook/watcher. Check with:
+The setup script installs the Python/Git-installable dependencies needed by the notebook/front-end tools. It also handles packages that need special installation order, such as `biobox`, and installs pyFoXS runtime dependencies.
+
+We recommend running this inside a clean Python environment where possible. For example:
 
 ```bash
-which pyfoxs
-head -20 $(which pyfoxs)
-python -c "import numba; print(numba.__version__)"
+python3 -m venv .venv
+source .venv/bin/activate
+bash setupPython.sh
 ```
 
-Inside notebooks, prefer commands based on `sys.executable` so subprocesses use the active kernel environment.
+For `tcsh`/`csh` shells:
+
+```csh
+python3 -m venv .venv
+source .venv/bin/activate.csh
+bash setupPython.sh
+```
+
+If using Jupyter, register your Python environment as a kernel:
+
+```bash
+python -m ipykernel install --user \
+    --name carbonara \
+    --display-name "Python (Carbonara)"
+```
+
+Inside notebooks, prefer:
+
+```python
+import sys
+!{sys.executable} setup_carbonara_allAtom.py --help
+```
+
+rather than:
+
+```python
+!python setup_carbonara_allAtom.py --help
+```
+
+This ensures that notebook subprocesses use the same Python environment as the active kernel.
 
 ---
 
@@ -155,6 +226,74 @@ bash RunMe_<name>.sh
 ```
 
 or launch it from the notebook front end.
+
+---
+
+## Core C++ engine
+
+Use this route if you already have prepared Carbonara input files and a `RunMe_*.sh` script.
+
+This is the lightest route. It runs the core Carbonara fitting algorithm but does not automatically perform all-atom reconstruction or real-time pyFoXS scoring.
+
+Build the C++ algorithm:
+
+```bash
+mkdir -p build
+cd build
+cmake ..
+make
+cd ..
+```
+
+Run a prepared refinement:
+
+```bash
+sh RunMe_humanSMARCAL1.sh
+```
+
+or:
+
+```bash
+sh RunMe_C239S.sh
+```
+
+---
+
+## Basic setup for new structures
+
+Use this route if you have a starting structure and SAXS data and want Carbonara to generate the required input files and `RunMe_*.sh` script for you.
+
+You need:
+
+1. a starting structure, usually a PDB or mmCIF file from AlphaFold, crystallography, or another source;
+2. SAXS data in Å units with columns for `q`, intensity and experimental error;
+3. the C++ Carbonara binary built with CMake.
+
+Set up a new run:
+
+```bash
+python setup_carbonara.py \
+    --pdb path/to/model.pdb \
+    --saxs path/to/saxs.dat \
+    --name ProteinName
+```
+
+Then run:
+
+```bash
+sh RunMe_ProteinName.sh
+```
+
+For a one-shot default run:
+
+```bash
+python run_carbonara_oneshot.py \
+    --pdb path/to/model.pdb \
+    --saxs path/to/saxs.dat \
+    --name ProteinName
+```
+
+This route is useful when you want to get a standard Carbonara run started quickly. It does not attempt to give the same level of interactivity, real-time all-atom reconstruction or live analysis as the full workflow.
 
 ---
 
@@ -222,19 +361,19 @@ fitdata/allAtomRun7/mol7_sub_2_step_12_xyz_AA.pdb
 
 For `mixture_n > 1`, Carbonara does not simply score each component independently. Instead, it performs an approximate MultiFoXS-style fit. Each component is converted into a pyFoXS partial profile, and the grouped state is fitted as
 
-\[
+$$
 I_{\rm mix}(q)
 =
 C \sum_i w_i I_i(q;c_1,c_2),
-\]
+$$
 
 where
 
-\[
+$$
 w_i \ge 0,
 \qquad
 \sum_i w_i = 1.
-\]
+$$
 
 The mixture fit optimises:
 
@@ -318,7 +457,7 @@ Use this when:
 - you want to analyse the diversity of good solutions;
 - you do not yet know what SAXS score is realistically achievable.
 
-This is the recommended mode for final production searches.
+This is the recommended mode for final production searches and for generating multiple candidate seeds for MD.
 
 ### 2. Stop-on-good-fit screening
 
@@ -587,11 +726,11 @@ If this fails substantially, check that the watcher is using the partial-profile
 
 Carbonara's multi-state scoring is described here as **approximate MultiFoXS-style** scoring. It uses the same conceptual ensemble model:
 
-\[
+$$
 I_{\rm mix}(q)
 =
 C \sum_i w_i I_i(q;c_1,c_2),
-\]
+$$
 
 with non-negative weights and shared FoXS nuisance parameters, but it is implemented inside the Carbonara watcher/analysis workflow rather than by directly running the external MultiFoXS program.
 
@@ -601,7 +740,7 @@ with non-negative weights and shared FoXS nuisance parameters, but it is impleme
 
 If you use Carbonara in your research, please cite our preprint:
 
-```
+```bibtex
 @article{mckeown2026carbonara,
   title={Carbonara: a SAXS-guided seeding framework for exploring protein solution-state dynamics},
   author={McKeown, Joshua J and Brown, Cameron and Bale, Arron and Fisher, Hayden and Rambo, Robert and Essex, Jonathan and Degiacomi, Matteo T and Prior, Christopher},
@@ -610,7 +749,6 @@ If you use Carbonara in your research, please cite our preprint:
   year={2026},
   publisher={Cold Spring Harbor Laboratory}
 }
-
-![CC BY-NC-SA 4.0](https://licensebuttons.net/l/by-nc-sa/4.0/88x31.png)
+```
 
 This work is licensed under a [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License](https://creativecommons.org/licenses/by-nc-sa/4.0/).
