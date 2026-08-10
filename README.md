@@ -361,11 +361,7 @@ fitdata/allAtomRun7/mol7_sub_2_step_12_xyz_AA.pdb
 
 For `mixture_n > 1`, Carbonara does not simply score each component independently. Instead, it performs an approximate MultiFoXS-style fit. Each component is converted into a pyFoXS partial profile, and the grouped state is fitted as
 
-$$
-I_{\rm mix}(q)
-=
-C \sum_i w_i I_i(q;c_1,c_2),
-$$
+<p align="center"><code>I_mix(q) = C Σ_i w_i I_i(q; c1, c2)</code></p>
 
 where
 
@@ -726,11 +722,7 @@ If this fails substantially, check that the watcher is using the partial-profile
 
 Carbonara's multi-state scoring is described here as **approximate MultiFoXS-style** scoring. It uses the same conceptual ensemble model:
 
-$$
-I_{\rm mix}(q)
-=
-C \sum_i w_i I_i(q;c_1,c_2),
-$$
+<p align="center"><code>I_mix(q) = C Σ_i w_i I_i(q; c1, c2)</code></p>
 
 with non-negative weights and shared FoXS nuisance parameters, but it is implemented inside the Carbonara watcher/analysis workflow rather than by directly running the external MultiFoXS program.
 
