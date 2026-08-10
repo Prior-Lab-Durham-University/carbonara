@@ -15,6 +15,7 @@ import numpy as np
 from scipy.spatial.distance import cdist
 
 import os
+import sys
 import subprocess
 import shutil
 #import math
@@ -928,9 +929,10 @@ def generate_random_structures(coords_file, fingerprint_file):
 
     #print(linker_indices)
     linker_indices =np.asarray(linker_indices)
-    current = os.getcwd()
+    #current = os.getcwd() # this is only correct if the system path is also the carbonara folder
+    current = os.path.dirname(os.path.realpath(sys.argv[0]))
     random = 'rand_structures'
-    random_working = os.path.join(current, random)
+    random_working = os.path.join(os.getcwd(), random)
 
     if os.path.exists(random_working) and os.path.isdir(random_working):
         shutil.rmtree(random_working)
@@ -1189,7 +1191,7 @@ def setup_runs(refine_dir, number_runs = 3):
 
 
 
-# Writing to carbonara format
+# Writing to carbonara format
 
 def write_coordinates_file(coords, working_path, carb_index=1):
 
@@ -1231,18 +1233,43 @@ def write_fingerprint_file(number_chains, sequence, secondary_structure, working
 
 
 def write_varysections_file(varying_sections, working_path, carb_index=1):
-    # auto: run beta sheet breaking code; write output sections to file
-    file_write_name = working_path+"/varyingSectionSecondary" + str(carb_index) + ".dat"
-    f = open(file_write_name, "w")
+    """
+    Write Carbonara varying-section files.
 
-    for i, s in enumerate(varying_sections):
-        f.write(str(s))
+    For ordinary single-structure runs this preserves the old behaviour and
+    writes varyingSectionSecondary1.dat. For mixture/multimer runs, if the
+    folder contains coordinates1.dat, coordinates2.dat, ... then identical
+    varyingSectionSecondary1.dat, varyingSectionSecondary2.dat, ... files are
+    written so every numbered coordinate/fingerprint component has a matching
+    varying-section file.
+    """
+    working_path = str(working_path)
 
-        if i < len(varying_sections)-1:
-            f.write('\n')
-    f.close()
+    coord_indices = []
+    for fname in os.listdir(working_path):
+        m = re.match(r"coordinates(\d+)\.dat$", fname)
+        if m:
+            coord_indices.append(int(m.group(1)))
 
-    return file_write_name
+    if len(coord_indices) == 0:
+        coord_indices = [int(carb_index)]
+
+    written_files = []
+    for idx in sorted(coord_indices):
+        file_write_name = os.path.join(
+            working_path,
+            "varyingSectionSecondary" + str(idx) + ".dat",
+        )
+        with open(file_write_name, "w") as f:
+            for i, s in enumerate(varying_sections):
+                f.write(str(s))
+                if i < len(varying_sections) - 1:
+                    f.write("\n")
+        written_files.append(file_write_name)
+
+    # Backwards compatible return: old single-file use still gets a string;
+    # mixture use gets the list of numbered files written.
+    return written_files[0] if len(written_files) == 1 else written_files
 
 
 def write_mixture_file(working_path):
@@ -1592,45 +1619,78 @@ def read_triplets_from_file(filename):
                 continue  # Skip non-numeric lines
     return np.array(data)
 
-def translate_distance_constraints(contactPredsIn,coords,working_path,fixedDistList=[]):
-    # shift the coordinates back one to fit [0,1, array labelling
-    contactPreds =contactPredsIn
-    dists= []
-    for i in range(len(contactPredsIn)):
-        contactPreds[i][0] = contactPredsIn[i][0]
-        contactPreds[i][1] = contactPredsIn[i][1]
+def translate_distance_constraints(contactPredsIn, coords, working_path, fixedDistList=[]):
+    """
+    Translate residue-pair distance constraints into Carbonara section-local
+    fixed-distance constraints.
+
+    If the run folder contains multiple coordinate files, e.g.
+    coordinates1.dat, coordinates2.dat, coordinates3.dat, write identical
+    fixedDistanceConstraints1.dat, fixedDistanceConstraints2.dat,
+    fixedDistanceConstraints3.dat files. This is needed for mixture/multimer
+    runs where each coordinate/fingerprint component expects its own numbered
+    fixed-distance constraint file.
+    """
+    working_path = str(working_path)
+
+    # Work on a copy so the caller's contactPredsIn is not modified by sort().
+    contactPreds = [list(pair) for pair in contactPredsIn]
+
+    ss = get_secondary(working_path + "/fingerPrint1.dat")
+    sections = section_finder_sub(ss)
+
     contactPredNara = []
+    dists = []
+
     for i in range(len(contactPreds)):
         contactPreds[i].sort()
-        currIndex=0;
-        ss = get_secondary(working_path+"/fingerPrint1.dat")
-        sections = section_finder_sub(ss)
-        currMax=len(sections[0])
-        prevMax=0
-        while (contactPreds[i][0]>currMax and currIndex<len(sections)):
-            currIndex= currIndex+1
-            currMax=currMax+len(sections[currIndex])
-            prevMax = prevMax+len(sections[currIndex-1])
-           # second coord of pair
-        pair1 =[currIndex,contactPreds[i][0]-prevMax-1]
-        currIndex=0;
-        currMax=len(sections[0])
-        prevMax=0
-        while (contactPreds[i][1]>currMax and currIndex<len(sections)):
-            currIndex= currIndex+1
-            currMax=currMax+len(sections[currIndex])
-            prevMax = prevMax+len(sections[currIndex-1])
-        pair2 =[currIndex,contactPreds[i][1]-prevMax-1]
-        if len(fixedDistList)>0:
+
+        currIndex = 0
+        currMax = len(sections[0])
+        prevMax = 0
+        while contactPreds[i][0] > currMax and currIndex < len(sections) - 1:
+            currIndex = currIndex + 1
+            currMax = currMax + len(sections[currIndex])
+            prevMax = prevMax + len(sections[currIndex - 1])
+        pair1 = [currIndex, contactPreds[i][0] - prevMax - 1]
+
+        currIndex = 0
+        currMax = len(sections[0])
+        prevMax = 0
+        while contactPreds[i][1] > currMax and currIndex < len(sections) - 1:
+            currIndex = currIndex + 1
+            currMax = currMax + len(sections[currIndex])
+            prevMax = prevMax + len(sections[currIndex - 1])
+        pair2 = [currIndex, contactPreds[i][1] - prevMax - 1]
+
+        if len(fixedDistList) > 0:
             dist = fixedDistList[i]
         else:
-            dist = np.linalg.norm(coords[contactPreds[i][1]-1]-coords[contactPreds[i][0]-1])
-        # contactPredNara.append(pair1+pair2+[dist])
-        contactPredNara.append(pair1+pair2+[dist]+[0.5])
+            dist = np.linalg.norm(coords[contactPreds[i][1] - 1] - coords[contactPreds[i][0] - 1])
+
+        # contactPredNara.append(pair1 + pair2 + [dist])
+        contactPredNara.append(pair1 + pair2 + [dist] + [0.5])
         dists.append(dist)
 
-        # now write to file
-    np.savetxt(working_path+"/fixedDistanceConstraints1.dat",contactPredNara,fmt="%i %i %i %i %1.10f %1.10f")
+    # Write one numbered fixedDistanceConstraints file for every coordinatesN.dat
+    # in the same folder. If no coordinate files are found, preserve the old
+    # behaviour and write fixedDistanceConstraints1.dat.
+    coord_indices = []
+    for fname in os.listdir(working_path):
+        m = re.match(r"coordinates(\d+)\.dat$", fname)
+        if m:
+            coord_indices.append(int(m.group(1)))
+
+    if len(coord_indices) == 0:
+        coord_indices = [1]
+
+    written_files = []
+    for idx in sorted(coord_indices):
+        out_file = os.path.join(working_path, f"fixedDistanceConstraints{idx}.dat")
+        np.savetxt(out_file, contactPredNara, fmt="%i %i %i %i %1.10f %1.10f")
+        written_files.append(out_file)
+
+    return written_files
 
 
 def get_secondary(fingerprint_file):
@@ -2643,21 +2703,21 @@ def choose_sections_by_number_index(fullPoss, selected_ids):
     return [fullPoss[ss-1] for ss in selected_ids]
 
 
-def write_varysections_file_frontend(selected_secs,working_path):
-    ss_len_tensor = [len(i) for i in get_sses(working_path+"/fingerPrint1.dat")]
+def write_varysections_file_frontend(selected_secs, working_path):
+    ss_len_tensor = [len(i) for i in get_sses(working_path + "/fingerPrint1.dat")]
     # Calculate cumulative lengths
     cumulative_lengths = np.cumsum(ss_len_tensor)
 
     # Initialize an empty list to hold the chunked groups
     chunked_groups = [[] for _ in range(len(cumulative_lengths))]
-    
+
     for index in selected_secs:
         for i, cum_length in enumerate(cumulative_lengths):
             if index < cum_length:
                 chunked_groups[i].append(index)
                 break
     flattened = [item for sublist in chunked_groups for item in sublist]
-    write_varysections_file(flattened, working_path)
+    return write_varysections_file(flattened, working_path)
 
 
 def view_selected_sections_sequence(run_name):
@@ -2951,6 +3011,7 @@ def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None):
         if max_q is not None:
             cmd += ["--max_q", str(max_q)]
 
+        print(cmd)
         proc = subprocess.run(cmd, capture_output=True, text=True)
 
         stdout = proc.stdout

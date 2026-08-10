@@ -1,4 +1,6 @@
 import time
+import os
+import signal
 import subprocess
 import shlex
 from pathlib import Path
@@ -87,6 +89,16 @@ class WatchConfig:
     saxs_dat: Optional[Path] = None
     max_q: Optional[float] = None
 
+    # Shared FoXS nuisance-parameter bounds for mixture/ensemble fitting.
+    # These are only used for no_structures > 1.  The watcher generates
+    # pyFoXS partial profiles for each component and then fits one shared
+    # c1/c2 pair for the whole mixture.
+    foxs_min_c1: float = 0.99
+    foxs_max_c1: float = 1.05
+    foxs_min_c2: float = -2.0
+    foxs_max_c2: float = 4.0
+    foxs_partial_profile_size: int = 500
+
     # File patterns
     dat_glob: str = "*.dat"
     ignore_suffixes: tuple[str, ...] = (".tmp", ".part")
@@ -95,6 +107,12 @@ class WatchConfig:
     backend: str = "modeller"
     cg2all_exec: Optional[str] = None
     disulfide_file: Optional[Path] = None
+
+    # Optional batch-screening mode. Default is maximal exploration:
+    # leave every predictStructureQvary process running to maxNoFitSteps.
+    terminate_on_foxs: bool = False
+    terminate_threshold: Optional[float] = None
+    terminate_confirmation_count: int = 1
 
 
 def wait_until_stable(path: Path, stable_for: float, poll: float, timeout: float) -> bool:
@@ -226,6 +244,41 @@ def aa_pdb_for_dat(cfg: WatchConfig, dat_file: Path) -> Path:
     return run_dir / f"{dat_file.stem}_AA.pdb"
 
 
+def read_single_foxs_score_for_dat(cfg: WatchConfig, dat_file: Path) -> Optional[float]:
+    """
+    Read the FoXS chi^2 that backmap_cli.py writes for one ordinary
+    single-structure prediction. Mixture/ensemble scores are handled by
+    run_foxs_mixture_group().
+    """
+    run_i = extract_run_index(dat_file)
+    if run_i is None:
+        return None
+    run_dir = cfg.watch_dir / f"allAtomRun{run_i}"
+    summary = run_dir / "foxs_results.txt"
+    aa = aa_pdb_for_dat(cfg, dat_file)
+    if not summary.exists():
+        return None
+
+    aa_str = str(aa)
+    aa_name = aa.name
+    try:
+        lines = summary.read_text().splitlines()
+    except Exception:
+        return None
+
+    for line in reversed(lines):
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        # Current backmap_cli writes: <absolute/relative AA pdb path> <chi2|ERROR>
+        if parts[0] == aa_str or parts[0].endswith("/" + aa_name) or aa_name in parts[0]:
+            try:
+                return float(parts[-1])
+            except Exception:
+                return None
+    return None
+
+
 def _load_numeric_table(path: Path):
     try:
         data = np.loadtxt(path)
@@ -295,6 +348,13 @@ def _find_foxs_profile(outdir: Path, aa_pdb: Path, started_at: float):
 
 
 def _run_foxs_for_profile(cfg: WatchConfig, aa_pdb: Path, outdir: Path):
+    """
+    Legacy single-curve FoXS helper.
+
+    This is kept for reference/fallback, but mixture scoring below no longer
+    uses the fitted per-component FoXS curves.  For mixtures we instead run
+    pyFoXS with --write-partial-profile and fit shared c1/c2 ourselves.
+    """
     if not (cfg.foxs_py and cfg.saxs_dat and cfg.max_q is not None):
         raise ValueError("FoXS enabled but foxs_py/saxs_dat/max_q not set.")
 
@@ -315,10 +375,352 @@ def _run_foxs_for_profile(cfg: WatchConfig, aa_pdb: Path, outdir: Path):
     return profile, log_path, p.returncode
 
 
+def _expected_partial_profile_path(aa_pdb: Path) -> Path:
+    """
+    pyFoXS writes partial profiles as <input_pdb>.dat.  If the input PDB is
+    /path/model_AA.pdb, the partial-profile file is /path/model_AA.pdb.dat.
+    """
+    return Path(str(aa_pdb) + ".dat")
+
+
+def _run_foxs_for_partial_profile(cfg: WatchConfig, aa_pdb: Path, outdir: Path):
+    """
+    Generate a raw pyFoXS partial profile for one component, without supplying
+    the experimental SAXS curve.  This avoids per-component FoXS fitting/scaling.
+
+    The resulting partial profile can be recombined later as I(q; c1, c2).
+    """
+    if not (cfg.foxs_py and cfg.max_q is not None):
+        raise ValueError("FoXS partial-profile generation requires foxs_py and max_q.")
+
+    profile_path = _expected_partial_profile_path(aa_pdb)
+    try:
+        profile_path.unlink()
+    except FileNotFoundError:
+        pass
+    except Exception:
+        # Not fatal; the mtime/profile parser below will still catch failures.
+        pass
+
+    cmd = shlex.split(str(cfg.foxs_py)) + [
+        str(aa_pdb),
+        "--max_q", str(cfg.max_q),
+        "--profile_size", str(int(cfg.foxs_partial_profile_size)),
+        "--write-partial-profile",
+    ]
+
+    log_path = outdir / f"{aa_pdb.stem}_foxs_partial.log"
+    p = subprocess.run(cmd, cwd=str(outdir), capture_output=True, text=True)
+    log_path.write_text(
+        f"$ {' '.join(cmd)}\n\n=== STDOUT ===\n{p.stdout}\n\n=== STDERR ===\n{p.stderr}\n"
+    )
+
+    if p.returncode != 0:
+        return None, log_path, p.returncode
+
+    if profile_path.exists():
+        return profile_path, log_path, p.returncode
+
+    # Fallback: pyFoXS naming should be deterministic, but keep this robust.
+    # Do not use np.loadtxt here: pyFoXS partial-profile files deliberately
+    # have mixed row widths (q/I rows followed by partial-profile rows).
+    candidates = [f for f in outdir.glob(f"{aa_pdb.name}.dat") if f.exists() and f.stat().st_size > 0]
+    if candidates:
+        return max(candidates, key=lambda x: x.stat().st_mtime), log_path, p.returncode
+
+    return None, log_path, p.returncode
+
+
+def _parse_foxs_partial_profile(profile_path: Path):
+    """
+    Read the partial-profile format written by pyFoXS Profile.write_partial_profiles.
+
+    Current pyFoXS writes:
+        header lines starting with '#'
+        N rows: q intensity
+        then one row per partial profile, each with N intensity values
+
+    We also support the alternative 7-column layout expected by
+    Profile.read_partial_profiles:
+        q p0 p1 p2 p3 p4 p5
+    """
+    rows = []
+    with open(profile_path, "r", encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            s = raw.strip()
+            if not s or s.startswith("#"):
+                continue
+            try:
+                vals = [float(x) for x in s.split()]
+            except ValueError:
+                continue
+            if vals:
+                rows.append(vals)
+
+    if not rows:
+        raise ValueError(f"No numeric data found in partial profile {profile_path}")
+
+    # Alternative read_partial_profiles style: q plus six partials per row.
+    if all(len(r) == 7 for r in rows):
+        arr = np.asarray(rows, dtype=float)
+        return {
+            "q": arr[:, 0].astype(float),
+            "partials": arr[:, 1:].T.astype(float),
+            "profile_path": Path(profile_path),
+        }
+
+    q = []
+    default_I = []
+    idx = 0
+    while idx < len(rows) and len(rows[idx]) == 2:
+        q.append(rows[idx][0])
+        default_I.append(rows[idx][1])
+        idx += 1
+
+    if len(q) < 2:
+        raise ValueError(
+            f"Could not identify q/intensity block in pyFoXS partial profile {profile_path}"
+        )
+
+    n_q = len(q)
+    partial_rows = []
+    for r in rows[idx:]:
+        if len(r) == n_q:
+            partial_rows.append(r)
+
+    if len(partial_rows) < 3:
+        raise ValueError(
+            f"Expected at least 3 partial-profile rows of length {n_q} in {profile_path}; "
+            f"found {len(partial_rows)}"
+        )
+
+    # pyFoXS normally writes six partial profiles.  If a future option writes
+    # extra rows, keep the first six; if vacuum/partial mode writes only three,
+    # the summation function handles that.
+    if len(partial_rows) > 6:
+        partial_rows = partial_rows[:6]
+
+    q = np.asarray(q, dtype=float)
+    order = np.argsort(q)
+    partials = np.asarray(partial_rows, dtype=float)[:, order]
+
+    return {
+        "q": q[order],
+        "partials": partials,
+        "profile_path": Path(profile_path),
+    }
+
+
+def _sum_foxs_partial_profile(q: np.ndarray, partials: np.ndarray,
+                              c1: float, c2: float,
+                              average_radius: float = 1.58) -> np.ndarray:
+    """
+    Reconstruct I(q; c1, c2) from pyFoXS partial profiles.
+
+    This mirrors pyFoXS Profile.sum_partial_profiles:
+        I = p0 + G(q)^2 p1 - G(q) p2
+            + c2^2 p3 + c2 p4 - G(q)c2 p5      [if hydration terms exist]
+    with
+        G(q) = c1^3 exp(-rm^2 (c1^2 - 1) q^2 / (4 pi)).
+    """
+    q = np.asarray(q, dtype=float)
+    pp = np.asarray(partials, dtype=float)
+
+    if pp.ndim != 2 or pp.shape[0] < 3:
+        raise ValueError("partials must have shape (n_partial>=3, n_q)")
+
+    rm = float(average_radius)
+    coefficient = -rm * rm * (float(c1) * float(c1) - 1.0) / (4.0 * np.pi)
+    cube_c1 = float(c1) ** 3
+
+    x = coefficient * np.square(q)
+    G = np.full_like(x, cube_c1, dtype=float)
+    mask = np.fabs(x) > 1.0e-8
+    G[mask] *= np.exp(x[mask])
+
+    I = pp[0].copy()
+    I += G * G * pp[1]
+    I -= G * pp[2]
+
+    if pp.shape[0] > 3:
+        c2 = float(c2)
+        I += (c2 * c2) * pp[3]
+        I += c2 * pp[4]
+        if pp.shape[0] > 5:
+            I -= G * c2 * pp[5]
+
+    return I
+
+
+def _component_curves_from_partials(partial_records: list[dict],
+                                    q_target: np.ndarray,
+                                    c1: float,
+                                    c2: float) -> np.ndarray:
+    curves = []
+    for rec in partial_records:
+        q = np.asarray(rec["q"], dtype=float)
+        I = _sum_foxs_partial_profile(q, rec["partials"], c1, c2)
+
+        if len(q) != len(q_target) or np.max(np.abs(q - q_target)) > 1e-8:
+            I = np.interp(q_target, q, I)
+        curves.append(I.astype(float))
+
+    return np.vstack(curves)
+
+
+def _best_global_scale(model: np.ndarray, I_exp: np.ndarray, sigma: np.ndarray) -> float:
+    sig = np.where(np.asarray(sigma, dtype=float) <= 0, 1.0, sigma)
+    wt = 1.0 / (sig * sig)
+    denom = np.sum(wt * model * model)
+    if denom <= 0:
+        return 1.0
+    return float(np.sum(wt * I_exp * model) / denom)
+
+
+def _chi2_for_model(model: np.ndarray, I_exp: np.ndarray, sigma: np.ndarray) -> tuple[float, float]:
+    scale = _best_global_scale(model, I_exp, sigma)
+    sig = np.where(np.asarray(sigma, dtype=float) <= 0, 1.0, sigma)
+    r = (scale * model - I_exp) / sig
+    return float(np.mean(r * r)), scale
+
+
+def _fit_partial_profile_mixture(partial_records: list[dict],
+                                 q_exp: np.ndarray,
+                                 I_exp: np.ndarray,
+                                 sigma: np.ndarray,
+                                 cfg: WatchConfig):
+    """
+    Fit an approximate MultiFoXS-style mixture:
+        I_mix(q) = C * sum_i w_i I_i(q; c1, c2)
+
+    with one shared c1/c2 pair for the whole mixture, non-negative weights,
+    sum_i w_i = 1, and a single analytically fitted global scale C.
+    """
+    try:
+        from scipy.optimize import minimize
+    except Exception as exc:
+        raise ImportError("scipy is required for partial-profile mixture optimisation") from exc
+
+    q_exp = np.asarray(q_exp, dtype=float)
+    y = np.asarray(I_exp, dtype=float)
+    sig = np.where(np.asarray(sigma, dtype=float) <= 0, 1.0, sigma)
+    n = len(partial_records)
+
+    min_c1 = float(cfg.foxs_min_c1)
+    max_c1 = float(cfg.foxs_max_c1)
+    min_c2 = float(cfg.foxs_min_c2)
+    max_c2 = float(cfg.foxs_max_c2)
+
+    if min_c1 > max_c1:
+        min_c1, max_c1 = max_c1, min_c1
+    if min_c2 > max_c2:
+        min_c2, max_c2 = max_c2, min_c2
+
+    def objective(x):
+        w = np.asarray(x[:n], dtype=float)
+        c1 = float(x[n])
+        c2 = float(x[n + 1])
+        if np.any(w < -1e-8) or np.any(w > 1.0 + 1e-8):
+            return 1e100
+        if c1 < min_c1 - 1e-8 or c1 > max_c1 + 1e-8:
+            return 1e100
+        if c2 < min_c2 - 1e-8 or c2 > max_c2 + 1e-8:
+            return 1e100
+        comps = _component_curves_from_partials(partial_records, q_exp, c1, c2)
+        mix = np.dot(w, comps)
+        chi2, _scale = _chi2_for_model(mix, y, sig)
+        if not np.isfinite(chi2):
+            return 1e100
+        return chi2
+
+    cons = ({"type": "eq", "fun": lambda x: np.sum(x[:n]) - 1.0},)
+    bounds = [(0.0, 1.0)] * n + [(min_c1, max_c1), (min_c2, max_c2)]
+
+    weight_starts = [np.ones(n, dtype=float) / float(n)]
+    weight_starts.extend(np.eye(n, dtype=float))
+    rng = np.random.default_rng(12345)
+    for _ in range(min(6, max(2, 2 * n))):
+        weight_starts.append(rng.dirichlet(np.ones(n, dtype=float)))
+
+    mid_c1 = 0.5 * (min_c1 + max_c1)
+    mid_c2 = 0.5 * (min_c2 + max_c2)
+    c_starts = [(1.0, 0.0), (mid_c1, mid_c2)]
+    c_starts = [
+        (float(np.clip(c1, min_c1, max_c1)), float(np.clip(c2, min_c2, max_c2)))
+        for c1, c2 in c_starts
+    ]
+
+    best_res = None
+    best_val = np.inf
+
+    for w0 in weight_starts:
+        for c10, c20 in c_starts:
+            x0 = np.concatenate([np.asarray(w0, dtype=float), [c10, c20]])
+            try:
+                res = minimize(
+                    objective,
+                    x0,
+                    method="SLSQP",
+                    bounds=bounds,
+                    constraints=cons,
+                    options={"maxiter": 300, "ftol": 1e-9, "disp": False},
+                )
+            except Exception as exc:
+                print(f"[WARN] partial-profile mixture optimisation start failed: {exc}", flush=True)
+                continue
+
+            val = float(res.fun) if np.isfinite(res.fun) else np.inf
+            if val < best_val:
+                best_val = val
+                best_res = res
+
+    if best_res is None:
+        raise RuntimeError("partial-profile mixture optimisation failed for all starts")
+
+    if not best_res.success:
+        print(
+            f"[WARN] partial-profile mixture optimisation did not fully converge: {best_res.message}",
+            flush=True,
+        )
+
+    x = np.asarray(best_res.x, dtype=float)
+    weights = np.clip(x[:n], 0.0, 1.0)
+    s = float(np.sum(weights))
+    weights = weights / s if s > 0 else np.ones(n, dtype=float) / float(n)
+    c1 = float(np.clip(x[n], min_c1, max_c1))
+    c2 = float(np.clip(x[n + 1], min_c2, max_c2))
+
+    component_curves = _component_curves_from_partials(partial_records, q_exp, c1, c2)
+    mixture_curve_unscaled = np.dot(weights, component_curves)
+    chi2, scale = _chi2_for_model(mixture_curve_unscaled, y, sig)
+    mixture_curve = scale * mixture_curve_unscaled
+
+    # Sanity diagnostic: at the final shared c1/c2, what is the best pure component?
+    component_chi2 = []
+    for comp in component_curves:
+        cc, _cs = _chi2_for_model(comp, y, sig)
+        component_chi2.append(float(cc))
+
+    return {
+        "weights": weights,
+        "scale": float(scale),
+        "chi2": float(chi2),
+        "c1": c1,
+        "c2": c2,
+        "component_curves": component_curves,
+        "mixture_curve": mixture_curve,
+        "component_chi2": component_chi2,
+        "best_component_chi2": min(component_chi2) if component_chi2 else None,
+    }
+
+
 def _fit_simplex_weights(component_profiles: np.ndarray, I_exp: np.ndarray, sigma: np.ndarray):
     """
-    Fit non-negative weights summing to one, plus a single global scale factor.
-    component_profiles has shape (n_components, n_q).
+    Legacy mixture fit for already-computed component curves.
+
+    Kept for backward compatibility/debugging.  The default mixture path now
+    uses _fit_partial_profile_mixture() so that c1/c2 are shared across the
+    ensemble and component curves are not individually fitted to experiment.
     """
     try:
         from scipy.optimize import minimize
@@ -332,11 +734,7 @@ def _fit_simplex_weights(component_profiles: np.ndarray, I_exp: np.ndarray, sigm
     n = comps.shape[0]
 
     def best_scale(mix):
-        wt = 1.0 / (sig * sig)
-        denom = np.sum(wt * mix * mix)
-        if denom <= 0:
-            return 1.0
-        return float(np.sum(wt * y * mix) / denom)
+        return _best_global_scale(mix, y, sig)
 
     def objective(w):
         mix = np.dot(w, comps)
@@ -344,16 +742,25 @@ def _fit_simplex_weights(component_profiles: np.ndarray, I_exp: np.ndarray, sigm
         r = (c * mix - y) / sig
         return float(np.mean(r * r))
 
-    w0 = np.ones(n, dtype=float) / float(n)
+    weight_starts = [np.ones(n, dtype=float) / float(n)]
+    weight_starts.extend(np.eye(n, dtype=float))
+
     cons = ({"type": "eq", "fun": lambda w: np.sum(w) - 1.0},)
     bounds = [(0.0, 1.0)] * n
-    res = minimize(objective, w0, method="SLSQP", bounds=bounds, constraints=cons)
-    if not res.success:
-        # Still return the best point SLSQP found; this is usually useful in monitoring.
-        print(f"[WARN] mixture weight optimisation did not fully converge: {res.message}", flush=True)
-    w = np.clip(np.asarray(res.x, dtype=float), 0.0, 1.0)
+    best = None
+    best_val = np.inf
+    for w0 in weight_starts:
+        res = minimize(objective, w0, method="SLSQP", bounds=bounds, constraints=cons)
+        if np.isfinite(res.fun) and float(res.fun) < best_val:
+            best = res
+            best_val = float(res.fun)
+    if best is None:
+        raise RuntimeError("mixture weight optimisation failed")
+    if not best.success:
+        print(f"[WARN] mixture weight optimisation did not fully converge: {best.message}", flush=True)
+    w = np.clip(np.asarray(best.x, dtype=float), 0.0, 1.0)
     s = float(np.sum(w))
-    w = w / s if s > 0 else w0
+    w = w / s if s > 0 else weight_starts[0]
     mix = np.dot(w, comps)
     scale = best_scale(mix)
     chi2 = objective(w)
@@ -368,25 +775,52 @@ def _group_label(group_key):
     return f"mol{run_i}_{kind}"
 
 
-def _update_mixture_summary(summary_file: Path, label: str, chi2: float, weights, scale: float, pdbs):
+def _update_mixture_summary(summary_file: Path, label: str, chi2: float, weights,
+                            scale: float, pdbs, c1: float | None = None,
+                            c2: float | None = None,
+                            best_component_chi2: float | None = None,
+                            profile_paths=None):
     summary_file.parent.mkdir(parents=True, exist_ok=True)
     old = summary_file.read_text().splitlines() if summary_file.exists() else []
     old = [line for line in old if not line.startswith(label + " ")]
     wtxt = ",".join(f"{float(w):.6g}" for w in weights)
     pdbtxt = ",".join(str(p) for p in pdbs)
-    old.append(f"{label} chi2={chi2:.8g} scale={scale:.8g} weights={wtxt} pdbs={pdbtxt}")
+
+    fields = [
+        f"{label}",
+        f"chi2={float(chi2):.8g}",
+        f"scale={float(scale):.8g}",
+    ]
+    if c1 is not None:
+        fields.append(f"c1={float(c1):.8g}")
+    if c2 is not None:
+        fields.append(f"c2={float(c2):.8g}")
+    if best_component_chi2 is not None:
+        fields.append(f"best_component_chi2={float(best_component_chi2):.8g}")
+    fields.append(f"weights={wtxt}")
+    fields.append(f"pdbs={pdbtxt}")
+    if profile_paths is not None:
+        fields.append("profiles=" + ",".join(str(p) for p in profile_paths))
+
+    old.append(" ".join(fields))
     summary_file.write_text("\n".join(old) + "\n")
 
 
-def run_foxs_mixture_group(cfg: WatchConfig, group_key, files: list[Path]) -> int:
+def run_foxs_mixture_group(cfg: WatchConfig, group_key, files: list[Path]) -> tuple[int, Optional[float]]:
     """
-    Score a grouped mixture state by running FoXS on each all-atom component,
-    then fitting best non-negative mixture weights that sum to one.
+    Score a grouped mixture state using pyFoXS partial profiles.
+
+    This is an approximate MultiFoXS-style post-processing fit:
+      1. run pyFoXS on each component PDB with --write-partial-profile and no
+         experimental SAXS file, so no component is individually fitted/scaled;
+      2. reconstruct I_i(q; c1, c2) from the partial profiles;
+      3. optimise non-negative mixture weights, one shared c1/c2 pair, and one
+         global scale against the experimental SAXS data.
     """
     if not cfg.do_foxs:
-        return 0
+        return 0, None
     if len(files) <= 1:
-        return 0
+        return 0, None
 
     run_i = group_key[0]
     outdir = cfg.watch_dir / f"allAtomRun{run_i}"
@@ -394,36 +828,69 @@ def run_foxs_mixture_group(cfg: WatchConfig, group_key, files: list[Path]) -> in
     missing = [p for p in aa_pdbs if not p.exists()]
     if missing:
         print(f"[FOXS-MIX] missing AA PDBs: {', '.join(str(p) for p in missing)}", flush=True)
-        return 4
+        return 4, None
 
     q_exp, I_exp, sigma = _load_experimental_saxs(Path(cfg.saxs_dat), cfg.max_q)
-    curves = []
-    profiles = []
-    for aa in aa_pdbs:
-        profile, log_path, rc = _run_foxs_for_profile(cfg, aa, outdir)
-        if rc != 0 or profile is None:
-            print(f"[FOXS-MIX] FoXS failed/no profile for {aa.name}; see {log_path}", flush=True)
-            return 5
-        Icalc = _extract_calc_curve(profile, q_exp)
-        if Icalc is None:
-            print(f"[FOXS-MIX] Could not parse FoXS curve: {profile}", flush=True)
-            return 6
-        curves.append(Icalc)
-        profiles.append(profile)
 
-    weights, scale, chi2 = _fit_simplex_weights(np.vstack(curves), I_exp, sigma)
+    partial_records = []
+    partial_paths = []
+    for aa in aa_pdbs:
+        profile_path, log_path, rc = _run_foxs_for_partial_profile(cfg, aa, outdir)
+        if rc != 0 or profile_path is None:
+            print(f"[FOXS-MIX] pyFoXS partial profile failed for {aa.name}; see {log_path}", flush=True)
+            return 5, None
+        try:
+            rec = _parse_foxs_partial_profile(profile_path)
+        except Exception as exc:
+            print(f"[FOXS-MIX] Could not parse partial profile {profile_path}: {exc}", flush=True)
+            return 6, None
+        partial_records.append(rec)
+        partial_paths.append(profile_path)
+
+    try:
+        fit = _fit_partial_profile_mixture(partial_records, q_exp, I_exp, sigma, cfg)
+    except Exception as exc:
+        print(f"[FOXS-MIX] partial-profile mixture optimisation failed: {exc}", flush=True)
+        return 7, None
+
     label = _group_label(group_key)
 
-    # Write mixture curve for inspection.
-    mix = scale * np.dot(weights, np.vstack(curves))
     curve_file = outdir / f"{label}_foxs_mixture_fit.dat"
-    np.savetxt(curve_file, np.column_stack([q_exp, I_exp, sigma, mix]),
-               header="q I_exp sigma I_foxs_mixture_fit")
+    np.savetxt(
+        curve_file,
+        np.column_stack([q_exp, I_exp, sigma, fit["mixture_curve"]]),
+        header="q I_exp sigma I_foxs_mixture_fit",
+    )
+
+    component_curve_file = outdir / f"{label}_foxs_component_curves.dat"
+    np.savetxt(
+        component_curve_file,
+        np.column_stack([q_exp] + [c for c in fit["component_curves"]]),
+        header="q " + " ".join(f"I_component_{i}" for i in range(len(fit["component_curves"]))),
+    )
 
     summary_file = outdir / "foxs_mixture_results.txt"
-    _update_mixture_summary(summary_file, label, chi2, weights, scale, aa_pdbs)
-    print(f"[FOXS-MIX] {label} chi2={chi2:.6g} weights={','.join(f'{w:.4g}' for w in weights)}", flush=True)
-    return 0
+    _update_mixture_summary(
+        summary_file,
+        label,
+        fit["chi2"],
+        fit["weights"],
+        fit["scale"],
+        aa_pdbs,
+        c1=fit["c1"],
+        c2=fit["c2"],
+        best_component_chi2=fit["best_component_chi2"],
+        profile_paths=partial_paths,
+    )
+
+    print(
+        f"[FOXS-MIX] {label} chi2={fit['chi2']:.6g} "
+        f"c1={fit['c1']:.5g} c2={fit['c2']:.5g} "
+        f"weights={','.join(f'{w:.4g}' for w in fit['weights'])} "
+        f"best_component_chi2={fit['best_component_chi2']:.6g}",
+        flush=True,
+    )
+    return 0, float(fit["chi2"])
 
 
 class PollingWatcher:
@@ -437,6 +904,153 @@ class PollingWatcher:
         self._sem = threading.Semaphore(cfg.max_backmap)
         self._start_time = time.time()
         self._activation_time = self._start_time + cfg.defer_backmap_seconds
+        self._good_foxs_counts = {}  # run_i -> number of qualifying FoXS scores
+        self._termination_lock = threading.Lock()
+
+    def _pid_file_for_run(self, run_i: int) -> Path:
+        return self.cfg.watch_dir / f"run{run_i}.pid"
+
+    def _stopped_file_for_run(self, run_i: int) -> Path:
+        return self.cfg.watch_dir / f"run{run_i}.stopped"
+
+    def _stop_failed_file_for_run(self, run_i: int) -> Path:
+        return self.cfg.watch_dir / f"run{run_i}.stop_failed"
+
+    def _run_is_stopped(self, run_i: int) -> bool:
+        return self._stopped_file_for_run(run_i).exists()
+
+    @staticmethod
+    def _pid_is_alive(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # It exists, but we cannot signal it. Treat as alive so we do not
+            # accidentally report success.
+            return True
+
+    @staticmethod
+    def _pid_cmdline(pid: int) -> str:
+        proc_cmd = Path(f"/proc/{pid}/cmdline")
+        try:
+            raw = proc_cmd.read_bytes()
+        except Exception:
+            return ""
+        return raw.replace(b"\x00", b" ").decode(errors="ignore").strip()
+
+    def _write_stop_record(self, run_i: int, text: str) -> None:
+        path = self._stopped_file_for_run(run_i)
+        try:
+            path.write_text(text.rstrip() + "\n")
+        except Exception as exc:
+            print(f"[STOP] Could not write {path}: {exc}", flush=True)
+
+    def _write_stop_failed_record(self, run_i: int, text: str) -> None:
+        path = self._stop_failed_file_for_run(run_i)
+        try:
+            path.write_text(text.rstrip() + "\n")
+        except Exception as exc:
+            print(f"[STOP] Could not write {path}: {exc}", flush=True)
+
+    def _terminate_predictor_for_run(self, run_i: int, label: str, chi2: float, count: int) -> bool:
+        """Terminate exactly one predictStructureQvary process using run<i>.pid."""
+        pid_file = self._pid_file_for_run(run_i)
+        if not pid_file.exists():
+            msg = (
+                f"No PID file for run {run_i}: {pid_file}\n"
+                f"Wanted to stop after {label}, FoXS chi2={chi2:.8g}, qualifying_count={count}\n"
+            )
+            print(f"[STOP] {msg.strip()}", flush=True)
+            self._write_stop_failed_record(run_i, msg)
+            return False
+
+        try:
+            pid = int(pid_file.read_text().strip())
+        except Exception as exc:
+            msg = f"Could not read PID file {pid_file}: {exc}"
+            print(f"[STOP] {msg}", flush=True)
+            self._write_stop_failed_record(run_i, msg)
+            return False
+
+        cmdline = self._pid_cmdline(pid)
+        if cmdline and "predictStructureQvary" not in cmdline:
+            msg = (
+                f"Refusing to kill PID {pid} for run {run_i}: command line does not look like predictStructureQvary.\n"
+                f"cmdline={cmdline}\n"
+            )
+            print(f"[STOP] {msg.strip()}", flush=True)
+            self._write_stop_failed_record(run_i, msg)
+            return False
+
+        if not self._pid_is_alive(pid):
+            msg = (
+                f"Run {run_i} already finished before termination signal.\n"
+                f"Trigger: {label}, FoXS chi2={chi2:.8g}, qualifying_count={count}\n"
+            )
+            print(f"[STOP] {msg.strip()}", flush=True)
+            self._write_stop_record(run_i, msg)
+            return True
+
+        try:
+            print(f"[STOP] Terminating run {run_i} PID={pid}: {label}, FoXS chi2={chi2:.6g}", flush=True)
+            os.kill(pid, signal.SIGTERM)
+            time.sleep(1.0)
+            if self._pid_is_alive(pid):
+                print(f"[STOP] PID={pid} still alive; sending SIGKILL", flush=True)
+                os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            # Finished between checks. This is still a successful stop decision.
+            pass
+        except Exception as exc:
+            msg = f"Failed to terminate run {run_i} PID={pid}: {exc}"
+            print(f"[STOP] {msg}", flush=True)
+            self._write_stop_failed_record(run_i, msg)
+            return False
+
+        msg = (
+            f"Stopped run {run_i}\n"
+            f"PID: {pid}\n"
+            f"Trigger: {label}\n"
+            f"FoXS chi2: {chi2:.8g}\n"
+            f"Threshold: {self.cfg.terminate_threshold}\n"
+            f"Qualifying count: {count}\n"
+            f"Required count: {self.cfg.terminate_confirmation_count}\n"
+        )
+        self._write_stop_record(run_i, msg)
+        return True
+
+    def _consider_foxs_termination(self, run_i: int, label: str, chi2: Optional[float]) -> None:
+        if not self.cfg.terminate_on_foxs:
+            return
+        if chi2 is None:
+            return
+        if self.cfg.terminate_threshold is None:
+            return
+
+        try:
+            chi2_f = float(chi2)
+            threshold = float(self.cfg.terminate_threshold)
+        except Exception:
+            return
+
+        if chi2_f > threshold:
+            return
+
+        with self._termination_lock:
+            if self._run_is_stopped(run_i):
+                return
+            count = int(self._good_foxs_counts.get(run_i, 0)) + 1
+            self._good_foxs_counts[run_i] = count
+            need = max(1, int(self.cfg.terminate_confirmation_count))
+            print(
+                f"[STOP-CHECK] run={run_i} {label} FoXS chi2={chi2_f:.6g} <= {threshold:.6g} "
+                f"({count}/{need})",
+                flush=True,
+            )
+            if count >= need:
+                self._terminate_predictor_for_run(run_i, label, chi2_f, count)
 
     def _is_candidate_dat(self, dat: Path) -> bool:
         # Initial structures are produced at run launch and should not be part of
@@ -462,6 +1076,8 @@ class PollingWatcher:
             if parsed is None:
                 continue
             run_i, sub_i, tag = parsed
+            if self._run_is_stopped(run_i):
+                continue
             group_key = (run_i, tag)
             groups.setdefault(group_key, []).append((sub_i, dat))
         return groups
@@ -519,11 +1135,17 @@ class PollingWatcher:
                                      do_foxs_override=per_file_foxs)
                     if rc != 0:
                         ok_all = False
+                    elif per_file_foxs:
+                        chi2 = read_single_foxs_score_for_dat(self.cfg, dat_file)
+                        if chi2 is not None:
+                            self._consider_foxs_termination(group_key[0], dat_file.stem, chi2)
 
                 if ok_all and self.cfg.do_foxs and self.cfg.no_structures > 1:
-                    rc = run_foxs_mixture_group(self.cfg, group_key, files)
+                    rc, chi2 = run_foxs_mixture_group(self.cfg, group_key, files)
                     if rc != 0:
                         ok_all = False
+                    elif chi2 is not None:
+                        self._consider_foxs_termination(group_key[0], _group_label(group_key), chi2)
 
                 if ok_all:
                     self._completed_groups.add(group_key)
@@ -607,7 +1229,12 @@ def start_watcher(watch_dir, scenario_root, backmap_script,
                   max_backmap=1, defer_backmap_seconds=0.0,
                   no_structures=1,
                   do_foxs=False, foxs_py=None, saxs_dat=None, max_q=None,
-                  backend="modeller", cg2all_exec=None, disulfide_file=None):
+                  foxs_min_c1=0.99, foxs_max_c1=1.05,
+                  foxs_min_c2=-2.0, foxs_max_c2=4.0,
+                  foxs_partial_profile_size=500,
+                  backend="modeller", cg2all_exec=None, disulfide_file=None,
+                  terminate_on_foxs=False, terminate_threshold=None,
+                  terminate_confirmation_count=1):
     global _WATCHER
     cfg = WatchConfig(
         watch_dir=Path(watch_dir),
@@ -623,9 +1250,17 @@ def start_watcher(watch_dir, scenario_root, backmap_script,
         foxs_py=str(foxs_py) if foxs_py else None,
         saxs_dat=Path(saxs_dat).resolve() if saxs_dat else None,
         max_q=max_q,
+        foxs_min_c1=float(foxs_min_c1),
+        foxs_max_c1=float(foxs_max_c1),
+        foxs_min_c2=float(foxs_min_c2),
+        foxs_max_c2=float(foxs_max_c2),
+        foxs_partial_profile_size=int(foxs_partial_profile_size),
         backend=backend,
         cg2all_exec=cg2all_exec,
         disulfide_file=Path(disulfide_file).resolve() if disulfide_file else None,
+        terminate_on_foxs=bool(terminate_on_foxs),
+        terminate_threshold=float(terminate_threshold) if terminate_threshold is not None else None,
+        terminate_confirmation_count=max(1, int(terminate_confirmation_count)),
     )
     _WATCHER = PollingWatcher(cfg)
     _WATCHER.start()
@@ -657,10 +1292,27 @@ def main():
     ap.add_argument("--foxs-py", default=None)
     ap.add_argument("--saxs", default=None)
     ap.add_argument("--max-q", type=float, default=None)
+    ap.add_argument("--foxs-min-c1", type=float, default=0.99,
+                    help="Minimum shared FoXS c1 for mixture partial-profile fitting")
+    ap.add_argument("--foxs-max-c1", type=float, default=1.05,
+                    help="Maximum shared FoXS c1 for mixture partial-profile fitting")
+    ap.add_argument("--foxs-min-c2", type=float, default=-2.0,
+                    help="Minimum shared FoXS c2 for mixture partial-profile fitting")
+    ap.add_argument("--foxs-max-c2", type=float, default=4.0,
+                    help="Maximum shared FoXS c2 for mixture partial-profile fitting")
+    ap.add_argument("--foxs-partial-profile-size", type=int, default=500,
+                    help="Number of q intervals used when pyFoXS writes partial profiles")
 
     ap.add_argument("--backend", choices=["modeller", "cg2all"], default="modeller")
     ap.add_argument("--cg2all-exec", default=None)
     ap.add_argument("--disulfide-file", default=None)
+
+    ap.add_argument("--terminate-on-foxs", action="store_true",
+                    help="Opt-in mode: stop individual predictor runs once FoXS chi^2 is good enough")
+    ap.add_argument("--terminate-threshold", type=float, default=2.5,
+                    help="FoXS chi^2 threshold used with --terminate-on-foxs")
+    ap.add_argument("--terminate-confirmation-count", type=int, default=1,
+                    help="Number of qualifying FoXS scores required before stopping a run")
 
     args = ap.parse_args()
 
@@ -670,6 +1322,18 @@ def main():
         ap.error("--do-foxs requires --foxs-py, --saxs, and --max-q")
     if args.backend == "cg2all" and args.cg2all_exec is None:
         ap.error("--backend cg2all requires --cg2all-exec")
+    if args.terminate_confirmation_count < 1:
+        ap.error("--terminate-confirmation-count must be >= 1")
+    if args.terminate_threshold <= 0:
+        ap.error("--terminate-threshold must be > 0")
+    if args.terminate_on_foxs and not args.do_foxs:
+        ap.error("--terminate-on-foxs requires --do-foxs")
+    if args.foxs_partial_profile_size < 10:
+        ap.error("--foxs-partial-profile-size must be >= 10")
+    if args.foxs_min_c1 > args.foxs_max_c1:
+        ap.error("--foxs-min-c1 must be <= --foxs-max-c1")
+    if args.foxs_min_c2 > args.foxs_max_c2:
+        ap.error("--foxs-min-c2 must be <= --foxs-max-c2")
 
     cfg = WatchConfig(
         watch_dir=Path(args.watch_dir).resolve(),
@@ -684,9 +1348,17 @@ def main():
         foxs_py=str(args.foxs_py) if args.foxs_py else None,
         saxs_dat=Path(args.saxs).resolve() if args.saxs else None,
         max_q=args.max_q,
+        foxs_min_c1=args.foxs_min_c1,
+        foxs_max_c1=args.foxs_max_c1,
+        foxs_min_c2=args.foxs_min_c2,
+        foxs_max_c2=args.foxs_max_c2,
+        foxs_partial_profile_size=args.foxs_partial_profile_size,
         backend=args.backend,
         cg2all_exec=args.cg2all_exec,
         disulfide_file=Path(args.disulfide_file).resolve() if args.disulfide_file else None,
+        terminate_on_foxs=args.terminate_on_foxs,
+        terminate_threshold=float(args.terminate_threshold) if args.terminate_on_foxs else None,
+        terminate_confirmation_count=max(1, int(args.terminate_confirmation_count)),
     )
 
     print("[WATCHER] started", flush=True)
@@ -695,6 +1367,16 @@ def main():
     print("backmap_script :", cfg.backmap_script, flush=True)
     print("max_backmap    :", cfg.max_backmap, flush=True)
     print("no_structures  :", cfg.no_structures, flush=True)
+    if cfg.do_foxs and cfg.no_structures > 1:
+        print("mixture FoXS   : partial-profile shared c1/c2", flush=True)
+        print("c1 bounds      :", (cfg.foxs_min_c1, cfg.foxs_max_c1), flush=True)
+        print("c2 bounds      :", (cfg.foxs_min_c2, cfg.foxs_max_c2), flush=True)
+    if cfg.terminate_on_foxs:
+        print("mode           : terminate-on-FoXS", flush=True)
+        print("term_threshold :", cfg.terminate_threshold, flush=True)
+        print("term_confirm   :", cfg.terminate_confirmation_count, flush=True)
+    else:
+        print("mode           : maximal exploration", flush=True)
     print(f"[WATCHER] backmapping activates after {cfg.defer_backmap_seconds} s", flush=True)
 
     if not cfg.backmap_script.exists():
