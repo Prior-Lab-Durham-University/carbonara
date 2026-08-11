@@ -29,6 +29,17 @@ def _require_modeller():
         )
 
 
+def _append_disulfide_debug(log_path, message):
+    """Append a one-line disulfide diagnostic message without interrupting backmapping."""
+    if not log_path:
+        return
+    try:
+        with open(log_path, "a", encoding="utf-8") as _fh:
+            _fh.write(str(message).rstrip() + "\n")
+    except Exception:
+        pass
+
+
 from Bio.PDB import PDBParser, PDBIO
 from Bio.PDB.Polypeptide import is_aa
 
@@ -632,6 +643,17 @@ def CA2AA_secondary_fast(filename, outputname, ss_list, iterations=1, stout=Fals
 
 def CA2AA_secondary_multimer(filename, outputname, ss_list, disulfides=None, iterations=1, stout=False):
     _require_modeller()
+    debug_log = str(outputname) + '.disulfide_patch.log'
+    try:
+        with open(debug_log, 'w', encoding='utf-8') as _fh:
+            _fh.write(f'CA2AA_secondary_multimer called\n')
+            _fh.write(f'input_ca_pdb={filename}\n')
+            _fh.write(f'output_aa_pdb={outputname}\n')
+            _fh.write(f'requested_disulfide_count={len(disulfides or [])}\n')
+            for _pair in (disulfides or []):
+                _fh.write(f'REQUESTED {_pair[0]} -- {_pair[1]}\n')
+    except Exception:
+        pass
     _PIR_TEMPLATE = '\n'.join([
         '>P1;%s',
         'sequence:::::::::',
@@ -705,18 +727,54 @@ def CA2AA_secondary_multimer(filename, outputname, ss_list, disulfides=None, ite
             self.disulfides = disulfides or []
 
         def special_patches(self, aln):
-            # FIX: Extract string names from chains
+            # MODELLER may keep the input PDB residue numbers after segment
+            # assignment. Carbonara disulfides are expressed as local
+            # per-chain numbers, e.g. 23:B, but MODELLER may see that residue
+            # as 264:B if the input CA PDB is globally numbered.  Build a
+            # local-position -> MODELLER-residue lookup from the residues that
+            # MODELLER actually has.
             seen_chain_ids = sorted({str(res.chain.name) for res in self.residues})
             self.rename_segments(segment_ids=seen_chain_ids)
-            
+
+            local_to_modeller = {}
+            chain_counts = {}
+            for res in self.residues:
+                chain = str(res.chain.name).strip()
+                if not chain:
+                    continue
+                chain_counts[chain] = chain_counts.get(chain, 0) + 1
+                local_key = f"{chain_counts[chain]}:{chain}"
+                modeller_num = str(res.num).strip()
+                modeller_key = f"{modeller_num}:{chain}"
+                local_to_modeller[local_key] = modeller_key
+
+            _append_disulfide_debug(
+                debug_log,
+                f"special_patches entered; available_segments={seen_chain_ids}; "
+                f"chain_lengths={chain_counts}; requested_count={len(self.disulfides)}"
+            )
+
             for res1_str, res2_str in self.disulfides:
                 res1_num, chain1 = res1_str.split(':')
                 res2_num, chain2 = res2_str.split(':')
+                local1 = f"{int(res1_num)}:{chain1}"
+                local2 = f"{int(res2_num)}:{chain2}"
+                lookup1 = local_to_modeller.get(local1, local1)
+                lookup2 = local_to_modeller.get(local2, local2)
                 try:
-                    res1 = self.residues[f'{int(res1_num)}:{chain1}']
-                    res2 = self.residues[f'{int(res2_num)}:{chain2}']
+                    res1 = self.residues[lookup1]
+                    res2 = self.residues[lookup2]
                     self.patch(residue_type='DISU', residues=(res1, res2))
-                except KeyError:
+                    _append_disulfide_debug(
+                        debug_log,
+                        f"PATCHED {res1_str} -- {res2_str} as {lookup1} -- {lookup2}"
+                    )
+                except KeyError as exc:
+                    msg = (
+                        f"FAILED {res1_str} -- {res2_str}: tried {lookup1} -- {lookup2}; "
+                        f"missing residue {exc}"
+                    )
+                    _append_disulfide_debug(debug_log, msg)
                     print(f"Warning: could not find residues {res1_str} or {res2_str} for disulfide bond")
             
 
@@ -771,10 +829,32 @@ def CA2AA_secondary_multimer(filename, outputname, ss_list, disulfides=None, ite
 
     sss = complete_pdb(env, final)
     sss.write(file=outputname, model_format='PDB')
-    renumber_pdb_chains_start_from_1(outputname,outputname)
+    renumber_pdb_chains_start_from_1(outputname, outputname)
+    if disulfides:
+        add_disulfide_records_to_pdb(
+            outputname,
+            disulfides=disulfides,
+            output_pdb=outputname,
+            add_ssbond=True,
+            add_conect=True,
+            remove_existing=True,
+            debug_log=debug_log,
+        )
+    _append_disulfide_debug(debug_log, f'wrote_output {outputname}')
 
 def CA2AA_secondary_multimer_slow(filename, outputname, ss_list, disulfides=None, iterations=1, stout=False):
     _require_modeller()
+    debug_log = str(outputname) + '.disulfide_patch.log'
+    try:
+        with open(debug_log, 'w', encoding='utf-8') as _fh:
+            _fh.write(f'CA2AA_secondary_multimer_slow called\n')
+            _fh.write(f'input_ca_pdb={filename}\n')
+            _fh.write(f'output_aa_pdb={outputname}\n')
+            _fh.write(f'requested_disulfide_count={len(disulfides or [])}\n')
+            for _pair in (disulfides or []):
+                _fh.write(f'REQUESTED {_pair[0]} -- {_pair[1]}\n')
+    except Exception:
+        pass
     _PIR_TEMPLATE = '\n'.join([
         '>P1;%s',
         'sequence:::::::::',
@@ -848,18 +928,54 @@ def CA2AA_secondary_multimer_slow(filename, outputname, ss_list, disulfides=None
             self.disulfides = disulfides or []
 
         def special_patches(self, aln):
-            # FIX: Extract string names from chains
+            # MODELLER may keep the input PDB residue numbers after segment
+            # assignment. Carbonara disulfides are expressed as local
+            # per-chain numbers, e.g. 23:B, but MODELLER may see that residue
+            # as 264:B if the input CA PDB is globally numbered.  Build a
+            # local-position -> MODELLER-residue lookup from the residues that
+            # MODELLER actually has.
             seen_chain_ids = sorted({str(res.chain.name) for res in self.residues})
             self.rename_segments(segment_ids=seen_chain_ids)
-            
+
+            local_to_modeller = {}
+            chain_counts = {}
+            for res in self.residues:
+                chain = str(res.chain.name).strip()
+                if not chain:
+                    continue
+                chain_counts[chain] = chain_counts.get(chain, 0) + 1
+                local_key = f"{chain_counts[chain]}:{chain}"
+                modeller_num = str(res.num).strip()
+                modeller_key = f"{modeller_num}:{chain}"
+                local_to_modeller[local_key] = modeller_key
+
+            _append_disulfide_debug(
+                debug_log,
+                f"special_patches entered; available_segments={seen_chain_ids}; "
+                f"chain_lengths={chain_counts}; requested_count={len(self.disulfides)}"
+            )
+
             for res1_str, res2_str in self.disulfides:
                 res1_num, chain1 = res1_str.split(':')
                 res2_num, chain2 = res2_str.split(':')
+                local1 = f"{int(res1_num)}:{chain1}"
+                local2 = f"{int(res2_num)}:{chain2}"
+                lookup1 = local_to_modeller.get(local1, local1)
+                lookup2 = local_to_modeller.get(local2, local2)
                 try:
-                    res1 = self.residues[f'{int(res1_num)}:{chain1}']
-                    res2 = self.residues[f'{int(res2_num)}:{chain2}']
+                    res1 = self.residues[lookup1]
+                    res2 = self.residues[lookup2]
                     self.patch(residue_type='DISU', residues=(res1, res2))
-                except KeyError:
+                    _append_disulfide_debug(
+                        debug_log,
+                        f"PATCHED {res1_str} -- {res2_str} as {lookup1} -- {lookup2}"
+                    )
+                except KeyError as exc:
+                    msg = (
+                        f"FAILED {res1_str} -- {res2_str}: tried {lookup1} -- {lookup2}; "
+                        f"missing residue {exc}"
+                    )
+                    _append_disulfide_debug(debug_log, msg)
                     print(f"Warning: could not find residues {res1_str} or {res2_str} for disulfide bond")
             
 
@@ -914,7 +1030,18 @@ def CA2AA_secondary_multimer_slow(filename, outputname, ss_list, disulfides=None
 
     sss = complete_pdb(env, final)
     sss.write(file=outputname, model_format='PDB')
-    renumber_pdb_chains_start_from_1(outputname,outputname)
+    renumber_pdb_chains_start_from_1(outputname, outputname)
+    if disulfides:
+        add_disulfide_records_to_pdb(
+            outputname,
+            disulfides=disulfides,
+            output_pdb=outputname,
+            add_ssbond=True,
+            add_conect=True,
+            remove_existing=True,
+            debug_log=debug_log,
+        )
+    _append_disulfide_debug(debug_log, f'wrote_output {outputname}')
 
 def backmap_ca_chain(coords_file, fingerprint_file, write_directory, name, ss_constraint=False):
 
@@ -1347,33 +1474,186 @@ def generateAllAtomisticFitsRunMultimer(directory,run,logNo,disulfides=None):
     moleculePaths =getFitFilesForRun(directory+run,logNo)
     [backmap_ca_chain_multimer(moleculePaths[i][0], directory+"fingerPrint1.dat", directory+run,moleculePaths[i][0].strip().split('/')[-1].strip().split('xyz.dat')[0],lengths,disulfides) for i in range(len(moleculePaths)) ]
 
-def constraints_to_residue_pairs(fingerprint_file, constraint_file):
+def _chain_letters_for_pdb(n):
+    """
+    Return PDB-style one-character chain identifiers A, B, C, ... .
+
+    Carbonara's multichain PDB writer currently uses single-letter chain IDs,
+    so keep the same convention here. This deliberately errors beyond 26 chains
+    rather than silently producing labels that may not match the generated PDB.
+    """
+    letters = list(string.ascii_uppercase)
+    if n > len(letters):
+        raise ValueError(
+            f"More than {len(letters)} physical chains are not supported by this "
+            "disulfide converter because the generated PDB uses one-character "
+            "chain IDs."
+        )
+    return letters[:n]
+
+
+def _coerce_chain_lengths(chain_lengths):
+    """
+    Accept chainLengths.dat data as either a dict or a plain list/tuple and
+    return a list of positive integer physical chain lengths.
+    """
+    if chain_lengths is None:
+        return None
+
+    if isinstance(chain_lengths, dict):
+        values = list(chain_lengths.values())
+    else:
+        values = list(chain_lengths)
+
+    out = []
+    for value in values:
+        L = int(value)
+        if L <= 0:
+            raise ValueError(f"Invalid physical chain length {value!r}; lengths must be positive")
+        out.append(L)
+    return out
+
+
+def _load_chain_lengths_for_fingerprint(fingerprint_file):
+    """
+    Try to load chainLengths.dat from the same directory as fingerPrint1.dat.
+
+    This keeps the existing backmap_cli call backwards compatible:
+        constraints_to_residue_pairs(fingerprint, disulfide_file)
+
+    If no chainLengths.dat is present, return None and use the old behaviour.
+    """
+    directory = os.path.dirname(os.path.abspath(fingerprint_file))
+    candidate = os.path.join(directory, "chainLengths.dat")
+    if not os.path.exists(candidate):
+        return None
+
+    with open(candidate, "rb") as f:
+        return _coerce_chain_lengths(pickle.load(f))
+
+
+def _physical_groups_for_fingerprint_chains(chain_blocks, chain_lengths=None):
+    """
+    Map each fingerprint chain onto one or more physical output chains.
+
+    This is needed when the fingerprint has deliberately merged several real
+    chains for the purpose of Carbonara rotations/flexibility, while the final
+    backmapped structure is split into the physical chains using chainLengths.dat.
+
+    Returns
+    -------
+    groups : list[list[tuple[int, int]]]
+        One list per fingerprint chain. Each tuple is
+        (physical_chain_index_0based, physical_chain_length).
+
+    Example
+    -------
+    If the fingerprint contains two chains of length 450 and chainLengths.dat is
+    [225, 225, 225, 225], the groups are:
+        fingerprint chain 0 -> physical chains A and B
+        fingerprint chain 1 -> physical chains C and D
+    """
+    fp_lengths = [len(seq) for seq, _ss in chain_blocks]
+    physical_lengths = _coerce_chain_lengths(chain_lengths)
+
+    # Old behaviour: no physical-chain information available, so the fingerprint
+    # chains are assumed to be the final output chains.
+    if physical_lengths is None:
+        return [[(i, L)] for i, L in enumerate(fp_lengths)]
+
+    if sum(physical_lengths) != sum(fp_lengths):
+        raise ValueError(
+            "chainLengths.dat is inconsistent with the fingerprint: "
+            f"sum(chainLengths)={sum(physical_lengths)} but "
+            f"sum(fingerprint chain lengths)={sum(fp_lengths)}"
+        )
+
+    groups = []
+    physical_idx = 0
+
+    for fp_chain_idx, fp_len in enumerate(fp_lengths):
+        total = 0
+        group = []
+
+        while physical_idx < len(physical_lengths) and total < fp_len:
+            L = physical_lengths[physical_idx]
+            group.append((physical_idx, L))
+            total += L
+            physical_idx += 1
+
+        if total != fp_len:
+            raise ValueError(
+                "Could not map merged fingerprint chain onto physical chains. "
+                f"Fingerprint chain {fp_chain_idx} has length {fp_len}, but the "
+                f"next physical chain lengths accumulate to {total}. This usually "
+                "means chainLengths.dat does not align with the merged fingerprint."
+            )
+
+        groups.append(group)
+
+    if physical_idx != len(physical_lengths):
+        raise ValueError(
+            "Unused physical chain lengths remain after mapping fingerprint chains. "
+            "Check chainLengths.dat and fingerPrint1.dat."
+        )
+
+    return groups
+
+
+def _merged_position_to_physical_residue(local_pos_0based, physical_group, chain_letters):
+    """
+    Convert a residue position within a merged fingerprint chain into the final
+    physical-chain residue label used by MODELLER/CG2ALL, e.g. '136:A'.
+    """
+    offset = 0
+    for physical_chain_idx, length in physical_group:
+        if local_pos_0based < offset + length:
+            residue_number = local_pos_0based - offset + 1
+            return f"{residue_number}:{chain_letters[physical_chain_idx]}"
+        offset += length
+
+    raise IndexError(
+        f"Residue position {local_pos_0based} lies outside merged physical group {physical_group}"
+    )
+
+
+def constraints_to_residue_pairs(fingerprint_file, constraint_file, chain_lengths=None):
     """
     Convert Carbonara fixedDistanceConstraints entries into residue pairs like:
         [('136:A', '680:C'), ('149:A', '205:A'), ...]
 
-    Assumptions
-    -----------
-    - fingerPrint file contains:
-          nChains
-          sequence_1
-          ss_1
-          sequence_2
-          ss_2
-          ...
-    - Each SS line is split into contiguous segments *within that chain only*
-    - Segments are indexed globally across chains, in file order
-    - Constraint lines are of the form:
-          seg1 elem1 seg2 elem2 distance tolerance
-      where only the first four integers are used
-    - elem indices are 0-based within the segment
-    - returned residue numbers are 1-based within each chain
+    The constraint file is expected to contain lines of the form:
+        seg1 elem1 seg2 elem2 distance tolerance
+    Only the first four integer columns are used here.
+
+    Important for merged fingerprints
+    ---------------------------------
+    Carbonara notebooks may merge several physical chains into fewer fingerprint
+    chains for the purpose of rotations/flexibility. The final backmapped PDB is
+    nevertheless split back into the physical chains using chainLengths.dat.
+
+    Therefore this converter uses the fingerprint to interpret section/element
+    indices, but uses chainLengths.dat to map the resulting merged-chain residue
+    position back to the physical output chain. If ``chain_lengths`` is not
+    supplied, the function automatically looks for ``chainLengths.dat`` next to
+    ``fingerprint_file``. If that file is absent, it falls back to the original
+    behaviour: fingerprint chain 1 -> A, fingerprint chain 2 -> B, etc.
+
+    Parameters
+    ----------
+    fingerprint_file : str or path-like
+        Carbonara fingerPrint*.dat file.
+    constraint_file : str or path-like
+        Disulfide-only fixed-distance-style constraint file.
+    chain_lengths : None, dict, list, or tuple
+        Optional physical output chain lengths. A dict is interpreted using its
+        value order, matching the existing chainLengths.dat convention.
 
     Returns
     -------
-    pairs : list of tuple[str, str]
-        Example:
-            [('27:A', '76:A'), ('15:B', '88:B')]
+    pairs : list[tuple[str, str]]
+        Residue pairs in the format expected by the MODELLER DISU patch and by
+        the CG2ALL SSBOND annotation writer, e.g. [('136:A', '225:C')].
     """
 
     # ----------------------------
@@ -1400,7 +1680,7 @@ def constraints_to_residue_pairs(fingerprint_file, constraint_file):
     chain_blocks = []
     for i in range(n_chains):
         seq = lines[1 + 2 * i]
-        ss  = lines[1 + 2 * i + 1]
+        ss = lines[1 + 2 * i + 1]
 
         if len(seq) != len(ss):
             raise ValueError(
@@ -1409,25 +1689,29 @@ def constraints_to_residue_pairs(fingerprint_file, constraint_file):
 
         chain_blocks.append((seq, ss))
 
+    # If the caller did not pass physical chain lengths, try the standard
+    # scenario-root location. This fixes the current automated backmap_cli path
+    # without requiring a simultaneous CLI edit.
+    if chain_lengths is None:
+        chain_lengths = _load_chain_lengths_for_fingerprint(fingerprint_file)
+    else:
+        chain_lengths = _coerce_chain_lengths(chain_lengths)
+
+    physical_groups = _physical_groups_for_fingerprint_chains(chain_blocks, chain_lengths)
+    n_physical_chains = sum(len(g) for g in physical_groups)
+    chain_letters = _chain_letters_for_pdb(n_physical_chains)
+
     # ----------------------------
     # Build global segment table
     # ----------------------------
-    # Each entry will contain:
-    #   global segment index
-    #   chain index
-    #   chain letter
-    #   segment start residue (0-based within chain)
+    # Each entry contains:
+    #   chain index within the fingerprint
+    #   segment start residue, 0-based within that fingerprint chain
     #   segment length
-    #   segment string
+    #   segment secondary-structure string
     segments = []
 
-    chain_letters = string.ascii_uppercase
-    if n_chains > len(chain_letters):
-        raise ValueError("More than 26 chains not supported in this simple version")
-
-    for chain_idx, (seq, ss) in enumerate(chain_blocks):
-        chain_letter = chain_letters[chain_idx]
-
+    for chain_idx, (_seq, ss) in enumerate(chain_blocks):
         pos = 0
         while pos < len(ss):
             start = pos
@@ -1438,14 +1722,13 @@ def constraints_to_residue_pairs(fingerprint_file, constraint_file):
             seg_ss = ss[start:pos]
             segments.append({
                 "chain_idx": chain_idx,
-                "chain_letter": chain_letter,
-                "start": start,              # 0-based residue index within chain
+                "start": start,
                 "length": len(seg_ss),
                 "ss": seg_ss,
             })
 
     # ----------------------------
-    # Map (segment, elem) -> residue:chain
+    # Map (segment, elem) -> physical residue:chain
     # ----------------------------
     def segment_elem_to_residue(seg_idx, elem_idx):
         if seg_idx < 0 or seg_idx >= len(segments):
@@ -1459,9 +1742,12 @@ def constraints_to_residue_pairs(fingerprint_file, constraint_file):
                 f"(length {seg['length']})"
             )
 
-        residue_number = seg["start"] + elem_idx + 1   # convert to 1-based within chain
-        chain_letter = seg["chain_letter"]
-        return f"{residue_number}:{chain_letter}"
+        local_pos_0based = seg["start"] + elem_idx
+        return _merged_position_to_physical_residue(
+            local_pos_0based,
+            physical_groups[seg["chain_idx"]],
+            chain_letters,
+        )
 
     # ----------------------------
     # Parse constraints
@@ -1487,7 +1773,6 @@ def constraints_to_residue_pairs(fingerprint_file, constraint_file):
 
     return pairs
 
-    
 
 # =============================
 # CG2ALL optional backend patch
@@ -1572,6 +1857,217 @@ def write_ssbond_records_to_pdb(input_pdb, output_pdb=None, disulfides=None):
     return output_pdb
 
 
+
+
+# -----------------------------------------------------------------------------
+# PDB disulfide annotation helpers
+# -----------------------------------------------------------------------------
+
+def _parse_disulfide_residue_label(label):
+    """Parse a Carbonara/MODELLER disulfide label of the form '136:A'."""
+    try:
+        resnum, chain = str(label).split(':', 1)
+        return int(resnum), chain.strip()
+    except Exception as exc:
+        raise ValueError(f"Disulfide residue labels must look like '136:A', got {label!r}") from exc
+
+
+def _pdb_line_resseq(line):
+    """Return integer residue sequence number from a PDB ATOM/HETATM line."""
+    try:
+        return int(line[22:26])
+    except ValueError:
+        # Fallback for slightly non-standard spacing.
+        return int(line[22:27].strip())
+
+
+def _find_cys_sg_serials(pdb_lines):
+    """
+    Return {(resSeq, chain): atom_serial} for CYS SG atoms in a PDB file.
+
+    The MODELLER output is renumbered locally per chain before this is called, so
+    the expected keys are the same local labels used in the Carbonara disulfide
+    list, e.g. 23:B rather than 264:B.
+    """
+    sg_serials = {}
+    for line in pdb_lines:
+        if not line.startswith(('ATOM  ', 'HETATM')):
+            continue
+        atom_name = line[12:16].strip()
+        resname = line[17:20].strip()
+        if atom_name != 'SG' or resname not in {'CYS', 'CYX'}:
+            continue
+        try:
+            serial = int(line[6:11])
+            chain = line[21].strip()
+            resseq = _pdb_line_resseq(line)
+        except Exception:
+            continue
+        sg_serials[(resseq, chain)] = serial
+    return sg_serials
+
+
+def _sg_sg_distance_from_pdb_lines(pdb_lines, serial1, serial2):
+    """Return SG-SG distance in Angstrom from two atom serials, if available."""
+    coords = {}
+    for line in pdb_lines:
+        if not line.startswith(('ATOM  ', 'HETATM')):
+            continue
+        try:
+            serial = int(line[6:11])
+        except ValueError:
+            continue
+        if serial not in {serial1, serial2}:
+            continue
+        try:
+            coords[serial] = np.array([
+                float(line[30:38]),
+                float(line[38:46]),
+                float(line[46:54]),
+            ], dtype=float)
+        except ValueError:
+            pass
+    if serial1 not in coords or serial2 not in coords:
+        return None
+    return float(np.linalg.norm(coords[serial1] - coords[serial2]))
+
+
+def _format_ssbond_line(index, res1_num, chain1, res2_num, chain2, distance=None):
+    """
+    Format an SSBOND record.
+
+    The line intentionally uses ordinary local residue numbers, because the
+    output PDB has already been renumbered chain-locally.
+    """
+    if distance is None:
+        return f"SSBOND {index:>3d} CYS {chain1:1s}{res1_num:>4d}    CYS {chain2:1s}{res2_num:>4d}\n"
+    return (
+        f"SSBOND {index:>3d} CYS {chain1:1s}{res1_num:>4d}    "
+        f"CYS {chain2:1s}{res2_num:>4d}                          {distance:>5.2f}\n"
+    )
+
+
+def _format_conect_line(serial1, serial2):
+    """Format a reciprocal PDB CONECT entry for a disulfide S-S bond."""
+    return f"CONECT{int(serial1):>5d}{int(serial2):>5d}\n"
+
+
+def add_disulfide_records_to_pdb(input_pdb, disulfides=None, output_pdb=None,
+                                 add_ssbond=True, add_conect=True,
+                                 remove_existing=True, debug_log=None):
+    """
+    Add SSBOND and reciprocal CONECT records for requested disulfides.
+
+    Parameters
+    ----------
+    input_pdb : str or Path
+        PDB file to annotate. The file is rewritten in-place unless output_pdb is
+        supplied.
+    disulfides : list[tuple[str, str]]
+        Local labels such as [('22:A', '96:A'), ('23:B', '88:B')]. These should
+        match the final, chain-locally renumbered MODELLER output.
+    output_pdb : str or Path or None
+        Destination. Defaults to input_pdb.
+    add_ssbond, add_conect : bool
+        Whether to add SSBOND and reciprocal CONECT records.
+    remove_existing : bool
+        If True, remove old SSBOND lines and old CONECT lines before writing the
+        new records. This prevents duplicate stale records after repeated runs.
+    debug_log : str or Path or None
+        Optional debug log to append annotation status lines to.
+
+    Returns
+    -------
+    list[tuple[str, str, float | None]]
+        The disulfide pairs that were annotated, with measured SG-SG distance.
+    """
+    if not disulfides:
+        return []
+
+    input_pdb = str(input_pdb)
+    output_pdb = input_pdb if output_pdb is None else str(output_pdb)
+
+    with open(input_pdb, 'r') as fh:
+        original = fh.readlines()
+
+    sg_serials = _find_cys_sg_serials(original)
+    ssbond_lines = []
+    conect_pairs = []
+    annotated = []
+
+    for idx, (res1, res2) in enumerate(disulfides, start=1):
+        res1_num, chain1 = _parse_disulfide_residue_label(res1)
+        res2_num, chain2 = _parse_disulfide_residue_label(res2)
+        serial1 = sg_serials.get((res1_num, chain1))
+        serial2 = sg_serials.get((res2_num, chain2))
+
+        if serial1 is None or serial2 is None:
+            _append_disulfide_debug(
+                debug_log,
+                f"RECORD_FAILED {res1} -- {res2}: missing SG serials "
+                f"{serial1} -- {serial2}",
+            )
+            continue
+
+        distance = _sg_sg_distance_from_pdb_lines(original, serial1, serial2)
+        annotated.append((str(res1), str(res2), distance))
+        if add_ssbond:
+            ssbond_lines.append(_format_ssbond_line(idx, res1_num, chain1, res2_num, chain2, distance))
+        if add_conect:
+            conect_pairs.append((serial1, serial2))
+        _append_disulfide_debug(
+            debug_log,
+            f"RECORD_ADDED {res1} -- {res2}: SG serials {serial1} -- {serial2}; "
+            f"distance={distance if distance is not None else 'NA'}",
+        )
+
+    if remove_existing:
+        body = [line for line in original if not line.startswith(('SSBOND', 'CONECT'))]
+    else:
+        body = list(original)
+
+    # Insert SSBOND records before the first coordinate/model/end record.
+    insert_at = 0
+    for i, line in enumerate(body):
+        if line.startswith(('ATOM  ', 'HETATM', 'MODEL ', 'TER   ', 'END')):
+            insert_at = i
+            break
+    else:
+        insert_at = len(body)
+
+    body = body[:insert_at] + ssbond_lines + body[insert_at:]
+
+    if add_conect and conect_pairs:
+        conect_lines = []
+        seen = set()
+        for serial1, serial2 in conect_pairs:
+            for a, b in ((serial1, serial2), (serial2, serial1)):
+                key = (int(a), int(b))
+                if key in seen:
+                    continue
+                seen.add(key)
+                conect_lines.append(_format_conect_line(a, b))
+
+        # CONECT records belong near the end, before END/ENDMDL if present.
+        end_index = None
+        for i, line in enumerate(body):
+            if line.startswith(('END   ', 'ENDMDL')) or line.strip() == 'END':
+                end_index = i
+                break
+        if end_index is None:
+            body.extend(conect_lines)
+            if not body or body[-1].strip() != 'END':
+                body.append('END\n')
+        else:
+            body = body[:end_index] + conect_lines + body[end_index:]
+
+    with open(output_pdb, 'w') as fh:
+        fh.writelines(body)
+
+    _append_disulfide_debug(debug_log, f"records_written count={len(annotated)} output={output_pdb}")
+    return annotated
+
+
 def CA2AA_cg2all(filename, outputname, disulfides=None, cg_model='CalphaBasedModel',
                  cg2all_exec=None, stout=False, extra_args=None):
     """
@@ -1614,6 +2110,15 @@ def CA2AA_cg2all(filename, outputname, disulfides=None, cg_model='CalphaBasedMod
     #os.system("bash out.sh")
     subprocess.run(["chmod", "+x", "out.sh"])
     subprocess.run(["bash", "out.sh"])
+    if disulfides and os.path.exists(outputname):
+        add_disulfide_records_to_pdb(
+            outputname,
+            disulfides=disulfides,
+            output_pdb=outputname,
+            add_ssbond=True,
+            add_conect=True,
+            remove_existing=False,
+        )
     print("done")
 
 
@@ -1685,6 +2190,20 @@ def backmap_ca_chain_multimer(coords_file, fingerprint_file, write_directory, na
     CA PDB, optionally inserts SSBOND records, and runs CG2ALL.
     """
     method = _normalize_backend_method(method)
+
+    received_log = os.path.join(write_directory, name + '_disulfides_received.log')
+    try:
+        with open(received_log, 'w', encoding='utf-8') as _fh:
+            _fh.write(f'backmap_ca_chain_multimer called\n')
+            _fh.write(f'method={method}\n')
+            _fh.write(f'coords_file={coords_file}\n')
+            _fh.write(f'fingerprint_file={fingerprint_file}\n')
+            _fh.write(f'chain_lengths={list(lengths)}\n')
+            _fh.write(f'received_disulfide_count={len(disulfides or [])}\n')
+            for _pair in (disulfides or []):
+                _fh.write(f'RECEIVED {_pair[0]} -- {_pair[1]}\n')
+    except Exception:
+        pass
 
     split_coords_into_chains(coords_file, coords_file, lengths)
 
