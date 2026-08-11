@@ -829,7 +829,17 @@ def CA2AA_secondary_multimer(filename, outputname, ss_list, disulfides=None, ite
 
     sss = complete_pdb(env, final)
     sss.write(file=outputname, model_format='PDB')
-    renumber_pdb_chains_start_from_1(outputname,outputname)
+    renumber_pdb_chains_start_from_1(outputname, outputname)
+    if disulfides:
+        add_disulfide_records_to_pdb(
+            outputname,
+            disulfides=disulfides,
+            output_pdb=outputname,
+            add_ssbond=True,
+            add_conect=True,
+            remove_existing=True,
+            debug_log=debug_log,
+        )
     _append_disulfide_debug(debug_log, f'wrote_output {outputname}')
 
 def CA2AA_secondary_multimer_slow(filename, outputname, ss_list, disulfides=None, iterations=1, stout=False):
@@ -1020,7 +1030,17 @@ def CA2AA_secondary_multimer_slow(filename, outputname, ss_list, disulfides=None
 
     sss = complete_pdb(env, final)
     sss.write(file=outputname, model_format='PDB')
-    renumber_pdb_chains_start_from_1(outputname,outputname)
+    renumber_pdb_chains_start_from_1(outputname, outputname)
+    if disulfides:
+        add_disulfide_records_to_pdb(
+            outputname,
+            disulfides=disulfides,
+            output_pdb=outputname,
+            add_ssbond=True,
+            add_conect=True,
+            remove_existing=True,
+            debug_log=debug_log,
+        )
     _append_disulfide_debug(debug_log, f'wrote_output {outputname}')
 
 def backmap_ca_chain(coords_file, fingerprint_file, write_directory, name, ss_constraint=False):
@@ -1837,6 +1857,217 @@ def write_ssbond_records_to_pdb(input_pdb, output_pdb=None, disulfides=None):
     return output_pdb
 
 
+
+
+# -----------------------------------------------------------------------------
+# PDB disulfide annotation helpers
+# -----------------------------------------------------------------------------
+
+def _parse_disulfide_residue_label(label):
+    """Parse a Carbonara/MODELLER disulfide label of the form '136:A'."""
+    try:
+        resnum, chain = str(label).split(':', 1)
+        return int(resnum), chain.strip()
+    except Exception as exc:
+        raise ValueError(f"Disulfide residue labels must look like '136:A', got {label!r}") from exc
+
+
+def _pdb_line_resseq(line):
+    """Return integer residue sequence number from a PDB ATOM/HETATM line."""
+    try:
+        return int(line[22:26])
+    except ValueError:
+        # Fallback for slightly non-standard spacing.
+        return int(line[22:27].strip())
+
+
+def _find_cys_sg_serials(pdb_lines):
+    """
+    Return {(resSeq, chain): atom_serial} for CYS SG atoms in a PDB file.
+
+    The MODELLER output is renumbered locally per chain before this is called, so
+    the expected keys are the same local labels used in the Carbonara disulfide
+    list, e.g. 23:B rather than 264:B.
+    """
+    sg_serials = {}
+    for line in pdb_lines:
+        if not line.startswith(('ATOM  ', 'HETATM')):
+            continue
+        atom_name = line[12:16].strip()
+        resname = line[17:20].strip()
+        if atom_name != 'SG' or resname not in {'CYS', 'CYX'}:
+            continue
+        try:
+            serial = int(line[6:11])
+            chain = line[21].strip()
+            resseq = _pdb_line_resseq(line)
+        except Exception:
+            continue
+        sg_serials[(resseq, chain)] = serial
+    return sg_serials
+
+
+def _sg_sg_distance_from_pdb_lines(pdb_lines, serial1, serial2):
+    """Return SG-SG distance in Angstrom from two atom serials, if available."""
+    coords = {}
+    for line in pdb_lines:
+        if not line.startswith(('ATOM  ', 'HETATM')):
+            continue
+        try:
+            serial = int(line[6:11])
+        except ValueError:
+            continue
+        if serial not in {serial1, serial2}:
+            continue
+        try:
+            coords[serial] = np.array([
+                float(line[30:38]),
+                float(line[38:46]),
+                float(line[46:54]),
+            ], dtype=float)
+        except ValueError:
+            pass
+    if serial1 not in coords or serial2 not in coords:
+        return None
+    return float(np.linalg.norm(coords[serial1] - coords[serial2]))
+
+
+def _format_ssbond_line(index, res1_num, chain1, res2_num, chain2, distance=None):
+    """
+    Format an SSBOND record.
+
+    The line intentionally uses ordinary local residue numbers, because the
+    output PDB has already been renumbered chain-locally.
+    """
+    if distance is None:
+        return f"SSBOND {index:>3d} CYS {chain1:1s}{res1_num:>4d}    CYS {chain2:1s}{res2_num:>4d}\n"
+    return (
+        f"SSBOND {index:>3d} CYS {chain1:1s}{res1_num:>4d}    "
+        f"CYS {chain2:1s}{res2_num:>4d}                          {distance:>5.2f}\n"
+    )
+
+
+def _format_conect_line(serial1, serial2):
+    """Format a reciprocal PDB CONECT entry for a disulfide S-S bond."""
+    return f"CONECT{int(serial1):>5d}{int(serial2):>5d}\n"
+
+
+def add_disulfide_records_to_pdb(input_pdb, disulfides=None, output_pdb=None,
+                                 add_ssbond=True, add_conect=True,
+                                 remove_existing=True, debug_log=None):
+    """
+    Add SSBOND and reciprocal CONECT records for requested disulfides.
+
+    Parameters
+    ----------
+    input_pdb : str or Path
+        PDB file to annotate. The file is rewritten in-place unless output_pdb is
+        supplied.
+    disulfides : list[tuple[str, str]]
+        Local labels such as [('22:A', '96:A'), ('23:B', '88:B')]. These should
+        match the final, chain-locally renumbered MODELLER output.
+    output_pdb : str or Path or None
+        Destination. Defaults to input_pdb.
+    add_ssbond, add_conect : bool
+        Whether to add SSBOND and reciprocal CONECT records.
+    remove_existing : bool
+        If True, remove old SSBOND lines and old CONECT lines before writing the
+        new records. This prevents duplicate stale records after repeated runs.
+    debug_log : str or Path or None
+        Optional debug log to append annotation status lines to.
+
+    Returns
+    -------
+    list[tuple[str, str, float | None]]
+        The disulfide pairs that were annotated, with measured SG-SG distance.
+    """
+    if not disulfides:
+        return []
+
+    input_pdb = str(input_pdb)
+    output_pdb = input_pdb if output_pdb is None else str(output_pdb)
+
+    with open(input_pdb, 'r') as fh:
+        original = fh.readlines()
+
+    sg_serials = _find_cys_sg_serials(original)
+    ssbond_lines = []
+    conect_pairs = []
+    annotated = []
+
+    for idx, (res1, res2) in enumerate(disulfides, start=1):
+        res1_num, chain1 = _parse_disulfide_residue_label(res1)
+        res2_num, chain2 = _parse_disulfide_residue_label(res2)
+        serial1 = sg_serials.get((res1_num, chain1))
+        serial2 = sg_serials.get((res2_num, chain2))
+
+        if serial1 is None or serial2 is None:
+            _append_disulfide_debug(
+                debug_log,
+                f"RECORD_FAILED {res1} -- {res2}: missing SG serials "
+                f"{serial1} -- {serial2}",
+            )
+            continue
+
+        distance = _sg_sg_distance_from_pdb_lines(original, serial1, serial2)
+        annotated.append((str(res1), str(res2), distance))
+        if add_ssbond:
+            ssbond_lines.append(_format_ssbond_line(idx, res1_num, chain1, res2_num, chain2, distance))
+        if add_conect:
+            conect_pairs.append((serial1, serial2))
+        _append_disulfide_debug(
+            debug_log,
+            f"RECORD_ADDED {res1} -- {res2}: SG serials {serial1} -- {serial2}; "
+            f"distance={distance if distance is not None else 'NA'}",
+        )
+
+    if remove_existing:
+        body = [line for line in original if not line.startswith(('SSBOND', 'CONECT'))]
+    else:
+        body = list(original)
+
+    # Insert SSBOND records before the first coordinate/model/end record.
+    insert_at = 0
+    for i, line in enumerate(body):
+        if line.startswith(('ATOM  ', 'HETATM', 'MODEL ', 'TER   ', 'END')):
+            insert_at = i
+            break
+    else:
+        insert_at = len(body)
+
+    body = body[:insert_at] + ssbond_lines + body[insert_at:]
+
+    if add_conect and conect_pairs:
+        conect_lines = []
+        seen = set()
+        for serial1, serial2 in conect_pairs:
+            for a, b in ((serial1, serial2), (serial2, serial1)):
+                key = (int(a), int(b))
+                if key in seen:
+                    continue
+                seen.add(key)
+                conect_lines.append(_format_conect_line(a, b))
+
+        # CONECT records belong near the end, before END/ENDMDL if present.
+        end_index = None
+        for i, line in enumerate(body):
+            if line.startswith(('END   ', 'ENDMDL')) or line.strip() == 'END':
+                end_index = i
+                break
+        if end_index is None:
+            body.extend(conect_lines)
+            if not body or body[-1].strip() != 'END':
+                body.append('END\n')
+        else:
+            body = body[:end_index] + conect_lines + body[end_index:]
+
+    with open(output_pdb, 'w') as fh:
+        fh.writelines(body)
+
+    _append_disulfide_debug(debug_log, f"records_written count={len(annotated)} output={output_pdb}")
+    return annotated
+
+
 def CA2AA_cg2all(filename, outputname, disulfides=None, cg_model='CalphaBasedModel',
                  cg2all_exec=None, stout=False, extra_args=None):
     """
@@ -1879,6 +2110,15 @@ def CA2AA_cg2all(filename, outputname, disulfides=None, cg_model='CalphaBasedMod
     #os.system("bash out.sh")
     subprocess.run(["chmod", "+x", "out.sh"])
     subprocess.run(["bash", "out.sh"])
+    if disulfides and os.path.exists(outputname):
+        add_disulfide_records_to_pdb(
+            outputname,
+            disulfides=disulfides,
+            output_pdb=outputname,
+            add_ssbond=True,
+            add_conect=True,
+            remove_existing=False,
+        )
     print("done")
 
 
