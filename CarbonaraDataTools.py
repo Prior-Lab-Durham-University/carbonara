@@ -2667,9 +2667,393 @@ def find_non_varying_linkers(initial_coords_file, fingerprint_file):
     return allowed_linker, global_linker_indices
 
 
-def auto_select_varying_linker(coords_file, fingerprint_file):
+def _structure_text_handle(path):
+    """Open PDB/mmCIF text, allowing plain files and .gz files."""
+    path = str(path)
+    if path.lower().endswith(".gz"):
+        import gzip
+        return gzip.open(path, "rt", errors="replace")
+    return open(path, "rt", errors="replace")
+
+
+def _is_missing_cif_value(value):
+    return value is None or value in ("", "?", ".")
+
+
+def _as_int_resseq(value):
+    """Convert common PDB/mmCIF residue sequence fields to int when possible."""
+    if _is_missing_cif_value(value):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        # Some auth_seq_id fields can arrive as "23.0" or occasionally "23A".
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            m = re.match(r"^\s*(-?\d+)", str(value))
+            if m:
+                return int(m.group(1))
+    return None
+
+
+def _cys_name(resname):
+    """Treat common oxidised/protonation CYS names as cysteine-like."""
+    return str(resname).strip().upper() in {"CYS", "CYX", "CYM"}
+
+
+def _atom_choice_score(alt_id, occupancy):
+    """
+    Score alternate atom records.  Prefer blank/default altlocs, then A, then
+    other altlocs; within that, prefer higher occupancy.
+    """
+    alt = "" if alt_id is None else str(alt_id).strip()
+    if alt in ("", ".", "?"):
+        alt_rank = 3
+    elif alt.upper() == "A":
+        alt_rank = 2
+    else:
+        alt_rank = 1
+    try:
+        occ = float(occupancy)
+    except (TypeError, ValueError):
+        occ = 0.0
+    return (alt_rank, occ)
+
+
+def _store_best_atom(atom_dict, key, xyz, alt_id=None, occupancy=None):
+    score = _atom_choice_score(alt_id, occupancy)
+    old = atom_dict.get(key)
+    if old is None or score > old[1]:
+        atom_dict[key] = (xyz, score)
+
+
+def _read_cys_atom_coords_from_pdb_records(structure_path, atom_name):
+    """
+    Read CYS-like atom coordinates from fixed-width PDB/PDB-like ATOM records.
+
+    Returns
+    -------
+    dict
+        {(chain_id, resseq): np.array([x, y, z])}
+    """
+    atom_name = str(atom_name).strip().upper()
+    atoms = {}
+    current_model = None
+
+    with _structure_text_handle(structure_path) as fh:
+        for line in fh:
+            rec = line[0:6].strip()
+            if rec == "MODEL":
+                try:
+                    current_model = int(line[10:14])
+                except ValueError:
+                    current_model = 1
+                continue
+            if rec == "ENDMDL" and current_model == 1:
+                break
+            if current_model not in (None, 1):
+                continue
+            if rec not in ("ATOM", "HETATM"):
+                continue
+            if line[12:16].strip().upper() != atom_name:
+                continue
+            if not _cys_name(line[17:20]):
+                continue
+
+            chain = line[21:22].strip() or " "
+            resseq = _as_int_resseq(line[22:26])
+            if resseq is None:
+                continue
+            try:
+                xyz = np.array([
+                    float(line[30:38]),
+                    float(line[38:46]),
+                    float(line[46:54]),
+                ])
+            except ValueError:
+                continue
+
+            alt_id = line[16:17].strip()
+            occupancy = line[54:60].strip()
+            _store_best_atom(atoms, (chain, resseq), xyz, alt_id, occupancy)
+
+    return {key: value[0] for key, value in atoms.items()}
+
+
+def _split_cif_tokens(line):
+    """Small mmCIF token splitter suitable for atom_site rows."""
+    try:
+        return shlex.split(line, comments=False, posix=True)
+    except ValueError:
+        # Fall back to whitespace splitting for slightly malformed atom_site rows.
+        return line.split()
+
+
+def _read_cys_atom_coords_from_cif(structure_path, atom_name):
+    """
+    Read CYS-like atom coordinates from an mmCIF _atom_site loop.
+
+    The returned key uses author identifiers where available:
+        (auth_asym_id, int(auth_seq_id))
+    falling back to label_asym_id / label_seq_id.  This keeps the key space as
+    close as possible to the PDB-style chain/residue labels used elsewhere.
+    """
+    atom_name = str(atom_name).strip().upper()
+    atoms = {}
+
+    with _structure_text_handle(structure_path) as fh:
+        lines = list(fh)
+
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i].strip()
+        if line.lower() != "loop_":
+            i += 1
+            continue
+
+        i += 1
+        columns = []
+        while i < n and lines[i].strip().startswith("_"):
+            col = lines[i].strip().split()[0]
+            columns.append(col)
+            i += 1
+
+        if not columns or not columns[0].lower().startswith("_atom_site."):
+            # Skip non-atom_site loop data.
+            while i < n:
+                s = lines[i].strip()
+                if s.lower() == "loop_" or s.startswith("_"):
+                    break
+                i += 1
+            continue
+
+        col_index = {c.lower(): k for k, c in enumerate(columns)}
+        row_tokens = []
+
+        def get(row, *names):
+            for name in names:
+                idx = col_index.get(name.lower())
+                if idx is not None and idx < len(row):
+                    value = row[idx]
+                    if not _is_missing_cif_value(value):
+                        return value
+            return None
+
+        while i < n:
+            s = lines[i].strip()
+            if not s or s == "#":
+                i += 1
+                if row_tokens:
+                    row_tokens = []
+                continue
+            if s.lower() == "loop_" or s.startswith("_"):
+                break
+            if s.startswith(";"):
+                # Multiline values should not occur in atom_site coordinate rows.
+                # Skip the block safely rather than trying to interpret it as atoms.
+                i += 1
+                while i < n and not lines[i].startswith(";"):
+                    i += 1
+                if i < n:
+                    i += 1
+                continue
+
+            row_tokens.extend(_split_cif_tokens(s))
+            while len(row_tokens) >= len(columns):
+                row = row_tokens[:len(columns)]
+                row_tokens = row_tokens[len(columns):]
+
+                group = get(row, "_atom_site.group_pdb")
+                if group is not None and str(group).upper() not in {"ATOM", "HETATM"}:
+                    continue
+
+                model = get(row, "_atom_site.pdbx_pdb_model_num")
+                if model is not None and str(model) not in {"1", "1.0"}:
+                    continue
+
+                this_atom = get(row, "_atom_site.auth_atom_id", "_atom_site.label_atom_id")
+                if this_atom is None or str(this_atom).strip().upper() != atom_name:
+                    continue
+
+                resname = get(row, "_atom_site.auth_comp_id", "_atom_site.label_comp_id")
+                if not _cys_name(resname):
+                    continue
+
+                chain = get(row, "_atom_site.auth_asym_id", "_atom_site.label_asym_id")
+                if _is_missing_cif_value(chain):
+                    chain = " "
+
+                resseq = _as_int_resseq(
+                    get(row, "_atom_site.auth_seq_id", "_atom_site.label_seq_id")
+                )
+                if resseq is None:
+                    continue
+
+                try:
+                    xyz = np.array([
+                        float(get(row, "_atom_site.cartn_x")),
+                        float(get(row, "_atom_site.cartn_y")),
+                        float(get(row, "_atom_site.cartn_z")),
+                    ])
+                except (TypeError, ValueError):
+                    continue
+
+                alt_id = get(row, "_atom_site.label_alt_id", "_atom_site.pdbx_pdb_ins_code")
+                occupancy = get(row, "_atom_site.occupancy")
+                _store_best_atom(atoms, (str(chain), resseq), xyz, alt_id, occupancy)
+
+            i += 1
+
+    return {key: value[0] for key, value in atoms.items()}
+
+
+def _read_cys_atom_coords(structure_path, atom_name):
+    """
+    Format-safe CYS atom coordinate reader for PDB and mmCIF input.
+
+    The old disulfide helper parsed raw fixed-width PDB records directly, which
+    fails on AlphaFold / PDBx mmCIF files.  This dispatcher keeps the PDB path
+    lightweight and adds a minimal mmCIF _atom_site parser for .cif/.mmcif.
+    """
+    suffixes = [s.lower() for s in Path(str(structure_path)).suffixes]
+    if ".cif" in suffixes or ".mmcif" in suffixes:
+        return _read_cys_atom_coords_from_cif(structure_path, atom_name)
+    return _read_cys_atom_coords_from_pdb_records(structure_path, atom_name)
+
+
+def find_disulfide_bonds_from_pdb(pdb_path, thr_min=1.8, thr_max=2.5):
+    """
+    Find Cys SG-SG pairs at real disulfide-bond distance.
+
+    Despite the historical function name, ``pdb_path`` may now be either PDB
+    or mmCIF/PDBx CIF.  PDB files are read from fixed-width ATOM/HETATM records;
+    CIF files are read from the _atom_site loop.  The function returns
+    ``[((chain, resSeq), (chain, resSeq)), ...]`` using author chain/residue
+    identifiers where available.
+
+    The search is intentionally performed on the raw input structure before
+    Carbonara's own sanitizing/renumbering/chain-splitting.  Callers map these
+    labels onto Carbonara's post-split coordinate arrays via the matching logic
+    in ``disulfide_safe_linkers``.
+    """
+    sg = _read_cys_atom_coords(pdb_path, "SG")
+
+    keys = list(sg.keys())
+    bonds = []
+    for i in range(len(keys)):
+        for j in range(i + 1, len(keys)):
+            d = np.linalg.norm(sg[keys[i]] - sg[keys[j]])
+            if thr_min <= d <= thr_max:
+                bonds.append((keys[i], keys[j]))
+    return bonds
+
+
+def _read_cys_ca_from_pdb(pdb_path):
+    """
+    Cys CA coordinates keyed by (chain, resSeq), in the same key space as
+    find_disulfide_bonds_from_pdb.
+
+    Despite the historical function name, ``pdb_path`` may be either PDB or
+    mmCIF/PDBx CIF.  These CA coordinates are used to relocate a bonded Cys
+    inside Carbonara's post-split coordinate arrays, since SG atoms do not
+    survive into the CA-only coarse-grained representation.
+    """
+    return _read_cys_atom_coords(pdb_path, "CA")
+
+
+def disulfide_safe_linkers(varying_indices, pdb_path, coords_file, fingerprint_file,
+                            rand_dir='rand_structures', thr=1.5):
+    """
+    Friend to find_non_varying_linkers! 
+
+    returns the input varying_indices if there are no disulfide bonds, or if pdb_path/rand_dir can't be read (maybe we should give a warning?)
+
+    
+    
+    """
+    bonds = find_disulfide_bonds_from_pdb(pdb_path)
+    if not bonds:
+        return list(varying_indices)
+
+    secondary = get_secondary(fingerprint_file)
+    chain_lengths = [len(ss) for ss in secondary]
+
+    try:
+        ref_coords_full = read_coords_from_file(coords_file)
+    except OSError:
+        return list(varying_indices)
+    ref_frag_coords, offset = [], 0
+    for n in chain_lengths:
+        ref_frag_coords.append(ref_coords_full[offset:offset + n])
+        offset += n
+
+    def find_pos(xyz):
+        for chain_i, arr in enumerate(ref_frag_coords):
+            if len(arr) == 0:
+                continue
+            d2 = np.sum((arr - xyz) ** 2, axis=1)
+            idx = int(np.argmin(d2))
+            if d2[idx] < 0.01:  # same atom, not just nearby -- sanitizing never moves coordinates
+                return chain_i, idx
+        return None
+
+    ca = _read_cys_ca_from_pdb(pdb_path)
+    flat_offsets = np.cumsum([0] + chain_lengths)
+    pairs = []  # (flat_index_a, flat_index_b, reference_distance)
+    for key1, key2 in bonds:
+        if key1 not in ca or key2 not in ca:
+            continue
+        loc1, loc2 = find_pos(ca[key1]), find_pos(ca[key2])
+        if loc1 is None or loc2 is None:
+            continue
+        flat1 = flat_offsets[loc1[0]] + loc1[1]
+        flat2 = flat_offsets[loc2[0]] + loc2[1]
+        ref_dist = np.linalg.norm(ref_coords_full[flat1] - ref_coords_full[flat2])
+        pairs.append((flat1, flat2, ref_dist))
+    if not pairs:
+        return list(varying_indices)
+
+    try:
+        rand_files = os.listdir(rand_dir)
+    except OSError:
+        return list(varying_indices)
+
+    safe = []
+    for l in varying_indices:
+        li = int(l)
+        sample_files = [f for f in rand_files if len(f.split('_')) > 1 and f.split('_')[1] == str(li)]
+        stretched = False
+        for fname in sample_files:
+            try:
+                sample_coords = read_coords_from_file(os.path.join(rand_dir, fname))
+            except OSError:
+                continue
+            if len(sample_coords) != len(ref_coords_full):
+                continue  # a repeat that failed the CA-CA check writes nothing; a length
+                          # mismatch here means something else is off -- skip, don't guess
+            for flat1, flat2, ref_dist in pairs:
+                d = np.linalg.norm(sample_coords[flat1] - sample_coords[flat2])
+                if d > ref_dist + thr:
+                    stretched = True
+                    break
+            if stretched:
+                break
+        if not stretched:
+            safe.append(l)
+    return safe
+
+
+def auto_select_varying_linker(coords_file, fingerprint_file, pdb_path=None):
     """
     Select varying linkers (longer coil regions that can vary without breaking sheets).
+
+    pdb_path: optional. If given, linkers are also filtered through
+    disulfide_safe_linkers -- any linker whose reshaping stretches a real
+    disulfide bond (detected from the PDB via find_disulfide_bonds_from_pdb)
+    beyond a small tolerance is dropped from the varying set. Omit (default
+    None) to get the old, disulfide-unaware behaviour unchanged.
     """
     allowed_linker, linker_indices = find_non_varying_linkers(coords_file, fingerprint_file)
 
@@ -2681,6 +3065,11 @@ def auto_select_varying_linker(coords_file, fingerprint_file):
         sec = sections[section_index]
         if sec[0] == '-' and len(sec) > 3:
             varying_linker_indices.append(section_index)
+
+    if pdb_path is not None:
+        varying_linker_indices = disulfide_safe_linkers(
+            varying_linker_indices, pdb_path, coords_file, fingerprint_file
+        )
 
     return varying_linker_indices
 

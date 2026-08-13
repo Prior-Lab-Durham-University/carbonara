@@ -719,7 +719,7 @@ def main():
         else:
             # auto select flexible linker chains that dont break inter-beta sheets
             for coord_file in coords_files:
-                varying_linker_chains.append(cdt.auto_select_varying_linker(coord_file, fingerprint_file))
+                varying_linker_chains.append(cdt.auto_select_varying_linker(coord_file, fingerprint_file,args.pdb))
 
         # write flexible linkers to files (varysections1.dat, varysections2.dat, etc [each file is for a different chain])
         varying_section_files = []
