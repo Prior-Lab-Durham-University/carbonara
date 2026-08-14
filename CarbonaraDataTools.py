@@ -4066,3 +4066,34 @@ def pull_structure_from_pdb(
                 os.remove(path)
             except OSError:
                 pass
+
+
+# Update the generated RunMe script to use a specific disulfide constraint file.
+def set_disulfide_constraints_for_run(run_name, disulfide_file):
+    runme = Path(f"RunMe_{run_name}.sh")
+    disulfide_file = Path(disulfide_file).resolve()
+
+    if not runme.exists():
+        raise FileNotFoundError(f"Could not find generated run script: {runme}")
+
+    if not disulfide_file.exists():
+        raise FileNotFoundError(f"Could not find disulfide constraint file: {disulfide_file}")
+
+    text = runme.read_text()
+
+    replacement = f'DISULFIDE_CONSTRAINTS_FILE="{disulfide_file}"'
+    text_new, n = re.subn(
+        r'(?m)^DISULFIDE_CONSTRAINTS_FILE=.*$',
+        replacement,
+        text,
+    )
+
+    if n == 0:
+        raise RuntimeError(
+            "Could not find DISULFIDE_CONSTRAINTS_FILE line in "
+            f"{runme}. Regenerate the RunMe script or add the variable manually."
+        )
+
+    runme.write_text(text_new)
+    print(f"Updated {runme}:")
+    print(replacement)
