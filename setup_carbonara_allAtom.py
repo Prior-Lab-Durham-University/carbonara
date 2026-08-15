@@ -604,6 +604,10 @@ def main():
                     help="Backmapping backend for the generated RunMe script")
     parser.add_argument("--disulfide_constraints_file", default="",
                     help="Optional constraint file to treat as disulfides during backmapping")
+    parser.add_argument("--no-disulfide-linker-check", "--no_disulfide_linker_check",
+                    dest="no_disulfide_linker_check",
+                    action="store_true",
+                    help="Disable the disulfide-aware safety filter during automatic flexible-linker selection. This does not disable disulfide constraints during backmapping.")
     parser.add_argument("--foxs_cmd_default", default="pyfoxs",
                     help="Default FoXS command for the generated RunMe script; user can still override as first shell arg")
     parser.add_argument("--python_exe", default=None,
@@ -718,35 +722,57 @@ def main():
             )
         else:
             # auto select flexible linker chains that dont break inter-beta sheets
+            # By default we also pass args.pdb so CDT can apply its disulfide-aware
+            # linker safety filter.  The user can disable only that extra filter
+            # with --no-disulfide-linker-check, which restores the old two-argument
+            # auto selector while leaving backmapping disulfide constraints untouched.
+            if args.no_disulfide_linker_check:
+                print("Disulfide-aware flexible-linker check: OFF (--no-disulfide-linker-check)")
+            else:
+                print("Disulfide-aware flexible-linker check: ON")
+
             for coord_file in coords_files:
-                varying_linker_chains.append(cdt.auto_select_varying_linker(coord_file, fingerprint_file))
+                if args.no_disulfide_linker_check:
+                    varying_linker_chains.append(
+                        cdt.auto_select_varying_linker(coord_file, fingerprint_file)
+                    )
+                else:
+                    varying_linker_chains.append(
+                        cdt.auto_select_varying_linker(coord_file, fingerprint_file, args.pdb)
+                    )
 
         # write flexible linkers to files (varysections1.dat, varysections2.dat, etc [each file is for a different chain])
         varying_section_files = []
         for varying_linkers in varying_linker_chains:
             varying_section_files.append(cdt.write_varysections_file(varying_linkers, refine_dir))
 
-        # check for length 2 varying sections and filter them out
+        # Final guard for varying sections.  This must run whether the file is
+        # empty or not: section IDs passed to the C++ code must be real internal
+        # linker sections of length >= 4.
         filepath = refine_dir + "/fingerPrint1.dat"
         vs_path = refine_dir + "/varyingSectionSecondary1.dat"
-      
-        # load robustly: always get a 1-D array (even if file has 1 int)
+
         try:
             target_segments = np.loadtxt(vs_path, dtype=int, ndmin=1)
         except ValueError:
             # happens if the file is empty / whitespace
             target_segments = np.array([], dtype=int)
-            
-            target_segments = np.atleast_1d(target_segments)
-            
-            # If nothing to filter, keep file empty and move on
-            if target_segments.size == 0:
-                # optional: ensure empty file exists
-                open(vs_path, "w").close()
+
+        target_segments = np.atleast_1d(np.asarray(target_segments, dtype=int))
+        if target_segments.size == 0:
+            open(vs_path, "w").close()
+        else:
+            if hasattr(cdt, "validate_varying_linker_indices"):
+                filtered_segments = cdt.validate_varying_linker_indices(
+                    target_segments, filepath, min_length=4, exclude_terminal=True,
+                    label="setup final varyingSectionSecondary filter"
+                )
             else:
-                filtered_segments = cdt.get_segment_lengths_from_file(filepath, target_segments)
-                filtered_segments = np.atleast_1d(np.asarray(filtered_segments, dtype=int))
-                np.savetxt(vs_path, filtered_segments, fmt="%i")
+                filtered_segments = cdt.get_segment_lengths_from_file(
+                    filepath, target_segments, min_length=4
+                )
+            filtered_segments = np.asarray(filtered_segments, dtype=int)
+            np.savetxt(vs_path, filtered_segments, fmt="%i")
 
         
          # store chain lengths

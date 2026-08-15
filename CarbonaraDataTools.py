@@ -969,19 +969,41 @@ def generate_random_structures(coords_file, fingerprint_file):
     '''
     secondarystruct = get_secondary(fingerprint_file)
 
-    linker_indices_sep = [find_linker_indices( section_finder(i)) for i in secondarystruct]
+    # Build the same global section numbering used downstream, but do not pass
+    # very short linker sections into the C++ generate_structure executable.
+    # The later auto selector already uses len(section) > 3; doing the same
+    # here prevents length-1/2/3 terminal or boundary fragments from being
+    # trial-moved during the sheet/disulfide pre-check stage.
+    min_linker_len = 4
+    linker_indices = []
+    skipped_short_linkers = []
+    currMax = 0
+    for chain_i, ss in enumerate(secondarystruct):
+        sections = split_into_sections(ss)
+        for local_i, sec in enumerate(sections):
+            if len(sec) == 0 or sec[0] != '-':
+                continue
+            global_i = currMax + local_i
+            if len(sec) >= min_linker_len:
+                linker_indices.append(global_i)
+            else:
+                skipped_short_linkers.append((global_i, chain_i + 1, local_i, len(sec)))
+        currMax += len(sections)
 
-    linker_indices =[]
+    if skipped_short_linkers:
+        preview = ', '.join(
+            f'{g}(chain {c}, local {l}, n={n})'
+            for g, c, l, n in skipped_short_linkers[:10]
+        )
+        if len(skipped_short_linkers) > 10:
+            preview += ', ...'
+        print(
+            'CarbonaraDataTools: skipped '
+            f'{len(skipped_short_linkers)} linker section(s) shorter than '
+            f'{min_linker_len} residues before generate_structure: {preview}'
+        )
 
-
-    currMax=0
-    for i in range(0,len(linker_indices_sep)):
-        for j in range(0,len(list(linker_indices_sep[i]))):
-            linker_indices.append(list(linker_indices_sep[i])[j]+currMax)
-        currMax = currMax +list(linker_indices_sep[i])[-1]+1
-
-    #print(linker_indices)
-    linker_indices =np.asarray(linker_indices)
+    linker_indices = np.asarray(linker_indices, dtype=int)
     #current = os.getcwd() # this is only correct if the system path is also the carbonara folder
     current = os.path.dirname(os.path.realpath(sys.argv[0]))
     random = 'rand_structures'
