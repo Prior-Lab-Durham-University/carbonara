@@ -3387,7 +3387,140 @@ def _find_foxs_fit_file(pdb_path, saxs_path):
     candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
     return candidates[0][2]
 
-def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None):
+
+def _resolve_saxs_for_initial_foxs_check(saxs_name, prepared_saxs_name=None, run_dir=None):
+    """
+    Choose the SAXS file used by the initial FoXS sanity check.
+
+    Prefer the Carbonara-prepared/trimmed Saxs.dat when the caller supplies
+    either ``run_dir`` or ``prepared_saxs_name``.  Otherwise keep the legacy
+    behaviour and use ``saxs_name`` exactly as supplied.
+    """
+    original_saxs = Path(saxs_name).resolve()
+
+    if run_dir is not None:
+        candidate = Path(run_dir).resolve() / "Saxs.dat"
+        if not candidate.exists():
+            raise FileNotFoundError(
+                f"run_dir was supplied for the initial FoXS check, but no Saxs.dat was found: {candidate}"
+            )
+        return candidate, original_saxs, "run_dir/Saxs.dat"
+
+    if prepared_saxs_name is not None:
+        candidate = Path(prepared_saxs_name).resolve()
+        if candidate.is_dir():
+            candidate = candidate / "Saxs.dat"
+        if not candidate.exists():
+            raise FileNotFoundError(
+                f"Prepared SAXS file for the initial FoXS check was not found: {candidate}"
+            )
+        return candidate, original_saxs, "prepared_saxs_name"
+
+    if original_saxs.is_dir():
+        candidate = original_saxs / "Saxs.dat"
+        if not candidate.exists():
+            raise FileNotFoundError(
+                f"SAXS argument is a directory, but it does not contain Saxs.dat: {candidate}"
+            )
+        return candidate, original_saxs, "saxs_name_directory/Saxs.dat"
+
+    if not original_saxs.exists():
+        raise FileNotFoundError(f"SAXS file not found: {original_saxs}")
+
+    return original_saxs, original_saxs, "saxs_name"
+
+
+def _write_protein_only_pdb_for_foxs(pdb_path):
+    """
+    Write a temporary PDB containing only the protein ATOM records used by
+    Carbonara-style backmapped structures.
+
+    This deliberately drops HETATM records such as waters, ligands and metal
+    ions.  pyFoXS can fail on some metal element labels, for example cobalt
+    written as ``CO`` rather than ``Co``.  Carbonara's generated all-atom
+    structures are protein-only, so the initial FoXS check should use the same
+    convention.
+    """
+    pdb_path = Path(pdb_path)
+    tmp = NamedTemporaryFile(
+        suffix="_protein_only_for_foxs.pdb",
+        prefix=pdb_path.stem + "_",
+        mode="w",
+        delete=False,
+    )
+
+    kept_atoms = 0
+    dropped_hetatm = 0
+    dropped_other_atomlike = 0
+    chains = set()
+    wrote_end = False
+    in_first_model = True
+    saw_model = False
+    saw_any_atom = False
+
+    try:
+        with open(pdb_path, "r") as fin, tmp:
+            for line in fin:
+                rec = line[:6]
+
+                if rec.startswith("MODEL"):
+                    if saw_model and saw_any_atom:
+                        break
+                    saw_model = True
+                    in_first_model = True
+                    continue
+
+                if rec.startswith("ENDMDL"):
+                    if saw_any_atom:
+                        break
+                    in_first_model = False
+                    continue
+
+                if not in_first_model:
+                    continue
+
+                if rec == "ATOM  ":
+                    tmp.write(line)
+                    kept_atoms += 1
+                    saw_any_atom = True
+                    if len(line) > 21 and line[21].strip():
+                        chains.add(line[21])
+                elif rec == "HETATM":
+                    dropped_hetatm += 1
+                elif rec in {"ANISOU", "SIGATM", "SIGUIJ"}:
+                    dropped_other_atomlike += 1
+                elif rec.startswith("TER") and saw_any_atom:
+                    tmp.write(line)
+                elif rec.startswith("END"):
+                    wrote_end = True
+                    # Write a clean END below, after filtering.
+                    break
+
+            if kept_atoms == 0:
+                raise ValueError(
+                    f"No ATOM records were found after making a protein-only FoXS input from {pdb_path}."
+                )
+
+            if not wrote_end:
+                tmp.write("END\n")
+            else:
+                tmp.write("END\n")
+
+    except Exception:
+        try:
+            os.remove(tmp.name)
+        except OSError:
+            pass
+        raise
+
+    return Path(tmp.name), {
+        "kept_atom_records": kept_atoms,
+        "dropped_hetatm_records": dropped_hetatm,
+        "dropped_other_atomlike_records": dropped_other_atomlike,
+        "chains": sorted(chains),
+    }
+
+def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None, protein_only=True, prepared_saxs_name=None, run_dir=None, keep_temp_inputs=False):
     """
     Run pyFoXS, extract chi^2, locate the fit file, and plot
     the fit with a FoXS-style residual panel.
@@ -3395,9 +3528,12 @@ def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None):
     Parameters
     ----------
     pdb_name : str
-        Path to structure file.
+        Path to structure file.  By default the FoXS check uses a temporary
+        protein-only PDB generated from this file, matching Carbonara's
+        backmapped AA outputs.
     saxs_name : str
-        Path to SAXS data file.
+        Path to SAXS data file.  Prefer passing Carbonara's prepared/trimmed
+        Saxs.dat, or pass ``run_dir``/``prepared_saxs_name`` below.
     foxs_cmd : str or list
         Examples:
             "pyfoxs"
@@ -3405,6 +3541,20 @@ def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None):
             ["python3", "/path/to/foxs.py"]
     max_q : float or None
         Optional maximum q-value to pass to pyFoXS.
+    protein_only : bool
+        If True, run FoXS on a temporary PDB containing only ATOM records.
+        This drops HETATM waters, ligands and metal ions, matching the
+        protein-only structures produced by Carbonara backmapping and avoiding
+        pyFoXS parser failures on unusual element labels.
+    prepared_saxs_name : str or None
+        Optional explicit path to the Carbonara-prepared SAXS file.  If this is
+        a directory, ``Saxs.dat`` inside it is used.
+    run_dir : str or None
+        Optional Carbonara run directory.  If supplied, ``run_dir/Saxs.dat`` is
+        used for FoXS, so the already normalised and Guinier-trimmed data are
+        used.
+    keep_temp_inputs : bool
+        Keep temporary FoXS PDB inputs for debugging.
 
     Returns
     -------
@@ -3413,21 +3563,37 @@ def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None):
             chi2, stdout, stderr, fit_file
     """
     pdb_path = Path(pdb_name).resolve()
-    saxs_path = Path(saxs_name).resolve()
-
     if not pdb_path.exists():
         raise FileNotFoundError(f"Structure file not found: {pdb_path}")
-    if not saxs_path.exists():
-        raise FileNotFoundError(f"SAXS file not found: {saxs_path}")
 
-    temp_pdb_to_clean = None
+    saxs_path, original_saxs_path, saxs_source = _resolve_saxs_for_initial_foxs_check(
+        saxs_name, prepared_saxs_name=prepared_saxs_name, run_dir=run_dir
+    )
+
+    temp_pdbs_to_clean = []
+    protein_only_info = None
 
     try:
         pdb_for_foxs, temp_pdb_to_clean = _convert_cif_to_pdb_for_foxs(pdb_path)
         pdb_for_foxs = Path(pdb_for_foxs)
+        if temp_pdb_to_clean is not None:
+            temp_pdbs_to_clean.append(Path(temp_pdb_to_clean))
 
-        #if temp_pdb_to_clean is not None:
-        #    print(f"Converted mmCIF to temporary PDB for FoXS: {pdb_for_foxs}")
+        if protein_only:
+            protein_pdb, protein_only_info = _write_protein_only_pdb_for_foxs(pdb_for_foxs)
+            temp_pdbs_to_clean.append(protein_pdb)
+            pdb_for_foxs = protein_pdb
+            print(
+                "Initial FoXS check: using protein-only temporary PDB "
+                f"({protein_only_info['kept_atom_records']} ATOM records; "
+                f"dropped {protein_only_info['dropped_hetatm_records']} HETATM records; "
+                f"chains={','.join(protein_only_info['chains']) or 'unknown'})."
+            )
+
+        if saxs_source != "saxs_name":
+            print(f"Initial FoXS check: using Carbonara-prepared SAXS data from {saxs_path}")
+        else:
+            print(f"Initial FoXS check: using SAXS data from {saxs_path}")
 
         base_cmd = _normalise_cmd(foxs_cmd)
         cmd = base_cmd + [str(pdb_for_foxs), str(saxs_path)]
@@ -3479,6 +3645,12 @@ def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None):
                 "stdout": stdout,
                 "stderr": stderr,
                 "fit_file": None,
+                "pdb_for_foxs": str(pdb_for_foxs),
+                "saxs_for_foxs": str(saxs_path),
+                "original_saxs": str(original_saxs_path),
+                "saxs_source": saxs_source,
+                "protein_only": protein_only,
+                "protein_only_info": protein_only_info,
             }
 
         #print(f"Using fit file: {fit_file}")
@@ -3542,14 +3714,23 @@ def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None):
             "stdout": stdout,
             "stderr": stderr,
             "fit_file": fit_file,
+            "pdb_for_foxs": str(pdb_for_foxs),
+            "saxs_for_foxs": str(saxs_path),
+            "original_saxs": str(original_saxs_path),
+            "saxs_source": saxs_source,
+            "protein_only": protein_only,
+            "protein_only_info": protein_only_info,
         }
 
     finally:
-        if temp_pdb_to_clean is not None:
-            try:
-                os.remove(temp_pdb_to_clean)
-            except OSError:
-                pass
+        if not keep_temp_inputs:
+            for tmp_pdb in temp_pdbs_to_clean:
+                try:
+                    os.remove(tmp_pdb)
+                except OSError:
+                    pass
+        elif temp_pdbs_to_clean:
+            print("Initial FoXS check: kept temporary input(s): " + ", ".join(str(p) for p in temp_pdbs_to_clean))
 
 
 from Bio.PDB import MMCIFParser, PDBIO
