@@ -43,7 +43,6 @@ public:
   void replaceMoleculeAt(std::size_t index, const ktlMolecule &molNew);
   void replaceMoleculeAt(std::size_t index, ktlMolecule &&molNew);
   TrialBackup makeTrialBackup(std::size_t index) const;
-  void makeTrialBackup(std::size_t index, TrialBackup& backup) const;
   void restoreTrialBackup(const TrialBackup& backup);
   void acceptTrialMolecule(std::size_t index, ktlMolecule &&molNew);
   void writeScatteringToFile(experimentalData &ed,std::vector<std::vector<double> > &mixtureVals,const char* filename);

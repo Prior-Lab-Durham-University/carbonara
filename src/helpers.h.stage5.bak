@@ -76,19 +76,6 @@ void updateAndLog_trialAccepted_ChiSq(int& improvementIndex, ktlMolecule&& newMo
                   std::pair<double,double>& overallFit, std::pair<double,double>& newOverallFit,
                   Logger& logger, int l, int k, experimentalData& ed, ModelParameters& params);
 
-// Stage 5 variants: accept by copying from a reusable trial molecule scratch.
-// This avoids moving out of the scratch object, so its internal vector capacity
-// is retained and reused across proposals.
-void updateAndLog_trialAcceptedCopy(int& improvementIndex, const ktlMolecule& newMol,
-                  moleculeFitAndState& molState,
-                  std::pair<double,double>& overallFit, std::pair<double,double>& newOverallFit,
-                  Logger& logger, int l, int k, experimentalData& ed, ModelParameters& params);
-
-void updateAndLog_trialAcceptedCopy_ChiSq(int& improvementIndex, const ktlMolecule& newMol,
-                  moleculeFitAndState& molState,
-                  std::pair<double,double>& overallFit, std::pair<double,double>& newOverallFit,
-                  Logger& logger, int l, int k, experimentalData& ed, ModelParameters& params);
-
 
 // Construct molecule file name - accounting for sub structure
 std::string constructMoleculeName(const std::string& basePath, const std::string& prefix, const std::string& extension,

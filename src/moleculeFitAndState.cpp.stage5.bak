@@ -107,12 +107,6 @@ void moleculeFitAndState::replaceMoleculeAt(std::size_t index, ktlMolecule &&mol
 
 
 moleculeFitAndState::TrialBackup moleculeFitAndState::makeTrialBackup(std::size_t index) const{
-  TrialBackup backup;
-  makeTrialBackup(index, backup);
-  return backup;
-}
-
-void moleculeFitAndState::makeTrialBackup(std::size_t index, TrialBackup& backup) const{
   if(index >= mol.size() || index >= molDists.size() || index >= overlapDistSet.size() ||
      index >= molSize.size() || index >= maxDistMol.size() ||
      index >= contactPredPen.size() || index >= currWrithes.size() ||
@@ -120,9 +114,7 @@ void moleculeFitAndState::makeTrialBackup(std::size_t index, TrialBackup& backup
     throw std::out_of_range("moleculeFitAndState::makeTrialBackup index out of range");
   }
 
-  // Reusing an existing TrialBackup lets std::vector assignment retain capacity
-  // between proposals.  On very large complexes this avoids allocator growth from
-  // constructing/destroying fresh backup vectors at every rejected move.
+  TrialBackup backup;
   backup.index = index;
   backup.molDists_i = molDists[index];
   backup.overlapDistSet_i = overlapDistSet[index];
@@ -135,6 +127,7 @@ void moleculeFitAndState::makeTrialBackup(std::size_t index, TrialBackup& backup
   backup.connectionPenalty_i = connectionPenaltySet[index];
   backup.C2_value = C2;
   backup.currFit_value = currFit;
+  return backup;
 }
 
 void moleculeFitAndState::restoreTrialBackup(const TrialBackup& backup){
