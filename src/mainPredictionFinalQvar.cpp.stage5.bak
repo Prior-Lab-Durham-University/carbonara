@@ -120,15 +120,6 @@ int main(int argc, const char* argv[]) {
   /* initialise the set of historical states - currently basic, but used to save previous fit stages */
   std::vector<moleculeFitAndState> molStateSet = makeHistoricalStateSet(molState, params);
 
-  // Stage 5: reusable trial molecule and backup storage.  Very large complexes
-  // make repeated construction/destruction of ktlMolecule trial copies expensive
-  // and can make the allocator's virtual memory reservation climb over time.
-  // These scratch objects keep their internal vector capacity and are reused for
-  // every proposal in this process.
-  std::vector<ktlMolecule> trialMoleculeScratch =
-      molStateSet.empty() ? molState.moleculeRef() : molStateSet.front().moleculeRef();
-  moleculeFitAndState::TrialBackup trialBackupScratch;
-
   // loop number
   int fitStep = 0;
 
@@ -163,8 +154,7 @@ int main(int argc, const char* argv[]) {
 
         // Selected transformation option?
         if (params.affineTrans == true) {
-          ktlMolecule& molCopyR = trialMoleculeScratch[structureIndex];
-          molCopyR = activeMoleculeStructures[structureIndex];
+          ktlMolecule molCopyR = activeMoleculeStructures[structureIndex];
 
           double angle = rng.getRotAng();
           double theta = rng.getTheAng();
@@ -183,7 +173,8 @@ int main(int argc, const char* argv[]) {
             // Stage 4: score the proposal directly on activeState, but keep a
             // compact backup of only the cached quantities changed by trial scoring.
             // This avoids copying the whole moleculeFitAndState for every proposal.
-            activeState.makeTrialBackup(static_cast<std::size_t>(structureIndex), trialBackupScratch);
+            moleculeFitAndState::TrialBackup trialBackup =
+                activeState.makeTrialBackup(static_cast<std::size_t>(structureIndex));
             std::pair<double, double> newOverallFit;
             if ((strcmp(argv[19], "True") == 0)) {
             newOverallFit = activeState.getOverallFitForceConnection_ChiSq(ed, params.mixtureList, molCopyR, params.kmin, params.kmaxCurr, structureIndex);
@@ -194,9 +185,9 @@ int main(int argc, const char* argv[]) {
             if (checkTransition(newOverallFit.first, overallFit.first, uProb, fitStep, params.noScatterFitSteps)) {
               improvementIndex++;
                if ((strcmp(argv[19], "True") == 0)) {
-                updateAndLog_trialAcceptedCopy_ChiSq(improvementIndex, molCopyR, activeState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
+                updateAndLog_trialAccepted_ChiSq(improvementIndex, std::move(molCopyR), activeState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
               }else{
-                updateAndLog_trialAcceptedCopy(improvementIndex, molCopyR, activeState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
+                updateAndLog_trialAccepted(improvementIndex, std::move(molCopyR), activeState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
               }
               logger.consoleChange("fitImprove", params);
               if ((strcmp(argv[19], "True") == 0)) {
@@ -205,7 +196,7 @@ int main(int argc, const char* argv[]) {
 	                 activeState.updateScatteringFit(ed,params.mixtureList,params.kmin, params.kmaxCurr);
 	               }    
             } else {
-              activeState.restoreTrialBackup(trialBackupScratch);
+              activeState.restoreTrialBackup(trialBackup);
             }
           }
         } // rotate/translate section ends
@@ -224,15 +215,15 @@ int main(int argc, const char* argv[]) {
           // in this if statement we check which secondary sections are being changed
           if ((doAll == true) || (std::find(vary_sec_list_list[structureIndex].begin(), vary_sec_list_list[structureIndex].end(), totalIndex) != vary_sec_list_list[structureIndex].end())) {
             int indexCh = totalIndex - netIndex;
-            ktlMolecule& newMol = trialMoleculeScratch[structureIndex];
-            newMol = activeMoleculeStructures[structureIndex];
+            ktlMolecule newMol = activeMoleculeStructures[structureIndex];
             bool cacaDist = modifyMolecule(newMol, activeMoleculeStructures[structureIndex], indexCh, chainNumber);
 	    cacaDist= newMol.checkCalphas(chainNumber,activeMoleculeStructures[structureIndex]);
             if (cacaDist == false) {
 
               // Stage 4: score the proposal directly on activeState, restoring
               // only cached trial quantities if the move is rejected.
-              activeState.makeTrialBackup(static_cast<std::size_t>(structureIndex), trialBackupScratch);
+              moleculeFitAndState::TrialBackup trialBackup =
+                  activeState.makeTrialBackup(static_cast<std::size_t>(structureIndex));
 
               // calculate the fitting of changed molecule
               std::pair<double, double> newOverallFit;
@@ -248,9 +239,9 @@ int main(int argc, const char* argv[]) {
                 // Success! Add to the update index
                 improvementIndex++;
                 if ((strcmp(argv[19], "True") == 0)) {
-                  updateAndLog_trialAcceptedCopy_ChiSq(improvementIndex, newMol, activeState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
+                  updateAndLog_trialAccepted_ChiSq(improvementIndex, std::move(newMol), activeState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
                   }else{
-                    updateAndLog_trialAcceptedCopy(improvementIndex, newMol, activeState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
+                    updateAndLog_trialAccepted(improvementIndex, std::move(newMol), activeState, overallFit, newOverallFit, logger, structureIndex, fitStep, ed, params);
                   }
                 logger.consoleChange("fitImprove", params);
                 if ((strcmp(argv[19], "True") == 0)) {
@@ -261,7 +252,7 @@ int main(int argc, const char* argv[]) {
 			// std::cout << "Hydration density parameter C2: " << activeState.C2 << " \n";
 
               } else {
-                activeState.restoreTrialBackup(trialBackupScratch);
+                activeState.restoreTrialBackup(trialBackup);
               }
             }
 

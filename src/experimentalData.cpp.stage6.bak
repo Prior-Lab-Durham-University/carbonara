@@ -528,17 +528,9 @@ std::vector<double> experimentalData::calculate_intensity_at_experimental_q(std:
  double experimentalData::calculateChiSquared(std::vector<ktlMolecule> &mol,double &qmin,double &qmax,std::vector<std::vector<double> > &mixtureVals){
     kMin = qmin;
    kMax = qmax;
-   // Stage 6 / memory_fix parity:
-   // calculateChiSquared() is called again after accepted moves.  The old
-   // version appended maxDist/scs entries on every call, so large scattering
-   // caches accumulated and VIRT climbed steadily.  Reset to exactly mol.size().
-   maxDist.assign(mol.size(), 0.0);
-   scs.clear();
-   scs.resize(mol.size());
-   Ivec.clear();
-   Ivec.resize(mol.size());
-   IvecOnData.clear();
-   IvecOnData.resize(mol.size());
+   for(int i=0;i<mol.size();i++){
+     maxDist.push_back(0.0);
+   }
    // loop over all molecules considered and calculate their side chains and distances
    for(int i=0;i<mol.size();i++){
      //get calpha's
@@ -547,31 +539,29 @@ std::vector<double> experimentalData::calculate_intensity_at_experimental_q(std:
      // get side chains
      const std::vector<std::vector<std::string> >& aminoList = mol[i].getAminoList();
      std::vector<char> chainResidues = flatten_residueNames(aminoList);
-     int molIndex = i;
-     ScatteringCenters calphsAndSideChains  = process_structure(chainCoordinates,chainResidues,molIndex);
-     scs[i] = calphsAndSideChains;
+     ScatteringCenters calphsAndSideChains  = process_structure(chainCoordinates,chainResidues,i);
+     scs.push_back(calphsAndSideChains);
    }
 
    // use the maximum distance size to set the number of q values we fit to:
-   double dMax = 0.0;
-   if(!maxDist.empty()){
-     dMax = *std::max_element(begin(maxDist), end(maxDist));
-   }
+   double dMax = *std::max_element(begin(maxDist), end(maxDist));
    int noBins = setPhases(dMax,qmin,qmax);
    
    // now loop over all molecules and calculate their scattering
 
+   Ivec.clear();
    for(int i=0;i<mol.size();i++){
-     Ivec[i] = calculate_saxs_implicit(scs[i]);
+     Ivec.push_back(calculate_saxs_implicit(scs[i]));
    }
 
+   IvecOnData.clear();
    /*for(int i=0;i<mol.size();i++){
      IvecOnData.push_back(calculate_intensity_at_experimental_q(Ivec[i]));
      }*/
 
 
    for(int i=0;i<mol.size();i++){
-     IvecOnData[i] = calculate_intensity_at_experimental_q(q,Ivec[i],exprQSubset);
+     IvecOnData.push_back( calculate_intensity_at_experimental_q(q,Ivec[i],exprQSubset));
    }
    
 
@@ -627,16 +617,6 @@ std::vector<double> experimentalData::calculate_intensity_at_experimental_q(std:
 double experimentalData::calculateChiSquaredUpdate(ktlMolecule& molNew,int& k,double &qmin,double &qmax,std::vector<std::vector<double> > &mixtureVals){
    kMin = qmin;
    kMax = qmax;
-
-   // Be robust if an update is called before a full calculateChiSquared() has
-   // initialised these caches.
-   if(static_cast<std::size_t>(k) >= scs.size()){
-     scs.resize(k + 1);
-     Ivec.resize(k + 1);
-     IvecOnData.resize(k + 1);
-     maxDist.resize(k + 1, 0.0);
-   }
-
    // loop over all molecules considered and calculate their side chains and distances
    maxDist[k]=0.0;
    const std::vector<std::vector<point> >& coords = molNew.getCoordinates();
@@ -649,10 +629,7 @@ double experimentalData::calculateChiSquaredUpdate(ktlMolecule& molNew,int& k,do
    
 
    // use the maximum distance size to set the number of q values we fit to:
-   double dMax = 0.0;
-   if(!maxDist.empty()){
-     dMax = *std::max_element(begin(maxDist), end(maxDist));
-   }
+   double dMax = *std::max_element(begin(maxDist), end(maxDist));
    int noBins = setPhases(dMax,qmin,qmax);
    // now loop over all molecules and calculate their scattering
 
@@ -776,17 +753,9 @@ std::vector<double> experimentalData::calculate_intensity_at_experimental_q(std:
  double experimentalData::calculateChiSquared_Weighted(std::vector<ktlMolecule> &mol,double &qmin,double &qmax,std::vector<std::vector<double> > &mixtureVals){
    kMin = qmin;
    kMax = qmax;
-   // Stage 6 / memory_fix parity:
-   // calculateChiSquared() is called again after accepted moves.  The old
-   // version appended maxDist/scs entries on every call, so large scattering
-   // caches accumulated and VIRT climbed steadily.  Reset to exactly mol.size().
-   maxDist.assign(mol.size(), 0.0);
-   scs.clear();
-   scs.resize(mol.size());
-   Ivec.clear();
-   Ivec.resize(mol.size());
-   IvecOnData.clear();
-   IvecOnData.resize(mol.size());
+   for(int i=0;i<mol.size();i++){
+     maxDist.push_back(0.0);
+   }
    // loop over all molecules considered and calculate their side chains and distances
    for(int i=0;i<mol.size();i++){
      //get calpha's
@@ -795,28 +764,26 @@ std::vector<double> experimentalData::calculate_intensity_at_experimental_q(std:
      // get side chains
      const std::vector<std::vector<std::string> >& aminoList = mol[i].getAminoList();
      std::vector<char> chainResidues = flatten_residueNames(aminoList);
-     int molIndex = i;
-     ScatteringCenters calphsAndSideChains  = process_structure(chainCoordinates,chainResidues,molIndex);
-     scs[i] = calphsAndSideChains;
+     ScatteringCenters calphsAndSideChains  = process_structure(chainCoordinates,chainResidues,i);
+     scs.push_back(calphsAndSideChains);
    }
 
    // use the maximum distance size to set the number of q values we fit to:
-   double dMax = 0.0;
-   if(!maxDist.empty()){
-     dMax = *std::max_element(begin(maxDist), end(maxDist));
-   }
+   double dMax = *std::max_element(begin(maxDist), end(maxDist));
  
    int noBins = setPhases(dMax,qmin,qmax);
 
    // now loop over all molecules and calculate their scattering
 
+   Ivec.clear();
    for(int i=0;i<mol.size();i++){
-     Ivec[i] = calculate_saxs_implicit(scs[i]);
+     Ivec.push_back(calculate_saxs_implicit(scs[i]));
    }
 
+   IvecOnData.clear();
    
    for(int i=0;i<mol.size();i++){
-     IvecOnData[i] = calculate_intensity_at_experimental_q(q,Ivec[i],exprQSubset);
+     IvecOnData.push_back(calculate_intensity_at_experimental_q(q,Ivec[i],exprQSubset));
    }
 
    
@@ -877,14 +844,6 @@ double experimentalData::calculateChiSquaredUpdate_Weighted(ktlMolecule& molNew,
    // loop over all molecules considered and calculate their side chains and distances
    kMin = qmin;
    kMax = qmax;
-
-   if(static_cast<std::size_t>(k) >= scs.size()){
-     scs.resize(k + 1);
-     Ivec.resize(k + 1);
-     IvecOnData.resize(k + 1);
-     maxDist.resize(k + 1, 0.0);
-   }
-
    maxDist[k]=0.0;
    const std::vector<std::vector<point> >& coords = molNew.getCoordinates();
    std::vector<point> chainCoordinates = flatten_coords(coords);
@@ -895,10 +854,7 @@ double experimentalData::calculateChiSquaredUpdate_Weighted(ktlMolecule& molNew,
    scs[k] = calphsAndSideChains;
 
    // use the maximum distance size to set the number of q values we fit to:
-   double dMax = 0.0;
-   if(!maxDist.empty()){
-     dMax = *std::max_element(begin(maxDist), end(maxDist));
-   }
+   double dMax = *std::max_element(begin(maxDist), end(maxDist));
    int noBins = setPhases(dMax,qmin,qmax);
    // now loop over all molecules and calculate their scattering
 

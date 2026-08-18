@@ -6,46 +6,19 @@
 #include "experimentalData.h"
 #include "parameters.h"
 #include <cstddef>
-#include <utility>
 
 class moleculeFitAndState{
 public:
-
-  struct TrialBackup {
-    std::size_t index;
-    std::vector<double> molDists_i;
-    std::vector<double> overlapDistSet_i;
-    int molSize_i;
-    double maxDistMol_i;
-    double contactPredPen_i;
-    std::vector<double> currWrithes_i;
-    double writhePenalty_value;
-    double connectionPenalty_value;
-    double connectionPenalty_i;
-    double C2_value;
-    double currFit_value;
-  };
 
   // best fitting hydration parameter
   double C2;
 
   moleculeFitAndState(const std::vector<ktlMolecule> &mol, ModelParameters& params);
-  moleculeFitAndState(std::vector<ktlMolecule> &&mol, ModelParameters& params);
-
-  moleculeFitAndState(const moleculeFitAndState&) = default;
-  moleculeFitAndState(moleculeFitAndState&&) noexcept = default;
-  moleculeFitAndState& operator=(const moleculeFitAndState&) = default;
-  moleculeFitAndState& operator=(moleculeFitAndState&&) noexcept = default;
   const std::vector<ktlMolecule>& getMolecule() const;
   std::vector<ktlMolecule>& moleculeRef();
   const std::vector<ktlMolecule>& moleculeRef() const;
   void updateMolecule(const std::vector<ktlMolecule> &molNew);
   void replaceMoleculeAt(std::size_t index, const ktlMolecule &molNew);
-  void replaceMoleculeAt(std::size_t index, ktlMolecule &&molNew);
-  TrialBackup makeTrialBackup(std::size_t index) const;
-  void makeTrialBackup(std::size_t index, TrialBackup& backup) const;
-  void restoreTrialBackup(const TrialBackup& backup);
-  void acceptTrialMolecule(std::size_t index, ktlMolecule &&molNew);
   void writeScatteringToFile(experimentalData &ed,std::vector<std::vector<double> > &mixtureVals,const char* filename);
   void writeScatteringToFile_ChiSq(experimentalData &ed,std::vector<std::vector<double> > &mixtureVals,const char* filename);
   double getOverlapPenalty(double &closestApproachDist,std::vector<double> &overlapDists);
@@ -77,7 +50,6 @@ public:
 
 
 private:
-  void initialiseFromCurrentMolecules(ModelParameters& params);
   std::vector<std::vector<double> > molDists;
   std::vector<std::vector<double> > solDists;
   std::vector<std::vector<double> > solMolDists;
