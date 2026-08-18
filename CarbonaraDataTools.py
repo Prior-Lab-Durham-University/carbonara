@@ -969,19 +969,41 @@ def generate_random_structures(coords_file, fingerprint_file):
     '''
     secondarystruct = get_secondary(fingerprint_file)
 
-    linker_indices_sep = [find_linker_indices( section_finder(i)) for i in secondarystruct]
+    # Build the same global section numbering used downstream, but do not pass
+    # very short linker sections into the C++ generate_structure executable.
+    # The later auto selector already uses len(section) > 3; doing the same
+    # here prevents length-1/2/3 terminal or boundary fragments from being
+    # trial-moved during the sheet/disulfide pre-check stage.
+    min_linker_len = 4
+    linker_indices = []
+    skipped_short_linkers = []
+    currMax = 0
+    for chain_i, ss in enumerate(secondarystruct):
+        sections = split_into_sections(ss)
+        for local_i, sec in enumerate(sections):
+            if len(sec) == 0 or sec[0] != '-':
+                continue
+            global_i = currMax + local_i
+            if len(sec) >= min_linker_len:
+                linker_indices.append(global_i)
+            else:
+                skipped_short_linkers.append((global_i, chain_i + 1, local_i, len(sec)))
+        currMax += len(sections)
 
-    linker_indices =[]
+    if skipped_short_linkers:
+        preview = ', '.join(
+            f'{g}(chain {c}, local {l}, n={n})'
+            for g, c, l, n in skipped_short_linkers[:10]
+        )
+        if len(skipped_short_linkers) > 10:
+            preview += ', ...'
+        print(
+            'CarbonaraDataTools: skipped '
+            f'{len(skipped_short_linkers)} linker section(s) shorter than '
+            f'{min_linker_len} residues before generate_structure: {preview}'
+        )
 
-
-    currMax=0
-    for i in range(0,len(linker_indices_sep)):
-        for j in range(0,len(list(linker_indices_sep[i]))):
-            linker_indices.append(list(linker_indices_sep[i])[j]+currMax)
-        currMax = currMax +list(linker_indices_sep[i])[-1]+1
-
-    #print(linker_indices)
-    linker_indices =np.asarray(linker_indices)
+    linker_indices = np.asarray(linker_indices, dtype=int)
     #current = os.getcwd() # this is only correct if the system path is also the carbonara folder
     current = os.path.dirname(os.path.realpath(sys.argv[0]))
     random = 'rand_structures'
@@ -2667,9 +2689,393 @@ def find_non_varying_linkers(initial_coords_file, fingerprint_file):
     return allowed_linker, global_linker_indices
 
 
-def auto_select_varying_linker(coords_file, fingerprint_file):
+def _structure_text_handle(path):
+    """Open PDB/mmCIF text, allowing plain files and .gz files."""
+    path = str(path)
+    if path.lower().endswith(".gz"):
+        import gzip
+        return gzip.open(path, "rt", errors="replace")
+    return open(path, "rt", errors="replace")
+
+
+def _is_missing_cif_value(value):
+    return value is None or value in ("", "?", ".")
+
+
+def _as_int_resseq(value):
+    """Convert common PDB/mmCIF residue sequence fields to int when possible."""
+    if _is_missing_cif_value(value):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        # Some auth_seq_id fields can arrive as "23.0" or occasionally "23A".
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            m = re.match(r"^\s*(-?\d+)", str(value))
+            if m:
+                return int(m.group(1))
+    return None
+
+
+def _cys_name(resname):
+    """Treat common oxidised/protonation CYS names as cysteine-like."""
+    return str(resname).strip().upper() in {"CYS", "CYX", "CYM"}
+
+
+def _atom_choice_score(alt_id, occupancy):
+    """
+    Score alternate atom records.  Prefer blank/default altlocs, then A, then
+    other altlocs; within that, prefer higher occupancy.
+    """
+    alt = "" if alt_id is None else str(alt_id).strip()
+    if alt in ("", ".", "?"):
+        alt_rank = 3
+    elif alt.upper() == "A":
+        alt_rank = 2
+    else:
+        alt_rank = 1
+    try:
+        occ = float(occupancy)
+    except (TypeError, ValueError):
+        occ = 0.0
+    return (alt_rank, occ)
+
+
+def _store_best_atom(atom_dict, key, xyz, alt_id=None, occupancy=None):
+    score = _atom_choice_score(alt_id, occupancy)
+    old = atom_dict.get(key)
+    if old is None or score > old[1]:
+        atom_dict[key] = (xyz, score)
+
+
+def _read_cys_atom_coords_from_pdb_records(structure_path, atom_name):
+    """
+    Read CYS-like atom coordinates from fixed-width PDB/PDB-like ATOM records.
+
+    Returns
+    -------
+    dict
+        {(chain_id, resseq): np.array([x, y, z])}
+    """
+    atom_name = str(atom_name).strip().upper()
+    atoms = {}
+    current_model = None
+
+    with _structure_text_handle(structure_path) as fh:
+        for line in fh:
+            rec = line[0:6].strip()
+            if rec == "MODEL":
+                try:
+                    current_model = int(line[10:14])
+                except ValueError:
+                    current_model = 1
+                continue
+            if rec == "ENDMDL" and current_model == 1:
+                break
+            if current_model not in (None, 1):
+                continue
+            if rec not in ("ATOM", "HETATM"):
+                continue
+            if line[12:16].strip().upper() != atom_name:
+                continue
+            if not _cys_name(line[17:20]):
+                continue
+
+            chain = line[21:22].strip() or " "
+            resseq = _as_int_resseq(line[22:26])
+            if resseq is None:
+                continue
+            try:
+                xyz = np.array([
+                    float(line[30:38]),
+                    float(line[38:46]),
+                    float(line[46:54]),
+                ])
+            except ValueError:
+                continue
+
+            alt_id = line[16:17].strip()
+            occupancy = line[54:60].strip()
+            _store_best_atom(atoms, (chain, resseq), xyz, alt_id, occupancy)
+
+    return {key: value[0] for key, value in atoms.items()}
+
+
+def _split_cif_tokens(line):
+    """Small mmCIF token splitter suitable for atom_site rows."""
+    try:
+        return shlex.split(line, comments=False, posix=True)
+    except ValueError:
+        # Fall back to whitespace splitting for slightly malformed atom_site rows.
+        return line.split()
+
+
+def _read_cys_atom_coords_from_cif(structure_path, atom_name):
+    """
+    Read CYS-like atom coordinates from an mmCIF _atom_site loop.
+
+    The returned key uses author identifiers where available:
+        (auth_asym_id, int(auth_seq_id))
+    falling back to label_asym_id / label_seq_id.  This keeps the key space as
+    close as possible to the PDB-style chain/residue labels used elsewhere.
+    """
+    atom_name = str(atom_name).strip().upper()
+    atoms = {}
+
+    with _structure_text_handle(structure_path) as fh:
+        lines = list(fh)
+
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i].strip()
+        if line.lower() != "loop_":
+            i += 1
+            continue
+
+        i += 1
+        columns = []
+        while i < n and lines[i].strip().startswith("_"):
+            col = lines[i].strip().split()[0]
+            columns.append(col)
+            i += 1
+
+        if not columns or not columns[0].lower().startswith("_atom_site."):
+            # Skip non-atom_site loop data.
+            while i < n:
+                s = lines[i].strip()
+                if s.lower() == "loop_" or s.startswith("_"):
+                    break
+                i += 1
+            continue
+
+        col_index = {c.lower(): k for k, c in enumerate(columns)}
+        row_tokens = []
+
+        def get(row, *names):
+            for name in names:
+                idx = col_index.get(name.lower())
+                if idx is not None and idx < len(row):
+                    value = row[idx]
+                    if not _is_missing_cif_value(value):
+                        return value
+            return None
+
+        while i < n:
+            s = lines[i].strip()
+            if not s or s == "#":
+                i += 1
+                if row_tokens:
+                    row_tokens = []
+                continue
+            if s.lower() == "loop_" or s.startswith("_"):
+                break
+            if s.startswith(";"):
+                # Multiline values should not occur in atom_site coordinate rows.
+                # Skip the block safely rather than trying to interpret it as atoms.
+                i += 1
+                while i < n and not lines[i].startswith(";"):
+                    i += 1
+                if i < n:
+                    i += 1
+                continue
+
+            row_tokens.extend(_split_cif_tokens(s))
+            while len(row_tokens) >= len(columns):
+                row = row_tokens[:len(columns)]
+                row_tokens = row_tokens[len(columns):]
+
+                group = get(row, "_atom_site.group_pdb")
+                if group is not None and str(group).upper() not in {"ATOM", "HETATM"}:
+                    continue
+
+                model = get(row, "_atom_site.pdbx_pdb_model_num")
+                if model is not None and str(model) not in {"1", "1.0"}:
+                    continue
+
+                this_atom = get(row, "_atom_site.auth_atom_id", "_atom_site.label_atom_id")
+                if this_atom is None or str(this_atom).strip().upper() != atom_name:
+                    continue
+
+                resname = get(row, "_atom_site.auth_comp_id", "_atom_site.label_comp_id")
+                if not _cys_name(resname):
+                    continue
+
+                chain = get(row, "_atom_site.auth_asym_id", "_atom_site.label_asym_id")
+                if _is_missing_cif_value(chain):
+                    chain = " "
+
+                resseq = _as_int_resseq(
+                    get(row, "_atom_site.auth_seq_id", "_atom_site.label_seq_id")
+                )
+                if resseq is None:
+                    continue
+
+                try:
+                    xyz = np.array([
+                        float(get(row, "_atom_site.cartn_x")),
+                        float(get(row, "_atom_site.cartn_y")),
+                        float(get(row, "_atom_site.cartn_z")),
+                    ])
+                except (TypeError, ValueError):
+                    continue
+
+                alt_id = get(row, "_atom_site.label_alt_id", "_atom_site.pdbx_pdb_ins_code")
+                occupancy = get(row, "_atom_site.occupancy")
+                _store_best_atom(atoms, (str(chain), resseq), xyz, alt_id, occupancy)
+
+            i += 1
+
+    return {key: value[0] for key, value in atoms.items()}
+
+
+def _read_cys_atom_coords(structure_path, atom_name):
+    """
+    Format-safe CYS atom coordinate reader for PDB and mmCIF input.
+
+    The old disulfide helper parsed raw fixed-width PDB records directly, which
+    fails on AlphaFold / PDBx mmCIF files.  This dispatcher keeps the PDB path
+    lightweight and adds a minimal mmCIF _atom_site parser for .cif/.mmcif.
+    """
+    suffixes = [s.lower() for s in Path(str(structure_path)).suffixes]
+    if ".cif" in suffixes or ".mmcif" in suffixes:
+        return _read_cys_atom_coords_from_cif(structure_path, atom_name)
+    return _read_cys_atom_coords_from_pdb_records(structure_path, atom_name)
+
+
+def find_disulfide_bonds_from_pdb(pdb_path, thr_min=1.8, thr_max=2.5):
+    """
+    Find Cys SG-SG pairs at real disulfide-bond distance.
+
+    Despite the historical function name, ``pdb_path`` may now be either PDB
+    or mmCIF/PDBx CIF.  PDB files are read from fixed-width ATOM/HETATM records;
+    CIF files are read from the _atom_site loop.  The function returns
+    ``[((chain, resSeq), (chain, resSeq)), ...]`` using author chain/residue
+    identifiers where available.
+
+    The search is intentionally performed on the raw input structure before
+    Carbonara's own sanitizing/renumbering/chain-splitting.  Callers map these
+    labels onto Carbonara's post-split coordinate arrays via the matching logic
+    in ``disulfide_safe_linkers``.
+    """
+    sg = _read_cys_atom_coords(pdb_path, "SG")
+
+    keys = list(sg.keys())
+    bonds = []
+    for i in range(len(keys)):
+        for j in range(i + 1, len(keys)):
+            d = np.linalg.norm(sg[keys[i]] - sg[keys[j]])
+            if thr_min <= d <= thr_max:
+                bonds.append((keys[i], keys[j]))
+    return bonds
+
+
+def _read_cys_ca_from_pdb(pdb_path):
+    """
+    Cys CA coordinates keyed by (chain, resSeq), in the same key space as
+    find_disulfide_bonds_from_pdb.
+
+    Despite the historical function name, ``pdb_path`` may be either PDB or
+    mmCIF/PDBx CIF.  These CA coordinates are used to relocate a bonded Cys
+    inside Carbonara's post-split coordinate arrays, since SG atoms do not
+    survive into the CA-only coarse-grained representation.
+    """
+    return _read_cys_atom_coords(pdb_path, "CA")
+
+
+def disulfide_safe_linkers(varying_indices, pdb_path, coords_file, fingerprint_file,
+                            rand_dir='rand_structures', thr=1.5):
+    """
+    Friend to find_non_varying_linkers! 
+
+    returns the input varying_indices if there are no disulfide bonds, or if pdb_path/rand_dir can't be read (maybe we should give a warning?)
+
+    
+    
+    """
+    bonds = find_disulfide_bonds_from_pdb(pdb_path)
+    if not bonds:
+        return list(varying_indices)
+
+    secondary = get_secondary(fingerprint_file)
+    chain_lengths = [len(ss) for ss in secondary]
+
+    try:
+        ref_coords_full = read_coords_from_file(coords_file)
+    except OSError:
+        return list(varying_indices)
+    ref_frag_coords, offset = [], 0
+    for n in chain_lengths:
+        ref_frag_coords.append(ref_coords_full[offset:offset + n])
+        offset += n
+
+    def find_pos(xyz):
+        for chain_i, arr in enumerate(ref_frag_coords):
+            if len(arr) == 0:
+                continue
+            d2 = np.sum((arr - xyz) ** 2, axis=1)
+            idx = int(np.argmin(d2))
+            if d2[idx] < 0.01:  # same atom, not just nearby -- sanitizing never moves coordinates
+                return chain_i, idx
+        return None
+
+    ca = _read_cys_ca_from_pdb(pdb_path)
+    flat_offsets = np.cumsum([0] + chain_lengths)
+    pairs = []  # (flat_index_a, flat_index_b, reference_distance)
+    for key1, key2 in bonds:
+        if key1 not in ca or key2 not in ca:
+            continue
+        loc1, loc2 = find_pos(ca[key1]), find_pos(ca[key2])
+        if loc1 is None or loc2 is None:
+            continue
+        flat1 = flat_offsets[loc1[0]] + loc1[1]
+        flat2 = flat_offsets[loc2[0]] + loc2[1]
+        ref_dist = np.linalg.norm(ref_coords_full[flat1] - ref_coords_full[flat2])
+        pairs.append((flat1, flat2, ref_dist))
+    if not pairs:
+        return list(varying_indices)
+
+    try:
+        rand_files = os.listdir(rand_dir)
+    except OSError:
+        return list(varying_indices)
+
+    safe = []
+    for l in varying_indices:
+        li = int(l)
+        sample_files = [f for f in rand_files if len(f.split('_')) > 1 and f.split('_')[1] == str(li)]
+        stretched = False
+        for fname in sample_files:
+            try:
+                sample_coords = read_coords_from_file(os.path.join(rand_dir, fname))
+            except OSError:
+                continue
+            if len(sample_coords) != len(ref_coords_full):
+                continue  # a repeat that failed the CA-CA check writes nothing; a length
+                          # mismatch here means something else is off -- skip, don't guess
+            for flat1, flat2, ref_dist in pairs:
+                d = np.linalg.norm(sample_coords[flat1] - sample_coords[flat2])
+                if d > ref_dist + thr:
+                    stretched = True
+                    break
+            if stretched:
+                break
+        if not stretched:
+            safe.append(l)
+    return safe
+
+
+def auto_select_varying_linker(coords_file, fingerprint_file, pdb_path=None):
     """
     Select varying linkers (longer coil regions that can vary without breaking sheets).
+
+    pdb_path: optional. If given, linkers are also filtered through
+    disulfide_safe_linkers -- any linker whose reshaping stretches a real
+    disulfide bond (detected from the PDB via find_disulfide_bonds_from_pdb)
+    beyond a small tolerance is dropped from the varying set. Omit (default
+    None) to get the old, disulfide-unaware behaviour unchanged.
     """
     allowed_linker, linker_indices = find_non_varying_linkers(coords_file, fingerprint_file)
 
@@ -2681,6 +3087,11 @@ def auto_select_varying_linker(coords_file, fingerprint_file):
         sec = sections[section_index]
         if sec[0] == '-' and len(sec) > 3:
             varying_linker_indices.append(section_index)
+
+    if pdb_path is not None:
+        varying_linker_indices = disulfide_safe_linkers(
+            varying_linker_indices, pdb_path, coords_file, fingerprint_file
+        )
 
     return varying_linker_indices
 
@@ -2976,7 +3387,140 @@ def _find_foxs_fit_file(pdb_path, saxs_path):
     candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
     return candidates[0][2]
 
-def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None):
+
+def _resolve_saxs_for_initial_foxs_check(saxs_name, prepared_saxs_name=None, run_dir=None):
+    """
+    Choose the SAXS file used by the initial FoXS sanity check.
+
+    Prefer the Carbonara-prepared/trimmed Saxs.dat when the caller supplies
+    either ``run_dir`` or ``prepared_saxs_name``.  Otherwise keep the legacy
+    behaviour and use ``saxs_name`` exactly as supplied.
+    """
+    original_saxs = Path(saxs_name).resolve()
+
+    if run_dir is not None:
+        candidate = Path(run_dir).resolve() / "Saxs.dat"
+        if not candidate.exists():
+            raise FileNotFoundError(
+                f"run_dir was supplied for the initial FoXS check, but no Saxs.dat was found: {candidate}"
+            )
+        return candidate, original_saxs, "run_dir/Saxs.dat"
+
+    if prepared_saxs_name is not None:
+        candidate = Path(prepared_saxs_name).resolve()
+        if candidate.is_dir():
+            candidate = candidate / "Saxs.dat"
+        if not candidate.exists():
+            raise FileNotFoundError(
+                f"Prepared SAXS file for the initial FoXS check was not found: {candidate}"
+            )
+        return candidate, original_saxs, "prepared_saxs_name"
+
+    if original_saxs.is_dir():
+        candidate = original_saxs / "Saxs.dat"
+        if not candidate.exists():
+            raise FileNotFoundError(
+                f"SAXS argument is a directory, but it does not contain Saxs.dat: {candidate}"
+            )
+        return candidate, original_saxs, "saxs_name_directory/Saxs.dat"
+
+    if not original_saxs.exists():
+        raise FileNotFoundError(f"SAXS file not found: {original_saxs}")
+
+    return original_saxs, original_saxs, "saxs_name"
+
+
+def _write_protein_only_pdb_for_foxs(pdb_path):
+    """
+    Write a temporary PDB containing only the protein ATOM records used by
+    Carbonara-style backmapped structures.
+
+    This deliberately drops HETATM records such as waters, ligands and metal
+    ions.  pyFoXS can fail on some metal element labels, for example cobalt
+    written as ``CO`` rather than ``Co``.  Carbonara's generated all-atom
+    structures are protein-only, so the initial FoXS check should use the same
+    convention.
+    """
+    pdb_path = Path(pdb_path)
+    tmp = NamedTemporaryFile(
+        suffix="_protein_only_for_foxs.pdb",
+        prefix=pdb_path.stem + "_",
+        mode="w",
+        delete=False,
+    )
+
+    kept_atoms = 0
+    dropped_hetatm = 0
+    dropped_other_atomlike = 0
+    chains = set()
+    wrote_end = False
+    in_first_model = True
+    saw_model = False
+    saw_any_atom = False
+
+    try:
+        with open(pdb_path, "r") as fin, tmp:
+            for line in fin:
+                rec = line[:6]
+
+                if rec.startswith("MODEL"):
+                    if saw_model and saw_any_atom:
+                        break
+                    saw_model = True
+                    in_first_model = True
+                    continue
+
+                if rec.startswith("ENDMDL"):
+                    if saw_any_atom:
+                        break
+                    in_first_model = False
+                    continue
+
+                if not in_first_model:
+                    continue
+
+                if rec == "ATOM  ":
+                    tmp.write(line)
+                    kept_atoms += 1
+                    saw_any_atom = True
+                    if len(line) > 21 and line[21].strip():
+                        chains.add(line[21])
+                elif rec == "HETATM":
+                    dropped_hetatm += 1
+                elif rec in {"ANISOU", "SIGATM", "SIGUIJ"}:
+                    dropped_other_atomlike += 1
+                elif rec.startswith("TER") and saw_any_atom:
+                    tmp.write(line)
+                elif rec.startswith("END"):
+                    wrote_end = True
+                    # Write a clean END below, after filtering.
+                    break
+
+            if kept_atoms == 0:
+                raise ValueError(
+                    f"No ATOM records were found after making a protein-only FoXS input from {pdb_path}."
+                )
+
+            if not wrote_end:
+                tmp.write("END\n")
+            else:
+                tmp.write("END\n")
+
+    except Exception:
+        try:
+            os.remove(tmp.name)
+        except OSError:
+            pass
+        raise
+
+    return Path(tmp.name), {
+        "kept_atom_records": kept_atoms,
+        "dropped_hetatm_records": dropped_hetatm,
+        "dropped_other_atomlike_records": dropped_other_atomlike,
+        "chains": sorted(chains),
+    }
+
+def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None, protein_only=True, prepared_saxs_name=None, run_dir=None, keep_temp_inputs=False):
     """
     Run pyFoXS, extract chi^2, locate the fit file, and plot
     the fit with a FoXS-style residual panel.
@@ -2984,9 +3528,12 @@ def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None):
     Parameters
     ----------
     pdb_name : str
-        Path to structure file.
+        Path to structure file.  By default the FoXS check uses a temporary
+        protein-only PDB generated from this file, matching Carbonara's
+        backmapped AA outputs.
     saxs_name : str
-        Path to SAXS data file.
+        Path to SAXS data file.  Prefer passing Carbonara's prepared/trimmed
+        Saxs.dat, or pass ``run_dir``/``prepared_saxs_name`` below.
     foxs_cmd : str or list
         Examples:
             "pyfoxs"
@@ -2994,6 +3541,20 @@ def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None):
             ["python3", "/path/to/foxs.py"]
     max_q : float or None
         Optional maximum q-value to pass to pyFoXS.
+    protein_only : bool
+        If True, run FoXS on a temporary PDB containing only ATOM records.
+        This drops HETATM waters, ligands and metal ions, matching the
+        protein-only structures produced by Carbonara backmapping and avoiding
+        pyFoXS parser failures on unusual element labels.
+    prepared_saxs_name : str or None
+        Optional explicit path to the Carbonara-prepared SAXS file.  If this is
+        a directory, ``Saxs.dat`` inside it is used.
+    run_dir : str or None
+        Optional Carbonara run directory.  If supplied, ``run_dir/Saxs.dat`` is
+        used for FoXS, so the already normalised and Guinier-trimmed data are
+        used.
+    keep_temp_inputs : bool
+        Keep temporary FoXS PDB inputs for debugging.
 
     Returns
     -------
@@ -3002,21 +3563,37 @@ def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None):
             chi2, stdout, stderr, fit_file
     """
     pdb_path = Path(pdb_name).resolve()
-    saxs_path = Path(saxs_name).resolve()
-
     if not pdb_path.exists():
         raise FileNotFoundError(f"Structure file not found: {pdb_path}")
-    if not saxs_path.exists():
-        raise FileNotFoundError(f"SAXS file not found: {saxs_path}")
 
-    temp_pdb_to_clean = None
+    saxs_path, original_saxs_path, saxs_source = _resolve_saxs_for_initial_foxs_check(
+        saxs_name, prepared_saxs_name=prepared_saxs_name, run_dir=run_dir
+    )
+
+    temp_pdbs_to_clean = []
+    protein_only_info = None
 
     try:
         pdb_for_foxs, temp_pdb_to_clean = _convert_cif_to_pdb_for_foxs(pdb_path)
         pdb_for_foxs = Path(pdb_for_foxs)
+        if temp_pdb_to_clean is not None:
+            temp_pdbs_to_clean.append(Path(temp_pdb_to_clean))
 
-        #if temp_pdb_to_clean is not None:
-        #    print(f"Converted mmCIF to temporary PDB for FoXS: {pdb_for_foxs}")
+        if protein_only:
+            protein_pdb, protein_only_info = _write_protein_only_pdb_for_foxs(pdb_for_foxs)
+            temp_pdbs_to_clean.append(protein_pdb)
+            pdb_for_foxs = protein_pdb
+            print(
+                "Initial FoXS check: using protein-only temporary PDB "
+                f"({protein_only_info['kept_atom_records']} ATOM records; "
+                f"dropped {protein_only_info['dropped_hetatm_records']} HETATM records; "
+                f"chains={','.join(protein_only_info['chains']) or 'unknown'})."
+            )
+
+        if saxs_source != "saxs_name":
+            print(f"Initial FoXS check: using Carbonara-prepared SAXS data from {saxs_path}")
+        else:
+            print(f"Initial FoXS check: using SAXS data from {saxs_path}")
 
         base_cmd = _normalise_cmd(foxs_cmd)
         cmd = base_cmd + [str(pdb_for_foxs), str(saxs_path)]
@@ -3068,6 +3645,12 @@ def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None):
                 "stdout": stdout,
                 "stderr": stderr,
                 "fit_file": None,
+                "pdb_for_foxs": str(pdb_for_foxs),
+                "saxs_for_foxs": str(saxs_path),
+                "original_saxs": str(original_saxs_path),
+                "saxs_source": saxs_source,
+                "protein_only": protein_only,
+                "protein_only_info": protein_only_info,
             }
 
         #print(f"Using fit file: {fit_file}")
@@ -3131,14 +3714,23 @@ def run_initial_foxs_check(pdb_name, saxs_name, foxs_cmd="pyfoxs", max_q=None):
             "stdout": stdout,
             "stderr": stderr,
             "fit_file": fit_file,
+            "pdb_for_foxs": str(pdb_for_foxs),
+            "saxs_for_foxs": str(saxs_path),
+            "original_saxs": str(original_saxs_path),
+            "saxs_source": saxs_source,
+            "protein_only": protein_only,
+            "protein_only_info": protein_only_info,
         }
 
     finally:
-        if temp_pdb_to_clean is not None:
-            try:
-                os.remove(temp_pdb_to_clean)
-            except OSError:
-                pass
+        if not keep_temp_inputs:
+            for tmp_pdb in temp_pdbs_to_clean:
+                try:
+                    os.remove(tmp_pdb)
+                except OSError:
+                    pass
+        elif temp_pdbs_to_clean:
+            print("Initial FoXS check: kept temporary input(s): " + ", ".join(str(p) for p in temp_pdbs_to_clean))
 
 
 from Bio.PDB import MMCIFParser, PDBIO
@@ -3679,8 +4271,7 @@ def pull_structure_from_pdb(
                 pass
 
 
-# to make the noebook 
-
+# Update the generated RunMe script to use a specific disulfide constraint file.
 def set_disulfide_constraints_for_run(run_name, disulfide_file):
     runme = Path(f"RunMe_{run_name}.sh")
     disulfide_file = Path(disulfide_file).resolve()

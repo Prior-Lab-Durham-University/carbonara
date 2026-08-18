@@ -6,11 +6,117 @@ import shutil
 import sys
 import pickle
 import shlex
+import subprocess
+from pathlib import Path
 from string import ascii_uppercase
 from typing import Optional, List
 
 import CarbonaraDataTools as cdt
 import numpy as np
+
+
+def _is_cif_path(path: str) -> bool:
+    """Return True for mmCIF/PDBx CIF filenames, including .gz variants."""
+    suffixes = [s.lower() for s in Path(str(path)).suffixes]
+    return ".cif" in suffixes or ".mmcif" in suffixes
+
+
+def _open_text_maybe_gz(path: str):
+    """Open plain or gzipped text files without forcing callers to care."""
+    path = str(path)
+    if path.lower().endswith(".gz"):
+        import gzip
+        return gzip.open(path, "rt", errors="replace")
+    return open(path, "rt", errors="replace")
+
+
+def preflight_mmcif_atom_site_table(cif_path: str) -> None:
+    """
+    Fail early with a clear message if an mmCIF _atom_site loop has truncated
+    ATOM/HETATM rows.
+
+    OpenMM/PDBFixer can throw a cryptic IndexError when a CIF row has fewer
+    fields than the _atom_site loop declares.  This preflight catches the common
+    failure mode before Carbonara calls cdt.pull_structure_from_pdb().
+
+    It is deliberately conservative: valid PDB files and non-CIF files are left
+    untouched, and a well-formed CIF passes silently.
+    """
+    if not _is_cif_path(cif_path):
+        return
+
+    in_loop = False
+    in_atom_site_loop = False
+    atom_site_columns = []
+    checked_rows = 0
+
+    with _open_text_maybe_gz(cif_path) as fh:
+        for line_no, raw in enumerate(fh, start=1):
+            line = raw.strip()
+            if not line:
+                continue
+
+            if line == "#":
+                in_loop = False
+                in_atom_site_loop = False
+                atom_site_columns = []
+                continue
+
+            low = line.lower()
+            if low.startswith("loop_"):
+                in_loop = True
+                in_atom_site_loop = False
+                atom_site_columns = []
+                continue
+
+            if not in_loop:
+                continue
+
+            if low.startswith("_atom_site."):
+                in_atom_site_loop = True
+                atom_site_columns.append(line.split()[0])
+                continue
+
+            if low.startswith("_") or low.startswith("data_") or low.startswith("save_"):
+                in_loop = False
+                in_atom_site_loop = False
+                atom_site_columns = []
+                continue
+
+            if not in_atom_site_loop or not atom_site_columns:
+                continue
+
+            # We only need to guard atom records. Other CIF loop rows can have
+            # non-atom content and are irrelevant here.
+            if not (line.startswith("ATOM") or line.startswith("HETATM")):
+                continue
+
+            try:
+                fields = shlex.split(line, posix=True)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Malformed CIF: could not parse _atom_site row at line {line_no} "
+                    f"of {cif_path}: {exc}. Row preview: {line[:120]!r}"
+                ) from exc
+
+            checked_rows += 1
+            expected = len(atom_site_columns)
+            found = len(fields)
+            if found < expected:
+                missing = atom_site_columns[found:]
+                preview = line[:160]
+                raise ValueError(
+                    "Malformed CIF: incomplete _atom_site ATOM/HETATM row at "
+                    f"line {line_no} of {cif_path}. The loop declares {expected} "
+                    f"columns but this row has only {found}. Missing columns start "
+                    f"with: {missing[:6]}. Row preview: {preview!r}. "
+                    "Re-download the CIF or provide a PDB file."
+                )
+
+    if checked_rows == 0:
+        raise ValueError(
+            f"Malformed CIF: no ATOM/HETATM rows were found in the _atom_site loop of {cif_path}."
+        )
 
 
 def _snap_simplex_row(w: np.ndarray, snap: float) -> np.ndarray:
@@ -520,6 +626,488 @@ def parse_structure_lengths(filename: str) -> dict:
     return result
 
 
+def _load_numeric_saxs_table(path: str) -> np.ndarray:
+    """Load a Carbonara-style SAXS table and keep only finite numeric rows."""
+    arr = np.loadtxt(path)
+    arr = np.atleast_2d(np.asarray(arr, dtype=float))
+    if arr.shape[1] < 2:
+        raise ValueError(f"SAXS file {path!r} must contain at least q and I columns")
+    finite = np.isfinite(arr[:, 0]) & np.isfinite(arr[:, 1])
+    if arr.shape[1] >= 3:
+        finite &= np.isfinite(arr[:, 2])
+    arr = arr[finite]
+    if arr.shape[0] < 3:
+        raise ValueError(f"SAXS file {path!r} has too few finite numeric rows")
+    return arr
+
+
+def _weighted_linear_fit(x: np.ndarray, y: np.ndarray, sigma_y: Optional[np.ndarray] = None):
+    """Weighted fit y = intercept + slope*x. Returns dict or None."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if sigma_y is None:
+        w = np.ones_like(y)
+    else:
+        sigma_y = np.asarray(sigma_y, dtype=float)
+        good = np.isfinite(sigma_y) & (sigma_y > 0)
+        if not np.any(good):
+            w = np.ones_like(y)
+        else:
+            med = float(np.nanmedian(sigma_y[good]))
+            sigma_y = np.where(good, sigma_y, med)
+            w = 1.0 / np.maximum(sigma_y, 1e-12) ** 2
+
+    X = np.column_stack([np.ones_like(x), x])
+    sw = np.sqrt(w)
+    try:
+        beta, *_ = np.linalg.lstsq(X * sw[:, None], y * sw, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+
+    intercept, slope = float(beta[0]), float(beta[1])
+    yhat = intercept + slope * x
+    resid = y - yhat
+    ybar = float(np.average(y, weights=w))
+    ss_res = float(np.sum(w * resid ** 2))
+    ss_tot = float(np.sum(w * (y - ybar) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 1.0
+
+    if sigma_y is None:
+        scale = 1.4826 * np.median(np.abs(resid - np.median(resid)))
+        if not np.isfinite(scale) or scale <= 1e-12:
+            scale = float(np.sqrt(np.mean(resid ** 2))) if len(resid) else 1.0
+        z = resid / max(scale, 1e-12)
+    else:
+        z = resid / np.maximum(sigma_y, 1e-12)
+
+    return {
+        "intercept": intercept,
+        "slope": slope,
+        "r2": float(r2),
+        "residuals": resid,
+        "max_abs_z": float(np.max(np.abs(z))) if len(z) else 0.0,
+        "yhat": yhat,
+    }
+
+
+def _guinier_fit_for_window(q: np.ndarray, intensity: np.ndarray,
+                            sigma_i: Optional[np.ndarray], start: int, end: int):
+    """Fit ln(I) versus q^2 on q[start:end]."""
+    qwin = q[start:end]
+    iwin = intensity[start:end]
+    if np.any(qwin <= 0) or np.any(iwin <= 0):
+        return None
+    x = qwin ** 2
+    y = np.log(iwin)
+    sigma_y = None
+    if sigma_i is not None:
+        swin = sigma_i[start:end]
+        good = np.isfinite(swin) & (swin > 0) & np.isfinite(iwin) & (iwin > 0)
+        if np.any(good):
+            sigma_y = np.where(good, swin / iwin, np.nan)
+
+    fit = _weighted_linear_fit(x, y, sigma_y=sigma_y)
+    if fit is None:
+        return None
+    if fit["slope"] >= 0:
+        return None
+
+    rg = float(np.sqrt(-3.0 * fit["slope"]))  # q in A^-1 gives Rg in A
+    fit["rg"] = rg
+    fit["qrg_max"] = float(np.max(qwin) * rg)
+    fit["start"] = int(start)
+    fit["end"] = int(end)
+    fit["n_points"] = int(end - start)
+    return fit
+
+
+
+def _robust_mad_scale(values: np.ndarray, floor: float = 1e-12) -> float:
+    """Return a robust residual scale using MAD, with an RMS fallback."""
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return 1.0
+    med = float(np.median(values))
+    mad = float(np.median(np.abs(values - med)))
+    scale = 1.4826 * mad
+    if not np.isfinite(scale) or scale <= floor:
+        scale = float(np.sqrt(np.mean((values - med) ** 2)))
+    if not np.isfinite(scale) or scale <= floor:
+        scale = floor
+    return scale
+
+
+def _score_internal_guinier_fit(fit: dict, q: np.ndarray, intensity: np.ndarray,
+                                sigma_i: Optional[np.ndarray], start: int, end: int,
+                                r2_min: float, max_abs_z: float,
+                                qrg_max: float, qrg_min: float) -> Optional[dict]:
+    """Attach AutoRg-style diagnostic and quality fields to a Guinier fit."""
+    n = int(end - start)
+    qwin = q[start:end]
+    iwin = intensity[start:end]
+    resid = np.asarray(fit["residuals"], dtype=float)
+
+    robust_scale = _robust_mad_scale(resid)
+    robust_z = resid / robust_scale
+    max_robust_z = float(np.max(np.abs(robust_z))) if robust_z.size else 0.0
+    rms_resid = float(np.sqrt(np.mean(resid ** 2))) if resid.size else float("inf")
+
+    sigma_chi2 = None
+    if sigma_i is not None:
+        swin = sigma_i[start:end]
+        sigma_ln = np.where((swin > 0) & np.isfinite(swin) & (iwin > 0), swin / iwin, np.nan)
+        good = np.isfinite(sigma_ln) & (sigma_ln > 0)
+        if np.count_nonzero(good) >= max(3, n // 2):
+            z = resid[good] / sigma_ln[good]
+            sigma_chi2 = float(np.mean(z ** 2))
+
+    qrg_lo = float(np.min(qwin) * fit["rg"])
+    qrg_hi = float(np.max(qwin) * fit["rg"])
+    if not np.isfinite(qrg_hi) or qrg_hi <= 0:
+        return None
+    if qrg_hi > float(qrg_max):
+        return None
+    # Very small qRg intervals can appear linear simply because there is too
+    # little leverage to measure an Rg.  We keep this as a soft criterion in
+    # the score but reject extremely low-leverage intervals.
+    if qrg_hi < max(0.2, 0.5 * float(qrg_min)):
+        return None
+
+    r2 = float(fit["r2"])
+    # Treat R^2 and residual-z as the main linearity tests.  Experimental
+    # sigma values in merged SAXS files can be optimistic, so sigma_chi2 is
+    # diagnostic rather than an absolute rejection criterion.
+    if r2 < float(r2_min):
+        return None
+    if max_robust_z > float(max_abs_z):
+        return None
+
+    r2_score = min(1.0, max(0.0, (r2 - r2_min) / max(1e-12, 1.0 - r2_min)))
+    z_score = min(1.0, max(0.0, 1.0 - max_robust_z / max(1e-12, max_abs_z)))
+    qrg_score = min(1.0, qrg_hi / max(1e-12, qrg_min))
+    length_score = min(1.0, n / max(1.0, 2.0 * 8.0))
+    # Slightly prefer intervals that extend farther in Guinier space but remain
+    # inside the accepted qRg limit.
+    range_score = 0.5 + 0.5 * min(1.0, qrg_hi / max(1e-12, qrg_max))
+    quality = float((0.45 * r2_score + 0.35 * z_score + 0.20 * qrg_score) * length_score * range_score)
+
+    out = dict(fit)
+    out.update({
+        "start": int(start),
+        "end": int(end),
+        "first_point": int(start + 1),   # 1-indexed, AUTORG-style
+        "last_point": int(end),          # 1-indexed inclusive
+        "n_points": int(n),
+        "qrg_min": qrg_lo,
+        "qrg_max": qrg_hi,
+        "rms_log_residual": rms_resid,
+        "robust_residual_scale": float(robust_scale),
+        "max_abs_robust_z": max_robust_z,
+        "sigma_chi2": sigma_chi2,
+        "quality": quality,
+    })
+    return out
+
+
+def _select_internal_guinier_interval(
+    arr: np.ndarray,
+    min_points: int = 8,
+    window_points: int = 80,
+    qrg_max: float = 1.3,
+    r2_min: float = 0.98,
+    max_abs_z: float = 4.0,
+    max_trim_fraction: float = 0.25,
+) -> dict:
+    """
+    Self-contained AutoRg-style Guinier interval selection.
+
+    The protocol mirrors the standard manual/AUTORG idea without requiring an
+    ATSAS install:
+      1. work in Guinier coordinates, ln(I) versus q^2;
+      2. scan many contiguous low-q intervals longer than a minimum length;
+      3. keep intervals with negative slope, qRg inside the Guinier range,
+         and good linear residuals;
+      4. require the fitted Rg to be stable across neighbouring intervals;
+      5. choose the closest-to-origin stable interval and trim to its first
+         point.
+    """
+    q = np.asarray(arr[:, 0], dtype=float)
+    intensity = np.asarray(arr[:, 1], dtype=float)
+    sigma_i = np.asarray(arr[:, 2], dtype=float) if arr.shape[1] >= 3 else None
+    n = int(arr.shape[0])
+    min_points = int(min_points)
+    max_width = int(max(window_points, min_points))
+    # Need enough candidate width to reach qRg~1 for large molecules.  Cap for
+    # speed, but still search a generous low-q window.
+    max_width = min(n, max(max_width, min_points + 20))
+    max_start = min(n - min_points, int(np.floor(float(max_trim_fraction) * n)))
+    if max_start < 0:
+        raise RuntimeError("not enough points for Guinier interval selection")
+
+    qrg_min = min(1.0, max(0.45, 0.55 * float(qrg_max)))
+    by_start = {}
+    all_fits = []
+
+    for start in range(max_start + 1):
+        end_max = min(n, start + max_width)
+        for end in range(start + min_points, end_max + 1):
+            fit = _guinier_fit_for_window(q, intensity, sigma_i, start, end)
+            if fit is None:
+                continue
+            scored = _score_internal_guinier_fit(
+                fit, q, intensity, sigma_i, start, end,
+                r2_min=r2_min,
+                max_abs_z=max_abs_z,
+                qrg_max=qrg_max,
+                qrg_min=qrg_min,
+            )
+            if scored is None:
+                continue
+            by_start.setdefault(start, []).append(scored)
+            all_fits.append(scored)
+
+    if not all_fits:
+        raise RuntimeError(
+            "No acceptable Guinier interval found by internal AutoRg-style scan. "
+            f"Tried starts 1-{max_start + 1}, min_points={min_points}, "
+            f"max_width={max_width}, qRg_max={qrg_max}, r2_min={r2_min}, "
+            f"max_abs_z={max_abs_z}."
+        )
+
+    accepted_starts = []
+    for start, fits in sorted(by_start.items()):
+        if len(fits) < 2:
+            continue
+        rgs = np.asarray([f["rg"] for f in fits], dtype=float)
+        rg_med = float(np.median(rgs))
+        rg_cv = float(np.std(rgs) / max(abs(rg_med), 1e-12))
+        best = max(fits, key=lambda f: (f["quality"], f["n_points"], -f["rms_log_residual"]))
+        # Stability is deliberately a little permissive: real SAXS files can be
+        # noisy/merged, and this trim is only choosing the first reliable point.
+        if rg_cv <= 0.20 and best["quality"] >= 0.12:
+            best = dict(best)
+            best["rg_stability_cv_for_same_start"] = rg_cv
+            best["candidate_intervals_same_start"] = int(len(fits))
+            accepted_starts.append(best)
+
+    if accepted_starts:
+        selected = sorted(
+            accepted_starts,
+            key=lambda f: (f["start"], -f["quality"], -f["n_points"]),
+        )[0]
+        selection_status = "accepted_closest_to_origin_stable_interval"
+    else:
+        # Fallback: choose the best global interval, but report that the stability
+        # criterion was not fully satisfied.
+        selected = max(all_fits, key=lambda f: (f["quality"], -f["start"], f["n_points"]))
+        selected = dict(selected)
+        selected["rg_stability_cv_for_same_start"] = None
+        selected["candidate_intervals_same_start"] = int(len(by_start.get(selected["start"], [])))
+        selection_status = "best_linear_interval_no_stable_start_cluster"
+
+    selected["selection_status"] = selection_status
+    selected["candidate_interval_count"] = int(len(all_fits))
+    selected["searched_start_points"] = int(max_start + 1)
+    selected["max_interval_width_points"] = int(max_width)
+    selected["qrg_target_min_used"] = float(qrg_min)
+    return selected
+
+
+def guinier_trim_saxs_file_inplace(
+    saxs_path: str,
+    min_points: int = 8,
+    window_points: int = 80,
+    qrg_max: float = 1.3,
+    r2_min: float = 0.98,
+    max_abs_z: float = 4.0,
+    max_trim_fraction: float = 0.25,
+    autorg_cmd: str = None,
+    require_success: bool = False,
+) -> dict:
+    """
+    Remove the low-q prefix before the first internally selected Guinier point.
+
+    This is self-contained and does not require ATSAS/AUTORG.  It follows the
+    standard Guinier protocol: identify a linear interval in ln(I) versus q^2,
+    check qRg, then discard points before that interval so Carbonara reads only
+    the usable low-q region onward.
+    """
+    saxs_path = str(saxs_path)
+    backup_path = saxs_path + ".pre_guinier_trim"
+
+    arr0 = _load_numeric_saxs_table(saxs_path)
+    try:
+        shutil.copy2(saxs_path, backup_path)
+    except OSError as exc:
+        print(f"WARNING: could not write Guinier pre-trim backup {backup_path}: {exc}")
+        backup_path = None
+
+    positive = (arr0[:, 0] > 0) & (arr0[:, 1] > 0)
+    dropped_nonpositive = int(np.count_nonzero(~positive))
+    arr = arr0[positive]
+
+    if arr.shape[0] < max(3, int(min_points)):
+        report = {
+            "enabled": True,
+            "method": "internal_autorg_like",
+            "status": "not_enough_positive_points_no_trim_applied",
+            "saxs_path": saxs_path,
+            "backup_path": backup_path,
+            "points_before": int(arr0.shape[0]),
+            "points_after": int(arr.shape[0]),
+            "trimmed_lowq_points": 0,
+            "dropped_nonpositive_or_invalid_rows": dropped_nonpositive,
+        }
+        _write_guinier_trim_report(saxs_path, report)
+        msg = "WARNING: Guinier trim skipped: not enough positive SAXS points"
+        if require_success:
+            raise RuntimeError(msg)
+        print(msg)
+        return report
+
+    order = np.argsort(arr[:, 0])
+    arr = arr[order]
+    n = int(arr.shape[0])
+
+    try:
+        selected = _select_internal_guinier_interval(
+            arr,
+            min_points=min_points,
+            window_points=window_points,
+            qrg_max=qrg_max,
+            r2_min=r2_min,
+            max_abs_z=max_abs_z,
+            max_trim_fraction=max_trim_fraction,
+        )
+    except Exception as exc:
+        report = {
+            "enabled": True,
+            "method": "internal_autorg_like",
+            "status": "no_acceptable_guinier_window_found_no_trim_applied",
+            "saxs_path": saxs_path,
+            "backup_path": backup_path,
+            "points_before": int(arr0.shape[0]),
+            "points_after": int(n),
+            "trimmed_lowq_points": 0,
+            "dropped_nonpositive_or_invalid_rows": dropped_nonpositive,
+            "error": str(exc),
+            "settings": {
+                "min_points": int(min_points),
+                "window_points": int(window_points),
+                "qrg_max": float(qrg_max),
+                "r2_min": float(r2_min),
+                "max_abs_z": float(max_abs_z),
+                "max_trim_fraction": float(max_trim_fraction),
+                "autorg_cmd_ignored": autorg_cmd,
+            },
+        }
+        _write_guinier_trim_report(saxs_path, report)
+        msg = "WARNING: Guinier trim found no acceptable interval; leaving SAXS data unchanged. See guinier_trim_report.json"
+        if require_success:
+            raise RuntimeError(msg + "\n" + str(exc))
+        print(msg)
+        return report
+
+    trim_start = int(selected["start"])
+    max_trim_points = int(np.floor(float(max_trim_fraction) * n))
+    if trim_start > max_trim_points:
+        report = {
+            "enabled": True,
+            "method": "internal_autorg_like",
+            "status": "selected_interval_exceeds_max_trim_fraction_no_trim_applied",
+            "saxs_path": saxs_path,
+            "backup_path": backup_path,
+            "points_before": int(arr0.shape[0]),
+            "points_after": int(n),
+            "trimmed_lowq_points": 0,
+            "requested_trim_lowq_points": int(trim_start),
+            "dropped_nonpositive_or_invalid_rows": dropped_nonpositive,
+            "selected_interval": selected,
+            "settings": {
+                "min_points": int(min_points),
+                "window_points": int(window_points),
+                "qrg_max": float(qrg_max),
+                "r2_min": float(r2_min),
+                "max_abs_z": float(max_abs_z),
+                "max_trim_fraction": float(max_trim_fraction),
+                "autorg_cmd_ignored": autorg_cmd,
+            },
+        }
+        _write_guinier_trim_report(saxs_path, report)
+        msg = (
+            "WARNING: selected Guinier interval starts after the allowed trim cap "
+            f"--guinier_trim_max_fraction={max_trim_fraction}; leaving SAXS data unchanged"
+        )
+        if require_success:
+            raise RuntimeError(msg)
+        print(msg)
+        return report
+
+    trimmed = arr[trim_start:]
+    if trim_start > 0 or dropped_nonpositive > 0:
+        np.savetxt(saxs_path, trimmed, delimiter=" ", fmt="%.10g")
+
+    report = {
+        "enabled": True,
+        "method": "internal_autorg_like",
+        "status": "trim_applied" if (trim_start > 0 or dropped_nonpositive > 0) else "already_good_no_trim_needed",
+        "saxs_path": saxs_path,
+        "backup_path": backup_path,
+        "points_before": int(arr0.shape[0]),
+        "points_after": int(trimmed.shape[0]),
+        "trimmed_lowq_points": int(trim_start),
+        "dropped_nonpositive_or_invalid_rows": dropped_nonpositive,
+        "first_q_before": float(arr[0, 0]),
+        "first_q_after": float(trimmed[0, 0]),
+        "selected_first_point_1_indexed": int(selected["first_point"]),
+        "selected_last_point_1_indexed_before_trim": int(selected["last_point"]),
+        "selected_last_point_1_indexed_after_trim": int(selected["last_point"] - trim_start),
+        "selected_rg": float(selected["rg"]),
+        "selected_i0": float(np.exp(selected["intercept"])),
+        "selected_r2": float(selected["r2"]),
+        "selected_quality": float(selected["quality"]),
+        "selected_qrg_min": float(selected["qrg_min"]),
+        "selected_qrg_max": float(selected["qrg_max"]),
+        "selected_max_abs_robust_z": float(selected["max_abs_robust_z"]),
+        "selected_sigma_chi2": selected.get("sigma_chi2"),
+        "selection_status": selected.get("selection_status"),
+        "candidate_interval_count": int(selected.get("candidate_interval_count", 0)),
+        "searched_start_points": int(selected.get("searched_start_points", 0)),
+        "settings": {
+            "min_points": int(min_points),
+            "window_points": int(window_points),
+            "qrg_max": float(qrg_max),
+            "r2_min": float(r2_min),
+            "max_abs_z": float(max_abs_z),
+            "max_trim_fraction": float(max_trim_fraction),
+            "autorg_cmd_ignored": autorg_cmd,
+        },
+    }
+    _write_guinier_trim_report(saxs_path, report)
+    print(
+        "Guinier trim: "
+        f"status={report['status']}; removed {report['trimmed_lowq_points']} leading points; "
+        f"selected points {report['selected_first_point_1_indexed']}-{report['selected_last_point_1_indexed_before_trim']}; "
+        f"first q {report['first_q_before']:.5g} -> {report['first_q_after']:.5g}; "
+        f"Rg={report['selected_rg']:.5g}; R2={report['selected_r2']:.5g}; "
+        f"qRg={report['selected_qrg_min']:.3g}-{report['selected_qrg_max']:.3g}; "
+        f"quality={report['selected_quality']:.3g}"
+    )
+    return report
+
+
+def _write_guinier_trim_report(saxs_path: str, report: dict) -> None:
+    """Write a small JSON report next to Saxs.dat."""
+    report_path = os.path.join(os.path.dirname(str(saxs_path)), "guinier_trim_report.json")
+    try:
+        import json
+        with open(report_path, "w", encoding="utf-8") as fh:
+            json.dump(report, fh, indent=2, sort_keys=True)
+    except OSError as exc:
+        print(f"WARNING: could not write Guinier trim report {report_path}: {exc}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Setup Carbonara processing pipeline")
     parser.add_argument("-p", "--pdb", required=True, help="Path to input PDB file")
@@ -600,10 +1188,39 @@ def main():
                     help="Ignore early structures for this many seconds before backmapping starts (default: 600)")
     parser.add_argument("--no_foxs", action="store_true",
                     help="Do not enable FoXS in the generated run script")
+    parser.add_argument("--guinier_trim", "--guinier-trim", dest="guinier_trim", action="store_true", default=True,
+                    help="Apply setup-time Guinier low-q trimming before Carbonara reads Saxs.dat (default: on)")
+    parser.add_argument("--no_guinier_trim", "--no-guinier-trim", dest="guinier_trim", action="store_false",
+                    help="Disable setup-time Guinier low-q trimming and keep Saxs.dat unchanged after cdt.write_saxs")
+    parser.add_argument("--guinier_trim_min_points", type=int, default=8,
+                    help="Minimum number of points in the accepted Guinier window (default: 8)")
+    parser.add_argument("--guinier_trim_window_points", type=int, default=80,
+                    help="Maximum interval width, in points, for the internal AutoRg-style Guinier scan (default: 80)")
+    parser.add_argument("--guinier_trim_qrg_max", type=float, default=1.3,
+                    help="Maximum q*Rg allowed in the accepted Guinier window (default: 1.3)")
+    parser.add_argument("--guinier_trim_r2_min", type=float, default=0.98,
+                    help="Minimum R^2 for internally selected Guinier-linearity intervals (default: 0.98)")
+    parser.add_argument("--guinier_trim_max_abs_z", type=float, default=4.0,
+                    help="Maximum robust standardized residual in internally selected Guinier intervals (default: 4.0)")
+    parser.add_argument("--guinier_trim_max_fraction", type=float, default=0.25,
+                    help="Safety cap on fraction of leading points that Guinier trim may remove (default: 0.25)")
+    parser.add_argument("--guinier_trim_autorg_cmd", default=None,
+                    help="Deprecated and ignored: Guinier trim is now self-contained and does not require ATSAS/autorg")
+    parser.add_argument("--guinier_trim_require_success", action="store_true",
+                    help="Fail setup if the internal Guinier trim cannot select an acceptable interval")
     parser.add_argument("--backend", choices=["modeller", "cg2all"], default="modeller",
                     help="Backmapping backend for the generated RunMe script")
     parser.add_argument("--disulfide_constraints_file", default="",
                     help="Optional constraint file to treat as disulfides during backmapping")
+    parser.add_argument(
+        "--no-disulfide-linker-check", "--no_disulfide_linker_check",
+        dest="no_disulfide_linker_check",
+        action="store_true",
+        help=(
+            "Disable only the setup-time disulfide-aware automatic linker filter. "
+            "This does not disable --disulfide_constraints_file or backmapping disulfide enforcement."
+        ),
+    )
     parser.add_argument("--foxs_cmd_default", default="pyfoxs",
                     help="Default FoXS command for the generated RunMe script; user can still override as first shell arg")
     parser.add_argument("--python_exe", default=None,
@@ -624,6 +1241,20 @@ def main():
     if args.terminate_on_foxs and args.no_foxs:
         parser.error("--terminate-on-foxs requires FoXS; remove --no_foxs")
     
+    if args.guinier_trim:
+        if args.guinier_trim_min_points < 4:
+            parser.error("--guinier_trim_min_points must be >= 4")
+        if args.guinier_trim_window_points < args.guinier_trim_min_points:
+            parser.error("--guinier_trim_window_points must be >= --guinier_trim_min_points")
+        if args.guinier_trim_qrg_max <= 0:
+            parser.error("--guinier_trim_qrg_max must be > 0")
+        if not (0.0 <= args.guinier_trim_r2_min <= 1.0):
+            parser.error("--guinier_trim_r2_min must be between 0 and 1")
+        if args.guinier_trim_max_abs_z <= 0:
+            parser.error("--guinier_trim_max_abs_z must be > 0")
+        if not (0.0 <= args.guinier_trim_max_fraction <= 1.0):
+            parser.error("--guinier_trim_max_fraction must be between 0 and 1")
+
     print("DIR: "+str(args.dir))
     print(os.getcwd())
     
@@ -656,7 +1287,11 @@ def main():
         refine_dir = cdt.setup_refinement_dir(args.name, fit_master_dir)
         print(f"Created directory structure in: {refine_dir}")
 
-        # Process PDB and extract structure information
+        # Process PDB/CIF and extract structure information
+        # Catch malformed mmCIF _atom_site rows before PDBFixer/OpenMM produces
+        # a cryptic IndexError.  Valid PDB/CIF inputs pass silently.
+        preflight_mmcif_atom_site_table(args.pdb)
+
         coords_chains, sequence_chains, secondary_structure_chains, missing_residues_chains = (
             cdt.pull_structure_from_pdb(args.pdb)
         )
@@ -702,8 +1337,23 @@ def main():
             working_path=refine_dir,
         )
 
-        # Copy SAXS file to Saxs.dat (this is the file that Carbonara will use)
-        cdt.write_saxs(args.saxs, refine_dir)
+        # Copy SAXS file to Saxs.dat (this is the file that Carbonara will use).
+        # Guinier trimming is applied here by default, before Carbonara reads Saxs.dat.
+        # It is self-contained: no ATSAS/autorg installation is required.
+        # Use --no_guinier_trim / --no-guinier-trim to keep the normalized SAXS file unchanged.
+        saxs_path = cdt.write_saxs(args.saxs, refine_dir)
+        if args.guinier_trim:
+            guinier_trim_saxs_file_inplace(
+                saxs_path,
+                min_points=args.guinier_trim_min_points,
+                window_points=args.guinier_trim_window_points,
+                qrg_max=args.guinier_trim_qrg_max,
+                r2_min=args.guinier_trim_r2_min,
+                max_abs_z=args.guinier_trim_max_abs_z,
+                max_trim_fraction=args.guinier_trim_max_fraction,
+                autorg_cmd=args.guinier_trim_autorg_cmd,
+                require_success=args.guinier_trim_require_success,
+            )
 
         # check the requested min q is not less than the minimum value in the saxs file
         qmin = np.max([np.loadtxt(refine_dir + "/Saxs.dat")[0][0], args.min_q])
@@ -718,35 +1368,53 @@ def main():
             )
         else:
             # auto select flexible linker chains that dont break inter-beta sheets
+            # Default: pass args.pdb so CarbonaraDataTools can protect disulfide-linked
+            # regions when selecting flexible linkers.  The flag below disables only
+            # this setup-time linker filter; it does not affect disulfide constraints
+            # passed to the backmapper/watcher.
+            linker_check_pdb = None if args.no_disulfide_linker_check else args.pdb
+            if args.no_disulfide_linker_check:
+                print(
+                    "WARNING: setup-time disulfide linker check disabled; "
+                    "backmapping disulfide constraints are unchanged."
+                )
             for coord_file in coords_files:
-                varying_linker_chains.append(cdt.auto_select_varying_linker(coord_file, fingerprint_file))
+                varying_linker_chains.append(
+                    cdt.auto_select_varying_linker(coord_file, fingerprint_file, linker_check_pdb)
+                )
 
         # write flexible linkers to files (varysections1.dat, varysections2.dat, etc [each file is for a different chain])
         varying_section_files = []
         for varying_linkers in varying_linker_chains:
             varying_section_files.append(cdt.write_varysections_file(varying_linkers, refine_dir))
 
-        # check for length 2 varying sections and filter them out
+        # Final guard for varying sections.  This must run whether the file is
+        # empty or not: section IDs passed to the C++ code must be real internal
+        # linker sections of length >= 4.
         filepath = refine_dir + "/fingerPrint1.dat"
         vs_path = refine_dir + "/varyingSectionSecondary1.dat"
-      
-        # load robustly: always get a 1-D array (even if file has 1 int)
+
         try:
             target_segments = np.loadtxt(vs_path, dtype=int, ndmin=1)
         except ValueError:
             # happens if the file is empty / whitespace
             target_segments = np.array([], dtype=int)
-            
-            target_segments = np.atleast_1d(target_segments)
-            
-            # If nothing to filter, keep file empty and move on
-            if target_segments.size == 0:
-                # optional: ensure empty file exists
-                open(vs_path, "w").close()
+
+        target_segments = np.atleast_1d(np.asarray(target_segments, dtype=int))
+        if target_segments.size == 0:
+            open(vs_path, "w").close()
+        else:
+            if hasattr(cdt, "validate_varying_linker_indices"):
+                filtered_segments = cdt.validate_varying_linker_indices(
+                    target_segments, filepath, min_length=4, exclude_terminal=True,
+                    label="setup final varyingSectionSecondary filter"
+                )
             else:
-                filtered_segments = cdt.get_segment_lengths_from_file(filepath, target_segments)
-                filtered_segments = np.atleast_1d(np.asarray(filtered_segments, dtype=int))
-                np.savetxt(vs_path, filtered_segments, fmt="%i")
+                filtered_segments = cdt.get_segment_lengths_from_file(
+                    filepath, target_segments, min_length=4
+                )
+            filtered_segments = np.asarray(filtered_segments, dtype=int)
+            np.savetxt(vs_path, filtered_segments, fmt="%i")
 
         
          # store chain lengths
