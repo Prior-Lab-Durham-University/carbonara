@@ -332,44 +332,6 @@ void updateAndLog_trialAccepted_ChiSq(int& improvementIndex, ktlMolecule&& newMo
 
 }
 
-
-void updateAndLog_trialAcceptedCopy(int& improvementIndex, const ktlMolecule& newMol,
-                  moleculeFitAndState& molState,
-                  std::pair<double,double>& overallFit, std::pair<double,double>& newOverallFit,
-                  Logger& logger, int l, int k, experimentalData& ed, ModelParameters& params) {
-
-    molState.replaceMoleculeAt(static_cast<std::size_t>(l), newMol);
-    overallFit = newOverallFit;
-
-    std::string moleculeNameMain = write_molecules(params.basePath, improvementIndex, molState.moleculeRef(), "default");
-    std::string scatterNameMain = write_scatter(params.basePath, improvementIndex, molState, ed, params.kmin, params.kmaxCurr,params.mixtureList);
-
-    logger.logEntry(improvementIndex, k, overallFit.first, molState.getWrithePenalty(), molState.getOverlapPenalty(),
-                    molState.getDistanceConstraints(), params.kmaxCurr, scatterNameMain, moleculeNameMain,
-                    molState.C2);
-
-}
-
-
-void updateAndLog_trialAcceptedCopy_ChiSq(int& improvementIndex, const ktlMolecule& newMol,
-                  moleculeFitAndState& molState,
-                  std::pair<double,double>& overallFit, std::pair<double,double>& newOverallFit,
-                  Logger& logger, int l, int k, experimentalData& ed, ModelParameters& params) {
-
-    molState.replaceMoleculeAt(static_cast<std::size_t>(l), newMol);
-    overallFit = newOverallFit;
-
-    std::string moleculeNameMain = write_molecules(params.basePath, improvementIndex, molState.moleculeRef(), "default");
-    std::string scatterNameMain;
-    scatterNameMain= write_scatter_ChiSq(params.basePath, improvementIndex, molState, ed, params.kmin, params.kmaxCurr,params.mixtureList);
-
-    logger.logEntry(improvementIndex, k, overallFit.first, molState.getWrithePenalty(), molState.getOverlapPenalty(),
-                    molState.getDistanceConstraints(), params.kmaxCurr, scatterNameMain, moleculeNameMain,
-                    molState.C2);
-
-}
-
-
 std::string constructMoleculeName(const std::string& basePath, const std::string& prefix, const std::string& extension,
                                   const int& submol, const int& improvementIndex, const std::string& body) {
 

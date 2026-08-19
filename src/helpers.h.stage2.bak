@@ -7,7 +7,6 @@
 #include <cstdlib>
 #include <iostream>
 #include <random>
-#include <utility>
 
 #include "ktlMoleculeRandom.h"
 #include "moleculeFitAndState.h"
@@ -31,7 +30,7 @@ void readPermissibleMixtures(const char* argv[], ModelParameters& params);
 std::vector<int> findNumberSections(std::vector<ktlMolecule>& mol);
 
 // construct the historical states set
-std::vector<moleculeFitAndState> makeHistoricalStateSet(const moleculeFitAndState& molState, ModelParameters& params);
+std::vector<moleculeFitAndState> makeHistoricalStateSet(moleculeFitAndState molState, ModelParameters& params);
 
 
 // Increase kmax range logic - changes made in place with reference
@@ -50,42 +49,6 @@ void updateAndLog(int& improvementIndex, std::vector<ktlMolecule>& mol, ktlMolec
                   
 void updateAndLog_ChiSq(int& improvementIndex, std::vector<ktlMolecule>& mol, ktlMolecule& newMol,
                   moleculeFitAndState& molState, moleculeFitAndState& newMolState,
-                  std::pair<double,double>& overallFit, std::pair<double,double>& newOverallFit,
-                  Logger& logger, int l, int k, experimentalData& ed, ModelParameters& params);
-
-// State-owned variants avoid maintaining a separate copied molecule vector in the main loop.
-void updateAndLog_stateOwned(int& improvementIndex, ktlMolecule&& newMol,
-                  moleculeFitAndState& molState, moleculeFitAndState&& newMolState,
-                  std::pair<double,double>& overallFit, std::pair<double,double>& newOverallFit,
-                  Logger& logger, int l, int k, experimentalData& ed, ModelParameters& params);
-
-void updateAndLog_stateOwned_ChiSq(int& improvementIndex, ktlMolecule&& newMol,
-                  moleculeFitAndState& molState, moleculeFitAndState&& newMolState,
-                  std::pair<double,double>& overallFit, std::pair<double,double>& newOverallFit,
-                  Logger& logger, int l, int k, experimentalData& ed, ModelParameters& params);
-
-// Stage 4 variants: trial scoring has already updated molState's cached penalties.
-// These accept the new molecule in place and avoid copying/moving a whole trial state.
-void updateAndLog_trialAccepted(int& improvementIndex, ktlMolecule&& newMol,
-                  moleculeFitAndState& molState,
-                  std::pair<double,double>& overallFit, std::pair<double,double>& newOverallFit,
-                  Logger& logger, int l, int k, experimentalData& ed, ModelParameters& params);
-
-void updateAndLog_trialAccepted_ChiSq(int& improvementIndex, ktlMolecule&& newMol,
-                  moleculeFitAndState& molState,
-                  std::pair<double,double>& overallFit, std::pair<double,double>& newOverallFit,
-                  Logger& logger, int l, int k, experimentalData& ed, ModelParameters& params);
-
-// Stage 5 variants: accept by copying from a reusable trial molecule scratch.
-// This avoids moving out of the scratch object, so its internal vector capacity
-// is retained and reused across proposals.
-void updateAndLog_trialAcceptedCopy(int& improvementIndex, const ktlMolecule& newMol,
-                  moleculeFitAndState& molState,
-                  std::pair<double,double>& overallFit, std::pair<double,double>& newOverallFit,
-                  Logger& logger, int l, int k, experimentalData& ed, ModelParameters& params);
-
-void updateAndLog_trialAcceptedCopy_ChiSq(int& improvementIndex, const ktlMolecule& newMol,
-                  moleculeFitAndState& molState,
                   std::pair<double,double>& overallFit, std::pair<double,double>& newOverallFit,
                   Logger& logger, int l, int k, experimentalData& ed, ModelParameters& params);
 

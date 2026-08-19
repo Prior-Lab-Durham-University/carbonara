@@ -39,8 +39,8 @@ class experimentalData{
   std::vector<std::vector<double> > calculate_distances( std::vector<point>& coordinates,int& molIndex); 
   ScatteringCenters process_structure(std::vector<point>& ca_coords,std::vector<char>& residue_names,int& molIndex);
   std::vector<double> calculate_saxs_implicit( ScatteringCenters& centers );
-  std::vector<point> flatten_coords( std::vector<std::vector<point> >& coords);
-  std::vector<char> flatten_residueNames( std::vector<std::vector<std::string> >& aminoList);
+  std::vector<point> flatten_coords(const std::vector<std::vector<point> >& coords);
+  std::vector<char> flatten_residueNames(const std::vector<std::vector<std::string> >& aminoList);
   double calculateChiSquared(std::vector<ktlMolecule> &mol,double &qmin,double &qmax,std::vector<std::vector<double> > &mixtureVals);
   double calculateChiSquaredTest(std::vector<ktlMolecule> &mol,double &qmin,double &qmax,std::vector<std::vector<double> > &mixtureVals);
   std::vector<double> calculate_intensity_at_experimental_q(std::vector<double>& I_mod);

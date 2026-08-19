@@ -1,21 +1,10 @@
 #include "moleculeFitAndState.h"
 #include "ktlMoleculeRandom.h"
-#include <stdexcept>
-#include <utility>
 
 
-moleculeFitAndState::moleculeFitAndState(const std::vector<ktlMolecule> &molin, ModelParameters& params)
-  : mol(molin) {
-  initialiseFromCurrentMolecules(params);
-}
-
-moleculeFitAndState::moleculeFitAndState(std::vector<ktlMolecule> &&molin, ModelParameters& params)
-  : mol(std::move(molin)) {
-  initialiseFromCurrentMolecules(params);
-}
-
-void moleculeFitAndState::initialiseFromCurrentMolecules(ModelParameters& params){
-  // define metadata and cached penalties for the currently-owned molecule vector
+moleculeFitAndState::moleculeFitAndState(std::vector<ktlMolecule> &molin, ModelParameters& params){
+  //define the number of structures
+  mol = molin;
   molDists.resize(mol.size());
   molSize.resize(mol.size());
   maxDistMol.resize(mol.size());
@@ -75,92 +64,12 @@ void moleculeFitAndState::initialiseFromCurrentMolecules(ModelParameters& params
   originalOverlapPenalty= overlapPenalty;
 }
 
-const std::vector<ktlMolecule>& moleculeFitAndState::getMolecule() const{
+std::vector<ktlMolecule> moleculeFitAndState::getMolecule(){
   return mol;
 }
 
-std::vector<ktlMolecule>& moleculeFitAndState::moleculeRef(){
-  return mol;
-}
-
-const std::vector<ktlMolecule>& moleculeFitAndState::moleculeRef() const{
-  return mol;
-}
-
-void  moleculeFitAndState::updateMolecule(const std::vector<ktlMolecule> &molNew){
+void  moleculeFitAndState::updateMolecule(std::vector<ktlMolecule> &molNew){
   mol=molNew;
-}
-
-void moleculeFitAndState::replaceMoleculeAt(std::size_t index, const ktlMolecule &molNew){
-  if(index >= mol.size()){
-    throw std::out_of_range("moleculeFitAndState::replaceMoleculeAt index out of range");
-  }
-  mol[index] = molNew;
-}
-
-void moleculeFitAndState::replaceMoleculeAt(std::size_t index, ktlMolecule &&molNew){
-  if(index >= mol.size()){
-    throw std::out_of_range("moleculeFitAndState::replaceMoleculeAt index out of range");
-  }
-  mol[index] = std::move(molNew);
-}
-
-
-moleculeFitAndState::TrialBackup moleculeFitAndState::makeTrialBackup(std::size_t index) const{
-  TrialBackup backup;
-  makeTrialBackup(index, backup);
-  return backup;
-}
-
-void moleculeFitAndState::makeTrialBackup(std::size_t index, TrialBackup& backup) const{
-  if(index >= mol.size() || index >= molDists.size() || index >= overlapDistSet.size() ||
-     index >= molSize.size() || index >= maxDistMol.size() ||
-     index >= contactPredPen.size() || index >= currWrithes.size() ||
-     index >= connectionPenaltySet.size()){
-    throw std::out_of_range("moleculeFitAndState::makeTrialBackup index out of range");
-  }
-
-  // Reusing an existing TrialBackup lets std::vector assignment retain capacity
-  // between proposals.  On very large complexes this avoids allocator growth from
-  // constructing/destroying fresh backup vectors at every rejected move.
-  backup.index = index;
-  backup.molDists_i = molDists[index];
-  backup.overlapDistSet_i = overlapDistSet[index];
-  backup.molSize_i = molSize[index];
-  backup.maxDistMol_i = maxDistMol[index];
-  backup.contactPredPen_i = contactPredPen[index];
-  backup.currWrithes_i = currWrithes[index];
-  backup.writhePenalty_value = writhePenalty;
-  backup.connectionPenalty_value = connectionPenalty;
-  backup.connectionPenalty_i = connectionPenaltySet[index];
-  backup.C2_value = C2;
-  backup.currFit_value = currFit;
-}
-
-void moleculeFitAndState::restoreTrialBackup(const TrialBackup& backup){
-  const std::size_t index = backup.index;
-  if(index >= mol.size() || index >= molDists.size() || index >= overlapDistSet.size() ||
-     index >= molSize.size() || index >= maxDistMol.size() ||
-     index >= contactPredPen.size() || index >= currWrithes.size() ||
-     index >= connectionPenaltySet.size()){
-    throw std::out_of_range("moleculeFitAndState::restoreTrialBackup index out of range");
-  }
-
-  molDists[index] = backup.molDists_i;
-  overlapDistSet[index] = backup.overlapDistSet_i;
-  molSize[index] = backup.molSize_i;
-  maxDistMol[index] = backup.maxDistMol_i;
-  contactPredPen[index] = backup.contactPredPen_i;
-  currWrithes[index] = backup.currWrithes_i;
-  writhePenalty = backup.writhePenalty_value;
-  connectionPenalty = backup.connectionPenalty_value;
-  connectionPenaltySet[index] = backup.connectionPenalty_i;
-  C2 = backup.C2_value;
-  currFit = backup.currFit_value;
-}
-
-void moleculeFitAndState::acceptTrialMolecule(std::size_t index, ktlMolecule &&molNew){
-  replaceMoleculeAt(index, std::move(molNew));
 }
 
 // version where a single changed section has been made and we update the distances

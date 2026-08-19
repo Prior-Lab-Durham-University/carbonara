@@ -2186,7 +2186,11 @@ _SINGLE_FOXS_LINE_NUM_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]
 _MIX_CHI_RE = re.compile(r"\bchi2=([0-9.eE+-]+)")
 _MIX_SCALE_RE = re.compile(r"\bscale=([0-9.eE+-]+)")
 _MIX_WEIGHTS_RE = re.compile(r"\bweights=([^\s]+)")
-_MIX_PDBS_RE = re.compile(r"\bpdbs=(.+)$")
+_MIX_PDBS_RE = re.compile(r"\bpdbs=([^\s]+)")
+_MIX_PROFILES_RE = re.compile(r"\bprofiles=([^\s]+)")
+_MIX_C1_RE = re.compile(r"\bc1=([0-9.eE+-]+)")
+_MIX_C2_RE = re.compile(r"\bc2=([0-9.eE+-]+)")
+_MIX_BEST_COMPONENT_CHI2_RE = re.compile(r"\bbest_component_chi2=([0-9.eE+-]+)")
 _MIX_LABEL_STEP_RE = re.compile(r"^mol(\d+)_step_(\d+)$")
 _MIX_LABEL_END_RE = re.compile(r"^mol(\d+)_end$")
 _MIX_LABEL_INITIAL_RE = re.compile(r"^mol(\d+)_initial$")
@@ -2414,11 +2418,45 @@ def _read_mixture_foxs_records(run_dir: Path, require_exists: bool = True, cwd: 
             except ValueError:
                 scale = None
 
+        m_c1 = _MIX_C1_RE.search(line)
+        c1 = None
+        if m_c1:
+            try:
+                c1 = float(m_c1.group(1))
+            except ValueError:
+                c1 = None
+
+        m_c2 = _MIX_C2_RE.search(line)
+        c2 = None
+        if m_c2:
+            try:
+                c2 = float(m_c2.group(1))
+            except ValueError:
+                c2 = None
+
+        m_best = _MIX_BEST_COMPONENT_CHI2_RE.search(line)
+        best_component_chi2 = None
+        if m_best:
+            try:
+                best_component_chi2 = float(m_best.group(1))
+            except ValueError:
+                best_component_chi2 = None
+
         m_weights = _MIX_WEIGHTS_RE.search(line)
         weights = _parse_float_list_csv(m_weights.group(1) if m_weights else None)
 
+        # Important: in current partial-profile mixture summaries the line has
+        #     ... pdbs=p0,p1,p2 profiles=p0.dat,p1.dat,p2.dat
+        # so pdbs must stop at the next whitespace, not run to end-of-line.
         m_pdbs = _MIX_PDBS_RE.search(line)
         pdbs = _parse_pdb_list_csv(m_pdbs.group(1) if m_pdbs else None, cwd=cwd, require_exists=require_exists)
+        # Guard against old parser artefacts or malformed lines: component
+        # structures are AA PDBs, while FoXS partial profiles end in .pdb.dat.
+        pdbs = [p for p in pdbs if Path(p).suffix.lower() == ".pdb"]
+
+        m_profiles = _MIX_PROFILES_RE.search(line)
+        profiles = _parse_pdb_list_csv(m_profiles.group(1) if m_profiles else None, cwd=cwd, require_exists=False)
+
         if not pdbs:
             pdbs = _infer_mixture_pdbs_from_label(run_dir, label)
             if require_exists:
@@ -2450,6 +2488,10 @@ def _read_mixture_foxs_records(run_dir: Path, require_exists: bool = True, cwd: 
             "pdb_paths": pdbs,
             "weights": weights,
             "scale": scale,
+            "c1": c1,
+            "c2": c2,
+            "best_component_chi2": best_component_chi2,
+            "profile_paths": profiles,
             "fit_file": fit_file if fit_file.exists() else None,
             "summary_file": mix_file,
             "line": line,
@@ -3695,6 +3737,11 @@ def collect_best_prediction_per_run_closest_to_one(
         run_no = int(m.group(1))
         run_dirs[run_no] = p
         max_run = max(max_run, run_no)
+    for p in fitdata_dir.glob("fitLog*.dat"):
+        m = re.fullmatch(r"fitLog(\d+)\.dat", p.name)
+        if not m:
+            continue
+        max_run = max(max_run, int(m.group(1)))
 
     if max_run == 0:
         return []
@@ -4446,3 +4493,1435 @@ def read_and_align_saxs_weights(
         aligned_weights = aligned_weights / total
 
     return aligned_pdbs, aligned_weights, unmatched_pdbs
+
+# -----------------------------------------------------------------------------
+# Export helpers
+# -----------------------------------------------------------------------------
+
+def zip_prediction_pdbs(
+    predictions,
+    zip_name="best_prediction_pdbs.zip",
+    output_dir=None,
+    fitdata_dir: str | Path | None = None,
+    overwrite: bool = True,
+    include_manifest: bool = True,
+    require_exists: bool = True,
+    flat: bool = False,
+):
+    """
+    Put all PDB files referenced by prediction records into a zip archive.
+
+    Parameters
+    ----------
+    predictions : object
+        Usually the output of
+        collect_good_prediction_files(..., return_records=True) or
+        collect_best_prediction_per_run_closest_to_one(..., return_records=True).
+        Legacy inputs are also accepted: a single path, a list of paths,
+        (path_or_paths, chi2), or nested mixture path lists.
+
+    zip_name : str or Path
+        Name of the zip file to create. If no .zip suffix is supplied, one is
+        added. Relative paths are interpreted relative to output_dir, or the
+        current working directory if output_dir is None.
+
+    output_dir : str or Path or None
+        Directory in which to create the zip file. Defaults to the current
+        working directory.
+
+    fitdata_dir : str or Path or None
+        Optional fitdata directory. This is useful if predictions are legacy
+        path lists and the full mixture records need to be recovered from
+        foxs_mixture_results.txt.
+
+    overwrite : bool
+        If False, raise FileExistsError if the target zip already exists.
+
+    include_manifest : bool
+        If True, add best_predictions_manifest.csv to the zip with component
+        metadata: label, chi2, weights, c1/c2 when available, source path, and
+        archive name.
+
+    require_exists : bool
+        If True, raise FileNotFoundError if any referenced PDB does not exist.
+        If False, missing PDBs are skipped and listed in the returned manifest
+        rows with status='missing'.
+
+    flat : bool
+        If False, keep the default organised archive layout:
+            allAtomRunN/label/component_i_filename.pdb
+
+        If True, write PDB files at the top level of the zip, with no
+        subfolders. This is useful for tools such as MultiFoXS that expect a
+        flat directory of input PDB files. Use include_manifest=False as well
+        if the zip should contain only PDB files.
+
+    Returns
+    -------
+    zip_path : pathlib.Path
+        Path to the created zip file.
+
+    rows : list[dict]
+        Manifest rows describing what was added or skipped.
+    """
+    import csv
+    import zipfile
+    from io import StringIO
+
+    if output_dir is None:
+        output_dir = Path.cwd()
+    else:
+        output_dir = Path(output_dir)
+
+    zip_path = Path(zip_name)
+    if zip_path.suffix.lower() != ".zip":
+        zip_path = zip_path.with_suffix(".zip")
+    if not zip_path.is_absolute():
+        zip_path = output_dir / zip_path
+
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    if zip_path.exists() and not overwrite:
+        raise FileExistsError(zip_path)
+
+    records = _normalise_prediction_collection(predictions, fitdata_dir=fitdata_dir)
+
+    rows = []
+    used_arcnames = set()
+    added_resolved = set()
+
+    def _safe_text(x):
+        if x is None:
+            return "NA"
+        s = str(x)
+        s = re.sub(r"[^A-Za-z0-9_.+-]+", "_", s)
+        s = s.strip("_")
+        return s or "NA"
+
+    def _archive_name_for_pdb(pdb_path: Path, rec, component_i: int, pred_i: int):
+        label = _safe_text(rec.get("label", f"prediction_{pred_i}"))
+        run_no = rec.get("run_no", rec.get("runNo"))
+        if run_no is None:
+            meta = _parse_prediction_pdb_metadata(pdb_path)
+            run_no = meta.get("run_no") or meta.get("runNo")
+        run_part = f"allAtomRun{run_no}" if run_no is not None else f"prediction_{pred_i}"
+
+        stem = pdb_path.stem
+        suffix = pdb_path.suffix
+
+        if flat:
+            # MultiFoXS-style export: only top-level PDB files, no folders.
+            # Keep the original filename unless it would collide with another
+            # different PDB in the same archive.
+            arc = pdb_path.name
+            if arc not in used_arcnames:
+                used_arcnames.add(arc)
+                return arc
+
+            k = 2
+            while True:
+                arc2 = f"{stem}_{k}{suffix}"
+                if arc2 not in used_arcnames:
+                    used_arcnames.add(arc2)
+                    return arc2
+                k += 1
+
+        # Default organised, collision-resistant layout.
+        arc = f"{run_part}/{label}/component_{component_i}_{pdb_path.name}"
+        if arc not in used_arcnames:
+            used_arcnames.add(arc)
+            return arc
+
+        k = 2
+        while True:
+            arc2 = f"{run_part}/{label}/component_{component_i}_{stem}_{k}{suffix}"
+            if arc2 not in used_arcnames:
+                used_arcnames.add(arc2)
+                return arc2
+            k += 1
+
+    with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for pred_i, rec in enumerate(records):
+            pdb_paths = [Path(p) for p in rec.get("pdb_paths", [])]
+            weights = rec.get("weights")
+            if weights is None or len(weights) != len(pdb_paths):
+                weights = [None] * len(pdb_paths)
+
+            for component_i, (pdb_path, weight) in enumerate(zip(pdb_paths, weights)):
+                row = {
+                    "prediction_i": pred_i,
+                    "component_i": component_i,
+                    "type": rec.get("type"),
+                    "run_no": rec.get("run_no", rec.get("runNo")),
+                    "label": rec.get("label"),
+                    "chi2": rec.get("chi2"),
+                    "weight": weight,
+                    "scale": rec.get("scale"),
+                    "c1": rec.get("c1"),
+                    "c2": rec.get("c2"),
+                    "best_component_chi2": rec.get("best_component_chi2"),
+                    "source_pdb": str(pdb_path),
+                    "archive_name": "",
+                    "status": "",
+                }
+
+                if not pdb_path.exists():
+                    row["status"] = "missing"
+                    rows.append(row)
+                    if require_exists:
+                        raise FileNotFoundError(pdb_path)
+                    continue
+
+                try:
+                    resolved = pdb_path.resolve()
+                except Exception:
+                    resolved = pdb_path
+
+                if resolved in added_resolved:
+                    row["status"] = "duplicate_skipped"
+                    rows.append(row)
+                    continue
+
+                arcname = _archive_name_for_pdb(pdb_path, rec, component_i, pred_i)
+                zf.write(pdb_path, arcname=arcname)
+                added_resolved.add(resolved)
+                row["archive_name"] = arcname
+                row["status"] = "added"
+                rows.append(row)
+
+        if include_manifest:
+            fieldnames = [
+                "prediction_i", "component_i", "type", "run_no", "label",
+                "chi2", "weight", "scale", "c1", "c2", "best_component_chi2",
+                "source_pdb", "archive_name", "status",
+            ]
+            sio = StringIO()
+            writer = csv.DictWriter(sio, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: row.get(k, "") for k in fieldnames})
+            zf.writestr("best_predictions_manifest.csv", sio.getvalue())
+
+    print(f"Wrote {sum(r['status'] == 'added' for r in rows)} PDB files to {zip_path}")
+    return zip_path, rows
+
+
+# =============================================================================
+# Visualisation colour-mode patch
+# -----------------------------------------------------------------------------
+# These definitions intentionally override the earlier visualisation functions in
+# this module.  They keep the old call patterns working, while adding:
+#   - colour_mode="chain"      : existing per-chain colouring
+#   - colour_mode="model"      : one colour for the whole model
+#   - colour_mode="length"     : N-to-C / residue-position spectrum colouring
+#   - colour_mode="secondary"  : secondary-structure colouring using 3Dmol's
+#                                 ssPyMOL colour scheme
+# and n-structure support for visualisePredictionComp.
+# =============================================================================
+
+_VIS_PALETTE = [
+    "blue", "green", "red", "yellow", "cyan", "magenta",
+    "orange", "purple", "lime", "gray",
+]
+
+
+def _normalise_visual_color_mode(color_mode="chain", color_by_chain=None):
+    """Normalise visualisation colour-mode aliases."""
+    if color_mode is None:
+        if color_by_chain is None:
+            color_mode = "chain"
+        else:
+            color_mode = "chain" if color_by_chain else "model"
+
+    mode = str(color_mode).strip().lower().replace("-", "_")
+    aliases = {
+        "chain": "chain",
+        "chains": "chain",
+        "by_chain": "chain",
+        "model": "model",
+        "single": "model",
+        "uniform": "model",
+        "one": "model",
+        "length": "length",
+        "residue": "length",
+        "residue_index": "length",
+        "sequence": "length",
+        "spectrum": "length",
+        "n_to_c": "length",
+        "ntoc": "length",
+        "secondary": "secondary",
+        "secondary_structure": "secondary",
+        "ss": "secondary",
+        "ss_pymol": "secondary",
+        "sspymol": "secondary",
+    }
+    if mode not in aliases:
+        raise ValueError(
+            "Unknown colour mode {!r}. Use one of: 'chain', 'model', "
+            "'length', or 'secondary'.".format(color_mode)
+        )
+    return aliases[mode]
+
+
+def _set_style_for_viewer(view, selection, style, viewer=None):
+    """py3Dmol wrapper so the same helper works inside and outside grids."""
+    if viewer is None:
+        view.setStyle(selection, style)
+    else:
+        view.setStyle(selection, style, viewer=viewer)
+
+
+def _add_model_for_viewer(view, data, fmt, viewer=None):
+    if viewer is None:
+        view.addModel(data, fmt)
+    else:
+        view.addModel(data, fmt, viewer=viewer)
+
+
+def _zoom_for_viewer(view, viewer=None):
+    if viewer is None:
+        view.zoomTo()
+    else:
+        view.zoomTo(viewer=viewer)
+
+
+def _add_label_for_viewer(view, label, style, viewer=None):
+    if viewer is None:
+        view.addLabel(label, style)
+    else:
+        view.addLabel(label, style, viewer=viewer)
+
+
+def _representation_style(rep="cartoon", *, color=None, colorscheme=None, opacity=0.9):
+    rep_dict = {}
+    if color is not None:
+        rep_dict["color"] = color
+    if colorscheme is not None:
+        rep_dict["colorscheme"] = colorscheme
+    if opacity is not None:
+        rep_dict["opacity"] = float(opacity)
+    return {rep: rep_dict}
+
+
+def _style_structure_model(
+    view,
+    model_index,
+    structure_data,
+    fmt,
+    *,
+    viewer=None,
+    color_mode="chain",
+    representation="cartoon",
+    opacity=0.9,
+    model_color=None,
+    palette=None,
+):
+    """
+    Apply one of Carbonara's standard structure colour modes to one model.
+
+    Parameters
+    ----------
+    color_mode : {'chain', 'model', 'length', 'secondary'}
+        chain      - distinct colour per chain, falling back to a single colour
+        model      - one colour for the whole model
+        length     - 3Dmol spectrum colouring along residue/model order
+        secondary  - 3Dmol ssPyMOL secondary-structure colouring
+    """
+    palette = list(palette or _VIS_PALETTE)
+    mode = _normalise_visual_color_mode(color_mode)
+    base_sel = {"model": int(model_index)}
+
+    if mode == "secondary":
+        _set_style_for_viewer(
+            view,
+            base_sel,
+            _representation_style(representation, colorscheme="ssPyMOL", opacity=opacity),
+            viewer=viewer,
+        )
+        return
+
+    if mode == "length":
+        _set_style_for_viewer(
+            view,
+            base_sel,
+            _representation_style(representation, colorscheme="spectrum", opacity=opacity),
+            viewer=viewer,
+        )
+        return
+
+    if mode == "chain":
+        chains = _chains_present_in_structure(structure_data, fmt)
+        if chains:
+            for i, ch in enumerate(chains):
+                _set_style_for_viewer(
+                    view,
+                    {"model": int(model_index), "chain": ch},
+                    _representation_style(
+                        representation,
+                        color=palette[i % len(palette)],
+                        opacity=opacity,
+                    ),
+                    viewer=viewer,
+                )
+            return
+
+    # mode == 'model', or chain mode with no chain IDs available.
+    color = model_color or palette[int(model_index) % len(palette)]
+    _set_style_for_viewer(
+        view,
+        base_sel,
+        _representation_style(representation, color=color, opacity=opacity),
+        viewer=viewer,
+    )
+
+
+def _prediction_path_list(obj):
+    """Return a list of PDB paths from records/lists/legacy tuples, or None."""
+    if obj is None:
+        return None
+
+    if isinstance(obj, dict):
+        paths = obj.get("pdb_paths")
+        if paths:
+            return [Path(p) for p in paths]
+        path = obj.get("pdb_path")
+        if path:
+            return [Path(path)]
+        return []
+
+    if isinstance(obj, tuple) and len(obj) >= 1:
+        first = obj[0]
+        if isinstance(first, (list, tuple)) and not isinstance(first, (str, bytes, os.PathLike)):
+            return [Path(p) for p in first]
+        if isinstance(first, (str, bytes, os.PathLike, Path)):
+            return [Path(first)]
+
+    if isinstance(obj, (list, tuple)) and not isinstance(obj, (str, bytes, os.PathLike)):
+        return [Path(p) for p in obj]
+
+    return None
+
+
+def visualisePrediction(
+    directory,
+    runNo,
+    predNo=None,
+    subNo=0,
+    subRun=False,
+    color_mode="chain",
+    ca_color_mode=None,
+):
+    """
+    Visualise one Carbonara prediction, with AA cartoon plus CA spheres.
+
+    colour modes: 'chain', 'model', 'length', 'secondary'.
+    """
+    if not HAS_PY3DMOL:
+        _warn_missing_py3dmol()
+        return None
+
+    view = py3Dmol.view(width=800, height=600)
+
+    if subRun:
+        run_dir = os.path.join(directory, f"allAtomRun{runNo}")
+    else:
+        run_dir = directory
+
+    if predNo is None:
+        pred_tag, aa_path, ca_path = _resolve_latest_prediction(
+            directory,
+            runNo,
+            subNo=subNo,
+            subRun=subRun,
+        )
+        print(f"Using latest prediction: {pred_tag}")
+    else:
+        if predNo == "end":
+            aa_fname = f"mol{runNo}_sub_{subNo}_end__AA.pdb"
+            ca_fname = f"mol{runNo}_sub_{subNo}_end__CA.pdb"
+        else:
+            aa_fname = f"mol{runNo}_sub_{subNo}_step_{predNo}__AA.pdb"
+            ca_fname = f"mol{runNo}_sub_{subNo}_step_{predNo}__CA.pdb"
+
+        aa_path = os.path.join(run_dir, aa_fname)
+        ca_path = os.path.join(run_dir, ca_fname)
+
+        if not os.path.exists(aa_path):
+            raise FileNotFoundError(f"AA file not found: {aa_path}")
+        if not os.path.exists(ca_path):
+            raise FileNotFoundError(f"CA file not found: {ca_path}")
+
+    aa_data, aa_fmt = _read_structure_for_viewer(aa_path)
+    _add_model_for_viewer(view, aa_data, aa_fmt)
+    _style_structure_model(
+        view,
+        0,
+        aa_data,
+        aa_fmt,
+        color_mode=color_mode,
+        representation="cartoon",
+        opacity=0.9,
+        model_color="lightgray" if color_mode == "model" else None,
+    )
+
+    ca_data, ca_fmt = _read_structure_for_viewer(ca_path)
+    _add_model_for_viewer(view, ca_data, ca_fmt)
+    _style_structure_model(
+        view,
+        1,
+        ca_data,
+        ca_fmt,
+        color_mode=(ca_color_mode if ca_color_mode is not None else color_mode),
+        representation="sphere",
+        opacity=0.45,
+        model_color="red",
+    )
+
+    _zoom_for_viewer(view)
+    view.show()
+    return view
+
+
+def visualisePredictionComparison(
+    directory,
+    runNo1,
+    runNo2,
+    predNo1,
+    predNo2,
+    subNo1,
+    subNo2,
+    do_superpose=True,
+    color_mode="chain",
+    reference_color_mode=None,
+    mobile_color_mode=None,
+):
+    """Compare two Carbonara predictions in one viewer."""
+    if not HAS_PY3DMOL:
+        _warn_missing_py3dmol()
+        return None
+
+    view = py3Dmol.view(width=800, height=600)
+
+    aa_fname = f"mol{runNo1}_sub_{subNo1}_step_{predNo1}__AA.pdb"
+    mob_fname = f"mol{runNo2}_sub_{subNo2}_step_{predNo2}__AA.pdb"
+
+    aa_path = os.path.join(directory, "allAtomRun" + str(runNo1), aa_fname)
+    mob_path = os.path.join(directory, "allAtomRun" + str(runNo2), mob_fname)
+
+    aa_data, aa_fmt = _read_structure_for_viewer(aa_path)
+
+    if do_superpose:
+        mob_data_to_show, rmsd, nmatch = superimpose_structure_files_by_ca(aa_path, mob_path)
+        mob_fmt = "pdb"
+        print(f"Superposed model 1 onto model 0 using {nmatch} matched Cα atoms. RMSD = {rmsd:.3f} Å")
+    else:
+        mob_data_to_show, mob_fmt = _read_structure_for_viewer(mob_path)
+
+    _add_model_for_viewer(view, aa_data, aa_fmt)
+    _add_model_for_viewer(view, mob_data_to_show, mob_fmt)
+
+    _style_structure_model(
+        view,
+        0,
+        aa_data,
+        aa_fmt,
+        color_mode=reference_color_mode or color_mode,
+        representation="cartoon",
+        opacity=0.9,
+        model_color="lightgray",
+    )
+    _style_structure_model(
+        view,
+        1,
+        mob_data_to_show,
+        mob_fmt,
+        color_mode=mobile_color_mode or color_mode,
+        representation="cartoon",
+        opacity=0.65,
+        model_color="red",
+    )
+
+    _zoom_for_viewer(view)
+    view.show()
+    return view
+
+
+def visualisePredictionMixture(
+    pdb_paths,
+    weights=None,
+    ncols=3,
+    panel_width=350,
+    panel_height=300,
+    show_labels=True,
+    color_mode="chain",
+):
+    """Visualise the component structures of one mixture prediction."""
+    if isinstance(pdb_paths, dict):
+        rec = pdb_paths
+        weights = rec.get("weights") if weights is None else weights
+        pdb_paths = rec.get("pdb_paths", [])
+    elif isinstance(pdb_paths, tuple) and len(pdb_paths) >= 1:
+        first = pdb_paths[0]
+        if isinstance(first, (list, tuple)):
+            pdb_paths = first
+
+    pdb_paths = [Path(p) for p in pdb_paths]
+    if not pdb_paths:
+        raise ValueError("No component PDB files supplied for mixture visualisation.")
+
+    if show_labels and weights is not None and len(weights) == len(pdb_paths):
+        print("Mixture weights:")
+        for p, w in zip(pdb_paths, weights):
+            print(f"  {Path(p).name}: {float(w):.4g}")
+
+    return visualisePrediction_panel(
+        pdb_paths,
+        ncols=ncols,
+        panel_width=panel_width,
+        panel_height=panel_height,
+        show_labels=show_labels,
+        color_mode=color_mode,
+    )
+
+
+def visualisePredictionIndividual(aa_path, color_mode="chain"):
+    """
+    Visualise a single AA PDB, or the component PDBs of a mixture prediction.
+
+    colour modes: 'chain', 'model', 'length', 'secondary'.
+    """
+    paths = _prediction_path_list(aa_path)
+    if paths is not None:
+        if isinstance(aa_path, dict):
+            if aa_path.get("type") == "mixture" or len(paths) > 1:
+                return visualisePredictionMixture(aa_path, color_mode=color_mode)
+            aa_path = paths[0]
+        elif len(paths) > 1:
+            return visualisePredictionMixture(paths, color_mode=color_mode)
+        elif len(paths) == 1:
+            aa_path = paths[0]
+
+    if not HAS_PY3DMOL:
+        _warn_missing_py3dmol()
+        return None
+
+    view = py3Dmol.view(width=800, height=600)
+    structure_data, fmt = _read_structure_for_viewer(aa_path)
+    _add_model_for_viewer(view, structure_data, fmt)
+    _style_structure_model(
+        view,
+        0,
+        structure_data,
+        fmt,
+        color_mode=color_mode,
+        representation="cartoon",
+        opacity=0.9,
+    )
+
+    _zoom_for_viewer(view)
+    view.show()
+    return view
+
+
+def visualisePredictionComp(
+    pdb1,
+    pdb2=None,
+    do_superpose=True,
+    color_mode="chain",
+    reference_color_mode=None,
+    mobile_color_mode=None,
+    ncols=3,
+    panel_width=350,
+    panel_height=300,
+    max_panels=None,
+    show_labels=True,
+):
+    """
+    Compare structures, now including n-structure inputs.
+
+    Backwards compatible:
+        visualisePredictionComp(pdb1, pdb2)
+
+    New forms:
+        visualisePredictionComp([pdb1, pdb2, ...])
+            Show n structures independently.
+
+        visualisePredictionComp(reference_pdb, [mobile1, mobile2, ...])
+            Compare each mobile against one reference.
+
+        visualisePredictionComp([mobile1, mobile2, ...], reference_pdb)
+            Same as above.
+
+        visualisePredictionComp([ref1, ref2, ...], [mob1, mob2, ...])
+            Pairwise comparison panel.
+    """
+    paths1 = _prediction_path_list(pdb1)
+    paths2 = _prediction_path_list(pdb2)
+
+    # One list/record only: just show the n structures.
+    if paths1 is not None and pdb2 is None:
+        return visualisePrediction_panel(
+            paths1,
+            ncols=ncols,
+            panel_width=panel_width,
+            panel_height=panel_height,
+            max_panels=max_panels,
+            show_labels=show_labels,
+            color_mode=color_mode,
+        )
+
+    # List + path: compare many mobiles against one reference.
+    if paths1 is not None and paths2 is None and isinstance(pdb2, (str, os.PathLike, Path)):
+        return visualisePredictionComp_panel(
+            paths1,
+            pdb2,
+            do_superpose=do_superpose,
+            ncols=ncols,
+            panel_width=panel_width,
+            panel_height=panel_height,
+            max_panels=max_panels,
+            show_labels=show_labels,
+            color_mode=color_mode,
+            reference_color_mode=reference_color_mode,
+            mobile_color_mode=mobile_color_mode,
+        )
+
+    # Path + list: compare each mobile in the list against the path reference.
+    if paths1 is None and paths2 is not None and isinstance(pdb1, (str, os.PathLike, Path)):
+        return visualisePredictionComp_panel(
+            paths2,
+            pdb1,
+            do_superpose=do_superpose,
+            ncols=ncols,
+            panel_width=panel_width,
+            panel_height=panel_height,
+            max_panels=max_panels,
+            show_labels=show_labels,
+            color_mode=color_mode,
+            reference_color_mode=reference_color_mode,
+            mobile_color_mode=mobile_color_mode,
+        )
+
+    if paths1 is not None and paths2 is not None:
+        if len(paths1) == 1 and len(paths2) > 1:
+            return visualisePredictionComp_panel(
+                paths2,
+                paths1[0],
+                do_superpose=do_superpose,
+                ncols=ncols,
+                panel_width=panel_width,
+                panel_height=panel_height,
+                max_panels=max_panels,
+                show_labels=show_labels,
+                color_mode=color_mode,
+                reference_color_mode=reference_color_mode,
+                mobile_color_mode=mobile_color_mode,
+            )
+        if len(paths2) == 1 and len(paths1) > 1:
+            return visualisePredictionComp_panel(
+                paths1,
+                paths2[0],
+                do_superpose=do_superpose,
+                ncols=ncols,
+                panel_width=panel_width,
+                panel_height=panel_height,
+                max_panels=max_panels,
+                show_labels=show_labels,
+                color_mode=color_mode,
+                reference_color_mode=reference_color_mode,
+                mobile_color_mode=mobile_color_mode,
+            )
+        if len(paths1) == len(paths2) and len(paths1) > 1:
+            return visualisePredictionComp_pairs_panel(
+                paths1,
+                paths2,
+                do_superpose=do_superpose,
+                ncols=ncols,
+                panel_width=panel_width,
+                panel_height=panel_height,
+                max_panels=max_panels,
+                show_labels=show_labels,
+                color_mode=color_mode,
+                reference_color_mode=reference_color_mode,
+                mobile_color_mode=mobile_color_mode,
+            )
+        if len(paths1) == len(paths2) == 1:
+            pdb1 = paths1[0]
+            pdb2 = paths2[0]
+        else:
+            raise ValueError(
+                "For n-structure comparison, pass one reference and many mobiles, "
+                "or two lists with the same length."
+            )
+
+    if pdb2 is None:
+        raise ValueError("pdb2 is required unless pdb1 is a list/record of structures.")
+
+    if not HAS_PY3DMOL:
+        _warn_missing_py3dmol()
+        return None
+
+    view = py3Dmol.view(width=800, height=600)
+    data1, fmt1 = _read_structure_for_viewer(pdb1)
+
+    if do_superpose:
+        data2_to_show, rmsd, nmatch = superimpose_structure_files_by_ca(pdb1, pdb2)
+        fmt2 = "pdb"
+        print(f"Superposed model 1 onto model 0 using {nmatch} matched Cα atoms. RMSD = {rmsd:.3f} Å")
+    else:
+        data2_to_show, fmt2 = _read_structure_for_viewer(pdb2)
+
+    _add_model_for_viewer(view, data1, fmt1)
+    _add_model_for_viewer(view, data2_to_show, fmt2)
+
+    _style_structure_model(
+        view,
+        0,
+        data1,
+        fmt1,
+        color_mode=reference_color_mode or color_mode,
+        representation="cartoon",
+        opacity=0.9,
+        model_color="lightgray",
+    )
+    _style_structure_model(
+        view,
+        1,
+        data2_to_show,
+        fmt2,
+        color_mode=mobile_color_mode or color_mode,
+        representation="cartoon",
+        opacity=0.65,
+        model_color="red",
+    )
+
+    _zoom_for_viewer(view)
+    view.show()
+    return view
+
+
+def visualisePredictionComp_panel(
+    file_list,
+    reference_file,
+    do_superpose=True,
+    ncols=3,
+    panel_width=350,
+    panel_height=300,
+    max_panels=None,
+    show_labels=True,
+    color_mode=None,
+    reference_color_mode="model",
+    mobile_color_mode="model",
+):
+    """Show a grid of pairwise comparisons against one fixed reference."""
+    if not HAS_PY3DMOL:
+        _warn_missing_py3dmol()
+        return None
+
+    file_list = list(file_list)
+    if max_panels is not None:
+        file_list = file_list[:max_panels]
+
+    n = len(file_list)
+    if n == 0:
+        print("No files to display.")
+        return None
+
+    if color_mode is not None:
+        reference_color_mode = color_mode
+        mobile_color_mode = color_mode
+
+    ncols = max(1, int(ncols))
+    nrows = (n + ncols - 1) // ncols
+
+    view = py3Dmol.view(
+        viewergrid=(nrows, ncols),
+        width=ncols * panel_width,
+        height=nrows * panel_height,
+        linked=False,
+    )
+
+    ref_data, ref_fmt = _read_structure_for_viewer(reference_file)
+
+    for k, mobile_file in enumerate(file_list):
+        r = k // ncols
+        c = k % ncols
+        viewer = (r, c)
+
+        try:
+            _add_model_for_viewer(view, ref_data, ref_fmt, viewer=viewer)
+
+            if do_superpose:
+                mob_data_to_show, rmsd, nmatch = superimpose_structure_files_by_ca(
+                    reference_file,
+                    mobile_file,
+                )
+                mob_fmt = "pdb"
+                panel_title = f"{Path(mobile_file).name}\nRMSD={rmsd:.2f} Å"
+            else:
+                mob_data_to_show, mob_fmt = _read_structure_for_viewer(mobile_file)
+                panel_title = Path(mobile_file).name
+
+            _add_model_for_viewer(view, mob_data_to_show, mob_fmt, viewer=viewer)
+
+            _style_structure_model(
+                view,
+                0,
+                ref_data,
+                ref_fmt,
+                viewer=viewer,
+                color_mode=reference_color_mode,
+                representation="cartoon",
+                opacity=0.75,
+                model_color="lightgray",
+            )
+            _style_structure_model(
+                view,
+                1,
+                mob_data_to_show,
+                mob_fmt,
+                viewer=viewer,
+                color_mode=mobile_color_mode,
+                representation="cartoon",
+                opacity=0.85,
+                model_color="red",
+            )
+
+            _zoom_for_viewer(view, viewer=viewer)
+
+            if show_labels:
+                _add_label_for_viewer(
+                    view,
+                    panel_title,
+                    {
+                        "fontSize": 10,
+                        "backgroundColor": "white",
+                        "backgroundOpacity": 0.7,
+                        "fontColor": "black",
+                        "borderThickness": 0,
+                        "inFront": True,
+                    },
+                    viewer=viewer,
+                )
+
+        except Exception as e:
+            print(f"Failed for {mobile_file}: {e}")
+            _add_label_for_viewer(
+                view,
+                f"Failed:\n{Path(mobile_file).name}",
+                {
+                    "fontSize": 12,
+                    "backgroundColor": "mistyrose",
+                    "backgroundOpacity": 0.8,
+                    "fontColor": "black",
+                    "borderThickness": 0,
+                    "inFront": True,
+                },
+                viewer=viewer,
+            )
+
+    view.show()
+    return view
+
+
+def visualisePredictionComp_pairs_panel(
+    reference_files,
+    mobile_files,
+    do_superpose=True,
+    ncols=3,
+    panel_width=350,
+    panel_height=300,
+    max_panels=None,
+    show_labels=True,
+    color_mode=None,
+    reference_color_mode="model",
+    mobile_color_mode="model",
+):
+    """Show pairwise comparisons for two equal-length file lists."""
+    if not HAS_PY3DMOL:
+        _warn_missing_py3dmol()
+        return None
+
+    reference_files = list(reference_files)
+    mobile_files = list(mobile_files)
+    if len(reference_files) != len(mobile_files):
+        raise ValueError("reference_files and mobile_files must have the same length.")
+
+    if max_panels is not None:
+        reference_files = reference_files[:max_panels]
+        mobile_files = mobile_files[:max_panels]
+
+    n = len(reference_files)
+    if n == 0:
+        print("No files to display.")
+        return None
+
+    if color_mode is not None:
+        reference_color_mode = color_mode
+        mobile_color_mode = color_mode
+
+    ncols = max(1, int(ncols))
+    nrows = (n + ncols - 1) // ncols
+    view = py3Dmol.view(
+        viewergrid=(nrows, ncols),
+        width=ncols * panel_width,
+        height=nrows * panel_height,
+        linked=False,
+    )
+
+    for k, (ref_file, mobile_file) in enumerate(zip(reference_files, mobile_files)):
+        r = k // ncols
+        c = k % ncols
+        viewer = (r, c)
+        try:
+            ref_data, ref_fmt = _read_structure_for_viewer(ref_file)
+            _add_model_for_viewer(view, ref_data, ref_fmt, viewer=viewer)
+
+            if do_superpose:
+                mob_data_to_show, rmsd, nmatch = superimpose_structure_files_by_ca(
+                    ref_file,
+                    mobile_file,
+                )
+                mob_fmt = "pdb"
+                panel_title = f"{Path(mobile_file).name}\nRMSD={rmsd:.2f} Å"
+            else:
+                mob_data_to_show, mob_fmt = _read_structure_for_viewer(mobile_file)
+                panel_title = f"{Path(ref_file).name}\nvs {Path(mobile_file).name}"
+
+            _add_model_for_viewer(view, mob_data_to_show, mob_fmt, viewer=viewer)
+            _style_structure_model(
+                view,
+                0,
+                ref_data,
+                ref_fmt,
+                viewer=viewer,
+                color_mode=reference_color_mode,
+                representation="cartoon",
+                opacity=0.75,
+                model_color="lightgray",
+            )
+            _style_structure_model(
+                view,
+                1,
+                mob_data_to_show,
+                mob_fmt,
+                viewer=viewer,
+                color_mode=mobile_color_mode,
+                representation="cartoon",
+                opacity=0.85,
+                model_color="red",
+            )
+            _zoom_for_viewer(view, viewer=viewer)
+            if show_labels:
+                _add_label_for_viewer(
+                    view,
+                    panel_title,
+                    {
+                        "fontSize": 10,
+                        "backgroundColor": "white",
+                        "backgroundOpacity": 0.7,
+                        "fontColor": "black",
+                        "borderThickness": 0,
+                        "inFront": True,
+                    },
+                    viewer=viewer,
+                )
+        except Exception as e:
+            print(f"Failed for {ref_file} / {mobile_file}: {e}")
+
+    view.show()
+    return view
+
+
+def visualisePrediction_panel(
+    file_list,
+    ncols=3,
+    panel_width=350,
+    panel_height=300,
+    max_panels=None,
+    show_labels=True,
+    color_by_chain=True,
+    color_mode=None,
+):
+    """
+    Display a set of structures side by side in a py3Dmol viewer grid.
+
+    colour modes: 'chain', 'model', 'length', 'secondary'.  The older
+    ``color_by_chain`` argument is still accepted; it is used only when
+    ``color_mode`` is not supplied.
+    """
+    if not HAS_PY3DMOL:
+        _warn_missing_py3dmol()
+        return None
+
+    file_list = list(file_list)
+    if max_panels is not None:
+        file_list = file_list[:max_panels]
+
+    n = len(file_list)
+    if n == 0:
+        print("No files to display.")
+        return None
+
+    mode = _normalise_visual_color_mode(color_mode, color_by_chain=color_by_chain)
+
+    ncols = max(1, int(ncols))
+    nrows = (n + ncols - 1) // ncols
+
+    view = py3Dmol.view(
+        viewergrid=(nrows, ncols),
+        width=ncols * panel_width,
+        height=nrows * panel_height,
+        linked=False,
+    )
+
+    for k, structure_file in enumerate(file_list):
+        r = k // ncols
+        c = k % ncols
+        viewer = (r, c)
+
+        try:
+            structure_data, structure_fmt = _read_structure_for_viewer(structure_file)
+            _add_model_for_viewer(view, structure_data, structure_fmt, viewer=viewer)
+            _style_structure_model(
+                view,
+                0,
+                structure_data,
+                structure_fmt,
+                viewer=viewer,
+                color_mode=mode,
+                representation="cartoon",
+                opacity=0.9,
+                model_color=_VIS_PALETTE[k % len(_VIS_PALETTE)],
+            )
+
+            _zoom_for_viewer(view, viewer=viewer)
+
+            if show_labels:
+                _add_label_for_viewer(
+                    view,
+                    Path(structure_file).name,
+                    {
+                        "fontSize": 10,
+                        "backgroundColor": "white",
+                        "backgroundOpacity": 0.7,
+                        "fontColor": "black",
+                        "borderThickness": 0,
+                        "inFront": True,
+                    },
+                    viewer=viewer,
+                )
+
+        except Exception as e:
+            print(f"Failed for {structure_file}: {e}")
+            _add_label_for_viewer(
+                view,
+                f"Failed:\n{Path(structure_file).name}",
+                {
+                    "fontSize": 12,
+                    "backgroundColor": "mistyrose",
+                    "backgroundOpacity": 0.8,
+                    "fontColor": "black",
+                    "borderThickness": 0,
+                    "inFront": True,
+                },
+                viewer=viewer,
+            )
+
+    view.show()
+    return view
+
+
+def show_structure_and_foxs_side_by_side(
+    pdb_name,
+    saxs_name,
+    foxs_cmd="pyfoxs",
+    max_q=None,
+    structure_width=480,
+    structure_height=420,
+    plot_width=520,
+    print_summary=False,
+    color_mode="chain",
+):
+    """
+    Display a structure and its FoXS fit side by side.
+
+    The structure viewer now accepts ``color_mode``: 'chain', 'model',
+    'length', or 'secondary'.
+    """
+    pdb_path = Path(pdb_name).resolve()
+    saxs_path = Path(saxs_name).resolve()
+
+    if not pdb_path.exists():
+        raise FileNotFoundError(f"Structure file not found: {pdb_path}")
+    if not saxs_path.exists():
+        raise FileNotFoundError(f"SAXS file not found: {saxs_path}")
+
+    temp_pdb_to_clean = None
+
+    try:
+        pdb_for_foxs, temp_pdb_to_clean = CDT._convert_cif_to_pdb_for_foxs(pdb_path)
+        pdb_for_foxs = Path(pdb_for_foxs)
+
+        base_cmd = CDT._normalise_cmd(foxs_cmd)
+        cmd = base_cmd + [str(pdb_for_foxs), str(saxs_path)]
+
+        if max_q is not None:
+            cmd += ["--max_q", str(max_q)]
+
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        stdout = proc.stdout
+        stderr = proc.stderr
+
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"pyFoXS failed with exit code {proc.returncode}\n\nSTDERR:\n{stderr}\n\nSTDOUT:\n{stdout}"
+            )
+
+        combined_text = stdout + "\n" + stderr
+        chi2 = None
+        chi_patterns = [
+            r"Chi(?:\^?2| square)\s*[:=]\s*([0-9.eE+-]+)",
+            r"chi(?:\^?2| square)\s*[:=]\s*([0-9.eE+-]+)",
+            r"\bchi\s*=\s*([0-9.eE+-]+)",
+            r"\bChi\s*=\s*([0-9.eE+-]+)",
+            r"\bchi2\s*[:=]\s*([0-9.eE+-]+)",
+            r"\bChi2\s*[:=]\s*([0-9.eE+-]+)",
+        ]
+        for pat in chi_patterns:
+            m = re.search(pat, combined_text)
+            if m:
+                try:
+                    chi2 = float(m.group(1))
+                    break
+                except ValueError:
+                    pass
+
+        if print_summary:
+            print(stdout)
+            if stderr:
+                print(stderr)
+
+        fit_file = CDT._find_foxs_fit_file(pdb_for_foxs, saxs_path)
+        if fit_file is None:
+            raise FileNotFoundError("Could not identify a FoXS fit file automatically.")
+
+        fit = CDT.load_numeric_table_loose(fit_file, min_cols=2)
+        q = fit[:, 0]
+
+        if fit.shape[1] >= 4:
+            i_exp = fit[:, 1]
+            sigma = fit[:, 2]
+            i_fit = fit[:, 3]
+            residual = (i_exp - i_fit) / sigma
+        elif fit.shape[1] == 3:
+            i_exp = fit[:, 1]
+            i_fit = fit[:, 2]
+            residual = i_exp - i_fit
+        else:
+            raise ValueError("Fit file must have at least 3 columns for residual plotting.")
+
+        fig = plt.figure(figsize=(6.0, 6.0))
+        gs = fig.add_gridspec(2, 1, height_ratios=[3, 1], hspace=0.08)
+        ax1 = fig.add_subplot(gs[0])
+        ax2 = fig.add_subplot(gs[1], sharex=ax1)
+        ax1.plot(q, i_exp, "o", ms=4, label="Experimental")
+        ax1.plot(q, i_fit, "-", lw=2, label="FoXS fit")
+        ax1.set_yscale("log")
+        ax1.set_ylabel("Intensity")
+        title = "Initial FoXS check"
+        if chi2 is not None:
+            title += f"  (chi² = {chi2:.4g})"
+        if max_q is not None:
+            title += f", max_q={max_q}"
+        ax1.set_title(title)
+        ax1.legend()
+        ax1.tick_params(axis="x", labelbottom=False)
+        ax2.axhline(0.0, lw=1)
+        ax2.plot(q, residual, "o", ms=3)
+        ax2.set_xlabel("q")
+        ax2.set_ylabel("Residual")
+        plt.tight_layout()
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
+        plt.close(fig)
+        buf.seek(0)
+        plot_b64 = base64.b64encode(buf.read()).decode("utf-8")
+        plot_html = f'<img src="data:image/png;base64,{plot_b64}" style="width:{plot_width}px; max-width:100%;">'
+
+        if not HAS_PY3DMOL:
+            _warn_missing_py3dmol()
+            viewer_html = "<div style='padding:20px;border:1px solid #ddd;border-radius:6px;'>py3Dmol is not available.</div>"
+        else:
+            view = py3Dmol.view(width=structure_width, height=structure_height)
+            structure_data, fmt = _read_structure_for_viewer(pdb_name)
+            _add_model_for_viewer(view, structure_data, fmt)
+            _style_structure_model(
+                view,
+                0,
+                structure_data,
+                fmt,
+                color_mode=color_mode,
+                representation="cartoon",
+                opacity=0.9,
+            )
+            _zoom_for_viewer(view)
+            silent_out = io.StringIO()
+            silent_err = io.StringIO()
+            with contextlib.redirect_stdout(silent_out), contextlib.redirect_stderr(silent_err):
+                viewer_html = view._make_html()
+
+        html = f"""
+        <div style="display:flex; flex-wrap:wrap; gap:20px; align-items:flex-start; margin-top:10px; margin-bottom:10px;">
+            <div style="flex:0 0 auto;">
+                <div style="font-weight:600; margin-bottom:8px;">Structure</div>
+                {viewer_html}
+            </div>
+            <div style="flex:0 0 auto;">
+                <div style="font-weight:600; margin-bottom:8px;">Initial FoXS fit</div>
+                {plot_html}
+            </div>
+        </div>
+        """
+        display(HTML(html))
+
+        return {"chi2": chi2, "stdout": stdout, "stderr": stderr, "fit_file": fit_file, "view_html": viewer_html}
+
+    finally:
+        if temp_pdb_to_clean is not None:
+            try:
+                os.remove(temp_pdb_to_clean)
+            except OSError:
+                pass
+
+
+def show_prediction_record_and_foxs_side_by_side(
+    prediction,
+    saxs_name=None,
+    foxs_cmd="pyfoxs",
+    max_q=None,
+    fitdata_dir: str | Path | None = None,
+    structure_width=480,
+    structure_height=420,
+    plot_width=520,
+    color_mode="chain",
+):
+    """Display a prediction plus its SAXS fit, with the new colour modes."""
+    rec = _normalise_prediction_record(prediction, fitdata_dir=fitdata_dir)
+
+    if rec.get("type") != "mixture" and len(rec.get("pdb_paths", [])) <= 1:
+        pdb = rec.get("pdb_path") or rec.get("pdb_paths", [None])[0]
+        if rec.get("fit_file") is None:
+            if saxs_name is None:
+                raise ValueError("saxs_name is required to rerun FoXS for a single-PDB prediction.")
+            return show_structure_and_foxs_side_by_side(
+                pdb,
+                saxs_name,
+                foxs_cmd=foxs_cmd,
+                max_q=max_q,
+                structure_width=structure_width,
+                structure_height=structure_height,
+                plot_width=plot_width,
+                color_mode=color_mode,
+            )
+
+    pdbs = [Path(p) for p in rec.get("pdb_paths", [])]
+    if not pdbs:
+        raise ValueError("Prediction record contains no PDB paths.")
+
+    fit_file = rec.get("fit_file")
+    if fit_file is None:
+        raise ValueError(
+            "No stored mixture fit curve found for this prediction. "
+            "Use collect_good_prediction_files(..., return_records=True) so the "
+            "record includes fit_file, or pass fitdata_dir to recover it."
+        )
+
+    if not HAS_PY3DMOL:
+        _warn_missing_py3dmol()
+        viewer_html = "<div style='padding:20px;border:1px solid #ddd;border-radius:6px;'>py3Dmol is not available.</div>"
+    else:
+        n = len(pdbs)
+        ncols = min(3, max(1, n))
+        nrows = (n + ncols - 1) // ncols
+        view = py3Dmol.view(
+            viewergrid=(nrows, ncols),
+            width=ncols * structure_width,
+            height=nrows * structure_height,
+            linked=False,
+        )
+        weights = rec.get("weights")
+
+        for k, pdb in enumerate(pdbs):
+            r = k // ncols
+            c = k % ncols
+            viewer = (r, c)
+            structure_data, fmt = _read_structure_for_viewer(pdb)
+            _add_model_for_viewer(view, structure_data, fmt, viewer=viewer)
+            _style_structure_model(
+                view,
+                0,
+                structure_data,
+                fmt,
+                viewer=viewer,
+                color_mode=color_mode,
+                representation="cartoon",
+                opacity=0.9,
+                model_color=_VIS_PALETTE[k % len(_VIS_PALETTE)],
+            )
+            label = Path(pdb).name
+            if weights is not None and k < len(weights):
+                label += f"\nw={float(weights[k]):.3g}"
+            _add_label_for_viewer(
+                view,
+                label,
+                {"fontSize": 10, "backgroundColor": "white", "backgroundOpacity": 0.7, "fontColor": "black", "borderThickness": 0, "inFront": True},
+                viewer=viewer,
+            )
+            _zoom_for_viewer(view, viewer=viewer)
+
+        silent_out = io.StringIO()
+        silent_err = io.StringIO()
+        with contextlib.redirect_stdout(silent_out), contextlib.redirect_stderr(silent_err):
+            viewer_html = view._make_html()
+
+    curve = load_foxs_fit_curve(fit_file, max_q=max_q)
+    fig = plt.figure(figsize=(6.0, 6.0))
+    gs = fig.add_gridspec(2, 1, height_ratios=[3, 1], hspace=0.08)
+    ax1 = fig.add_subplot(gs[0])
+    ax2 = fig.add_subplot(gs[1], sharex=ax1)
+    ax1.plot(curve["q"], curve["i_exp"], "o", ms=4, label="Experimental")
+    ax1.plot(curve["q"], curve["i_fit"], "-", lw=2, label="Approx. MultiFoXS fit")
+    ax1.set_yscale("log")
+    ax1.set_ylabel("Intensity")
+    title = f"Approx. MultiFoXS fit: {rec.get('label', '')}"
+    if rec.get("chi2") is not None:
+        title += f"  (chi² = {float(rec['chi2']):.4g})"
+    ax1.set_title(title)
+    ax1.legend()
+    ax1.tick_params(axis="x", labelbottom=False)
+    ax2.axhline(0.0, lw=1)
+    ax2.plot(curve["q"], curve["residual"], "o", ms=3)
+    ax2.set_xlabel("q")
+    ax2.set_ylabel("Residual")
+    plt.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    plot_b64 = base64.b64encode(buf.read()).decode("utf-8")
+    plot_html = f'<img src="data:image/png;base64,{plot_b64}" style="width:{plot_width}px; max-width:100%;">'
+
+    html = f"""
+    <div style="display:flex; flex-wrap:wrap; gap:20px; align-items:flex-start; margin-top:10px; margin-bottom:10px;">
+        <div style="flex:0 0 auto;">
+            <div style="font-weight:600; margin-bottom:8px;">Mixture component structures</div>
+            {viewer_html}
+        </div>
+        <div style="flex:0 0 auto;">
+            <div style="font-weight:600; margin-bottom:8px;">Approx. MultiFoXS fit</div>
+            {plot_html}
+        </div>
+    </div>
+    """
+    display(HTML(html))

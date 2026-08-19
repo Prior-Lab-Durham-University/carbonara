@@ -776,21 +776,24 @@ bool ktlMolecule::checkCalphas(){
 
 bool ktlMolecule::checkCalphas(int &secNo){
   int sec = secNo-1;
-  int first = chainList[sec].first;
-  int last = chainList[sec].second;
+  std::vector<std::vector<point> >::const_iterator firstc =coords.begin()+chainList[sec].first;
+  std::vector<std::vector<point> >::const_iterator secondc =coords.begin()+chainList[sec].second+1;
+  std::vector<std::vector<point> > coordsSec(firstc,secondc);
   bool violated=false;
-  for(int i=first;i<=last;i++){
-    for(int j=0;j<coords[i].size();j++){
+  for(int i=0;i<coordsSec.size();i++){
+    //std::cout<<coordsSec[i].size()<<"\n";
+    for(int j=0;j<coordsSec[i].size();j++){
       double dist =0.0;
-      if((j==coords[i].size()-1) && (i<last)){
-	dist = coords[i][j].eDist(coords[i+1][0]);
-      }else if((j==coords[i].size()-1) && (i==last)){
+      if((j==coordsSec[i].size()-1) && (i<(coordsSec.size()-1))){
+	dist = coordsSec[i][j].eDist(coordsSec[i+1][0]);
+      }else if((j==coordsSec[i].size()-1) && (i==coordsSec.size()-1)){
 	dist = 3.7;
       }
       else{
-	dist = coords[i][j].eDist(coords[i][j+1]);
+	dist = coordsSec[i][j].eDist(coordsSec[i][j+1]);
       }
       if((dist>4.6)|| (dist<2.6)){
+	//std::cout<<i<<" "<<j<<" "<<dist<<"\n";
 	violated =true;
       }
     }
@@ -800,26 +803,28 @@ bool ktlMolecule::checkCalphas(int &secNo){
 
 bool ktlMolecule::checkCalphas(int &secNo,ktlMolecule &ktl){
   int sec = secNo-1;
-  // getCoordinates() is zero-copy, but point::eDist takes a non-const reference
-  // in this codebase.  We only read coordsOld here.
-  std::vector<std::vector<point> >& coordsOld =
-      const_cast<std::vector<std::vector<point> >&>(ktl.getCoordinates());
-  int first = chainList[sec].first;
-  int last = chainList[sec].second;
+  std::vector<std::vector<point> > coordsOld = ktl.getCoordinates();
+  std::vector<std::vector<point> >::const_iterator firstc =coords.begin()+chainList[sec].first;
+  std::vector<std::vector<point> >::const_iterator secondc =coords.begin()+chainList[sec].second+1;
+  std::vector<std::vector<point> >::const_iterator firstcOld =coordsOld.begin()+chainList[sec].first;
+  std::vector<std::vector<point> >::const_iterator secondcOld =coordsOld.begin()+chainList[sec].second+1;
+  std::vector<std::vector<point> > coordsSec(firstc,secondc);
+  std::vector<std::vector<point> > coordsSecOld(firstcOld,secondcOld);
   bool violated=false;
-  for(int i=first;i<=last;i++){
-    for(int j=0;j<coords[i].size();j++){
+  for(int i=0;i<coordsSec.size();i++){
+    //std::cout<<coordsSec[i].size()<<"\n";
+    for(int j=0;j<coordsSec[i].size();j++){
       double dist =0.0;double distOld=0.0;
-      if((j==coords[i].size()-1) && (i<last)){
-	dist = coords[i][j].eDist(coords[i+1][0]);
-	distOld = coordsOld[i][j].eDist(coordsOld[i+1][0]);
-      }else if((j==coords[i].size()-1) && (i==last)){
+      if((j==coordsSec[i].size()-1) && (i<(coordsSec.size()-1))){
+	dist = coordsSec[i][j].eDist(coordsSec[i+1][0]);
+	distOld = coordsSecOld[i][j].eDist(coordsSecOld[i+1][0]);
+      }else if((j==coordsSec[i].size()-1) && (i==coordsSec.size()-1)){
 	dist = 3.7;
 	distOld = 3.7;
       }
       else{
-	dist = coords[i][j].eDist(coords[i][j+1]);
-	distOld = coordsOld[i][j].eDist(coordsOld[i][j+1]);
+	dist = coordsSec[i][j].eDist(coordsSec[i][j+1]);
+	distOld = coordsSecOld[i][j].eDist(coordsSecOld[i][j+1]);
       }
       if(std::abs(dist-distOld)>0.9){
 	violated =true;
