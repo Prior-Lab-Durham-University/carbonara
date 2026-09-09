@@ -2,17 +2,47 @@
 
 import argparse
 import os
+# Force PDBFixer/OpenMM setup-time repair onto the CPU by default.
+# Some HPC desktop sessions expose a broken OpenCL platform, which can segfault
+# before Python can raise a useful exception. Users can override this externally.
+os.environ.setdefault("OPENMM_DEFAULT_PLATFORM", "CPU")
 import shutil
 import sys
 import pickle
 import shlex
+import json
 import subprocess
+import re
 from pathlib import Path
 from string import ascii_uppercase
 from typing import Optional, List
 
 import CarbonaraDataTools as cdt
 import numpy as np
+
+
+def _openmm_cpu_platform_or_none():
+    """Return the OpenMM CPU platform if available, otherwise None."""
+    try:
+        from openmm import Platform
+        return Platform.getPlatformByName("CPU")
+    except Exception:
+        return None
+
+
+def _pdbfixer_with_safe_platform(PDBFixerClass, filename):
+    """Construct PDBFixer while explicitly preferring CPU over OpenCL/CUDA.
+
+    PDBFixer versions that do not accept a platform keyword fall back to the
+    normal constructor, but OPENMM_DEFAULT_PLATFORM is still set above.
+    """
+    cpu_platform = _openmm_cpu_platform_or_none()
+    if cpu_platform is not None:
+        try:
+            return PDBFixerClass(filename=filename, platform=cpu_platform)
+        except TypeError:
+            pass
+    return PDBFixerClass(filename=filename)
 
 
 def _is_cif_path(path: str) -> bool:
@@ -118,6 +148,390 @@ def preflight_mmcif_atom_site_table(cif_path: str) -> None:
             f"Malformed CIF: no ATOM/HETATM rows were found in the _atom_site loop of {cif_path}."
         )
 
+
+
+def _is_pdb_path(path: str) -> bool:
+    suffixes = [s.lower() for s in Path(str(path)).suffixes]
+    return ".pdb" in suffixes or ".ent" in suffixes
+
+
+def _looks_like_mmcif_text(path: str, max_lines: int = 80) -> bool:
+    """Conservative content sniff for a CIF/ModelCIF file saved with the wrong extension."""
+    try:
+        with _open_text_maybe_gz(path) as fh:
+            seen_nonempty = 0
+            for raw in fh:
+                line = raw.strip()
+                if not line:
+                    continue
+                seen_nonempty += 1
+                low = line.lower()
+                if low.startswith("data_"):
+                    return True
+                if low.startswith("_entry.") or low.startswith("_atom_site.") or low.startswith("_audit_conform."):
+                    return True
+                if low.startswith("loop_"):
+                    # A PDB file should not have mmCIF loop_ syntax near the top.
+                    return True
+                if low.startswith(("header", "atom", "hetatm", "model", "remark", "title", "compnd", "source", "seqres")):
+                    return False
+                if seen_nonempty >= max_lines:
+                    break
+    except OSError:
+        return False
+    return False
+
+
+def preflight_structure_extension_matches_content(structure_path: str) -> None:
+    """Fail early if an mmCIF/ModelCIF text file has been named .pdb."""
+    if _is_pdb_path(structure_path) and _looks_like_mmcif_text(structure_path):
+        raise ValueError(
+            "Structure file appears to be mmCIF/ModelCIF text but has a PDB extension: "
+            f"{structure_path}. Carbonara chooses the structure parser from the filename "
+            "extension; parsing mmCIF text as fixed-width PDB can produce cryptic MDTraj "
+            "errors. Rename the file to .cif or .mmcif and rerun."
+        )
+
+
+def _safe_int_residue_id(value):
+    """Best-effort conversion of a PDBFixer/OpenMM residue id to an integer resSeq."""
+    if value is None:
+        return None
+    text_value = str(value).strip()
+    match = re.match(r"^-?\d+", text_value)
+    if not match:
+        return None
+    try:
+        return int(match.group(0))
+    except ValueError:
+        return None
+
+
+def _filter_missing_residue_entries(fixer, entries, max_gap: int, internal_only: bool = True):
+    """Filter PDBFixer missingResidues entries to internal, reasonably sized gaps."""
+    chains = list(fixer.topology.chains())
+    kept = {}
+    skipped = []
+    for key, names in list(entries.items()):
+        try:
+            chain_index, residue_index = int(key[0]), int(key[1])
+        except Exception:
+            skipped.append({"key": repr(key), "n_residues": len(names), "reason": "unrecognised_key"})
+            continue
+
+        residues = list(chains[chain_index].residues()) if 0 <= chain_index < len(chains) else []
+        n_residues_in_chain = len(residues)
+        names = [str(name).upper() for name in names]
+        reason = None
+        if internal_only and (residue_index <= 0 or residue_index >= n_residues_in_chain):
+            reason = "terminal_gap"
+        elif len(names) == 0:
+            reason = "empty_gap"
+        elif max_gap is not None and max_gap > 0 and len(names) > max_gap:
+            reason = f"gap_longer_than_{max_gap}"
+
+        if reason is not None:
+            skipped.append({
+                "chain_index": chain_index,
+                "insert_before_residue_index": residue_index,
+                "n_residues": len(names),
+                "reason": reason,
+            })
+            continue
+        kept[(chain_index, residue_index)] = names
+    return kept, skipped
+
+
+def _infer_missing_residues_from_number_gaps(fixer, residue_name: str = "GLY", max_gap: int = 80):
+    """Infer internal residue gaps from adjacent residue ids in the loaded topology."""
+    residue_name = residue_name.upper()
+    inferred = {}
+    gaps = []
+    skipped = []
+    for chain_index, chain in enumerate(fixer.topology.chains()):
+        residues = list(chain.residues())
+        chain_id = getattr(chain, "id", str(chain_index))
+        for i in range(len(residues) - 1):
+            left = residues[i]
+            right = residues[i + 1]
+            left_id = _safe_int_residue_id(getattr(left, "id", None))
+            right_id = _safe_int_residue_id(getattr(right, "id", None))
+            if left_id is None or right_id is None:
+                continue
+            missing_count = right_id - left_id - 1
+            if missing_count <= 0:
+                continue
+            gap_info = {
+                "source": "residue_number_gap",
+                "chain_index": chain_index,
+                "chain_id": chain_id,
+                "left_residue_id": left_id,
+                "right_residue_id": right_id,
+                "insert_before_residue_index": i + 1,
+                "n_residues": missing_count,
+                "residue_name": residue_name,
+            }
+            if max_gap is not None and max_gap > 0 and missing_count > max_gap:
+                gap_info["reason"] = f"gap_longer_than_{max_gap}"
+                skipped.append(gap_info)
+                continue
+            key = (chain_index, i + 1)
+            # Do not overwrite a SEQRES-derived entry if PDBFixer already has one.
+            inferred.setdefault(key, [residue_name] * missing_count)
+            gaps.append(gap_info)
+    return inferred, gaps, skipped
+
+
+def pdbfixer_prepare_structure_before_carbonara(
+    structure_path: str,
+    refine_dir: str,
+    enabled: bool = True,
+    residue_name: str = "GLY",
+    max_gap: int = 80,
+    internal_only: bool = True,
+) -> str:
+    """
+    Use PDBFixer before Carbonara reads the structure to build internal missing-residue gaps.
+
+    This deliberately writes a repaired PDB and then lets the ordinary Carbonara reader run on
+    that file.  We do not alter CarbonaraDataTools section numbering/selection logic after the
+    fact, because that is exactly where label drift can occur.
+    """
+    report_path = os.path.join(refine_dir, "missing_residue_pdbfixer_report.json")
+    report = {
+        "enabled": bool(enabled),
+        "input_structure": str(structure_path),
+        "output_structure": None,
+        "residue_name_for_number_gap_inference": str(residue_name).upper(),
+        "max_gap": int(max_gap),
+        "internal_only": bool(internal_only),
+        "status": "disabled" if not enabled else "not_run",
+        "openmm_default_platform": os.environ.get("OPENMM_DEFAULT_PLATFORM"),
+        "pdbfixer_missing_residues": [],
+        "number_gap_inferred_missing_residues": [],
+        "skipped_missing_residues": [],
+        "total_inserted_residues": 0,
+    }
+
+    def write_report():
+        with open(report_path, "w") as fh:
+            json.dump(report, fh, indent=2, sort_keys=True)
+
+    if not enabled:
+        write_report()
+        return structure_path
+
+    residue_name = str(residue_name).upper()
+    standard_residues = {
+        "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
+        "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
+    }
+    if residue_name not in standard_residues:
+        raise ValueError(
+            f"--fix_missing_residue_name must be a standard 3-letter amino-acid code; got {residue_name!r}"
+        )
+
+    try:
+        from pdbfixer import PDBFixer
+        from openmm.app import PDBFile
+    except Exception as exc:
+        report["status"] = "failed_import_pdbfixer"
+        report["error"] = str(exc)
+        write_report()
+        raise ImportError(
+            "--fix_missing_residues requires pdbfixer and openmm, which Carbonara already uses for CIF/PDB repair."
+        ) from exc
+
+    try:
+        fixer = _pdbfixer_with_safe_platform(PDBFixer, structure_path)
+
+        # Let PDBFixer use its normal SEQRES/mmCIF machinery where available.
+        try:
+            fixer.findMissingResidues()
+            pdbfixer_entries_raw = dict(fixer.missingResidues)
+        except Exception:
+            pdbfixer_entries_raw = {}
+
+        pdbfixer_entries, skipped_seqres = _filter_missing_residue_entries(
+            fixer, pdbfixer_entries_raw, max_gap=max_gap, internal_only=internal_only
+        )
+
+        for key, names in sorted(pdbfixer_entries.items()):
+            report["pdbfixer_missing_residues"].append({
+                "chain_index": int(key[0]),
+                "insert_before_residue_index": int(key[1]),
+                "n_residues": len(names),
+                "residue_names": list(names),
+            })
+
+        inferred_entries, inferred_gaps, skipped_inferred = _infer_missing_residues_from_number_gaps(
+            fixer, residue_name=residue_name, max_gap=max_gap
+        )
+        report["number_gap_inferred_missing_residues"] = inferred_gaps
+        report["skipped_missing_residues"].extend(skipped_seqres)
+        report["skipped_missing_residues"].extend(skipped_inferred)
+
+        # Merge entries.  Prefer PDBFixer's sequence-derived residue identities where present;
+        # otherwise use residue-number gaps filled with residue_name (default GLY).
+        final_entries = dict(pdbfixer_entries)
+        for key, names in inferred_entries.items():
+            final_entries.setdefault(key, names)
+
+        if not final_entries:
+            report["status"] = "no_internal_missing_residues_detected"
+            write_report()
+            return structure_path
+
+        fixer.missingResidues.clear()
+        fixer.missingResidues.update(final_entries)
+        report["total_inserted_residues"] = int(sum(len(v) for v in final_entries.values()))
+
+        fixer.findMissingAtoms()
+        try:
+            fixer.addMissingAtoms(seed=0)
+        except TypeError:
+            fixer.addMissingAtoms()
+
+        out_path = os.path.join(refine_dir, Path(str(structure_path)).stem + "_pdbfixer_missing_residues.pdb")
+        with open(out_path, "w") as handle:
+            try:
+                PDBFile.writeFile(fixer.topology, fixer.positions, handle, keepIds=True)
+            except TypeError:
+                PDBFile.writeFile(fixer.topology, fixer.positions, handle)
+
+        report["status"] = "fixed_missing_residues"
+        report["output_structure"] = out_path
+        write_report()
+        print(
+            "PDBFixer missing-residue repair: inserted "
+            f"{report['total_inserted_residues']} residue(s) across {len(final_entries)} internal gap(s); "
+            f"wrote {out_path}"
+        )
+        return out_path
+
+    except Exception as exc:
+        report["status"] = "failed"
+        report["error"] = repr(exc)
+        write_report()
+        raise
+
+
+
+def split_long_linkers_in_secondary_structure(
+    secondary_structure_chains,
+    enabled: bool = True,
+    max_linker_len: int = 25,
+    fake_helix_len: int = 3,
+    report_path: str = None,
+):
+    """
+    Break very long flexible ('-') secondary-structure runs into smaller linker
+    sections before the Carbonara fingerprint is written.
+
+    The sequence and coordinates are untouched.  We only replace a few residues
+    inside an over-long '-' run by a short artificial helical marker (default HHH).
+    This gives Carbonara several manageable flexible sections instead of one very
+    large linker, while keeping all section labels internally consistent because
+    the modification happens before write_fingerprint_file().
+
+    A linker of exactly max_linker_len residues is left unchanged; only runs with
+    length > max_linker_len are split.
+    """
+    max_linker_len = int(max_linker_len)
+    fake_helix_len = int(fake_helix_len)
+    if max_linker_len < 4:
+        raise ValueError("max_linker_len must be >= 4")
+    if fake_helix_len < 1:
+        raise ValueError("fake_helix_len must be >= 1")
+
+    report = {
+        "enabled": bool(enabled),
+        "max_linker_len": max_linker_len,
+        "fake_helix_len": fake_helix_len,
+        "modified_linker_count": 0,
+        "chains": [],
+    }
+
+    output = []
+    for chain_index, ss in enumerate(secondary_structure_chains):
+        arr = np.asarray(ss, dtype="<U1").copy()
+        chain_report = {"chain_index": int(chain_index), "modified_linkers": []}
+
+        if enabled and len(arr):
+            i = 0
+            while i < len(arr):
+                if arr[i] != '-':
+                    i += 1
+                    continue
+                start = i
+                while i < len(arr) and arr[i] == '-':
+                    i += 1
+                end = i
+                run_len = end - start
+                if run_len <= max_linker_len:
+                    continue
+
+                # Use the smallest number of H...H separators that leaves every
+                # remaining flexible chunk <= max_linker_len.  Because separators
+                # replace residues rather than insert residues, sequence/coordinate
+                # indexing is unchanged.
+                n_breaks = 1
+                while True:
+                    flexible_residues = run_len - n_breaks * fake_helix_len
+                    n_chunks = n_breaks + 1
+                    if flexible_residues >= n_chunks:
+                        largest_chunk = (flexible_residues + n_chunks - 1) // n_chunks
+                        if largest_chunk <= max_linker_len:
+                            break
+                    n_breaks += 1
+                    if n_breaks * fake_helix_len >= run_len:
+                        raise ValueError(
+                            f"Cannot split linker of length {run_len} with fake_helix_len={fake_helix_len}"
+                        )
+
+                base, remainder = divmod(flexible_residues, n_chunks)
+                chunk_sizes = [base + (1 if k < remainder else 0) for k in range(n_chunks)]
+
+                pos = start
+                separator_ranges = []
+                for k, chunk_len in enumerate(chunk_sizes):
+                    pos += chunk_len
+                    if k < n_breaks:
+                        sep_start = pos
+                        sep_end = pos + fake_helix_len
+                        arr[sep_start:sep_end] = 'H'
+                        separator_ranges.append([int(sep_start), int(sep_end)])
+                        pos = sep_end
+
+                chain_report["modified_linkers"].append({
+                    "start_index_0based": int(start),
+                    "end_index_exclusive_0based": int(end),
+                    "start_residue_1based": int(start + 1),
+                    "end_residue_1based": int(end),
+                    "original_length": int(run_len),
+                    "flexible_chunk_lengths": [int(x) for x in chunk_sizes],
+                    "separator_ranges_0based_halfopen": separator_ranges,
+                })
+                report["modified_linker_count"] += 1
+
+        output.append(arr)
+        report["chains"].append(chain_report)
+
+    if report_path is not None:
+        with open(report_path, "w") as fh:
+            json.dump(report, fh, indent=2, sort_keys=True)
+
+    if enabled:
+        if report["modified_linker_count"]:
+            print(
+                "Long-linker split: broke "
+                f"{report['modified_linker_count']} linker section(s) longer than {max_linker_len} residues "
+                f"using {fake_helix_len}-residue H separators."
+            )
+        else:
+            print(f"Long-linker split: no linker sections longer than {max_linker_len} residues found.")
+
+    return np.array(output, dtype=object), report
 
 def _snap_simplex_row(w: np.ndarray, snap: float) -> np.ndarray:
     """Snap weights to multiples of `snap` and renormalize to sum to 1."""
@@ -1221,6 +1635,29 @@ def main():
             "This does not disable --disulfide_constraints_file or backmapping disulfide enforcement."
         ),
     )
+    parser.add_argument("--fix_missing_residues", "--fix-missing-residues", dest="fix_missing_residues",
+                    action="store_true", default=True,
+                    help=(
+                        "Use PDBFixer before Carbonara reads the structure to build internal missing-residue gaps "
+                        "as flexible linker seed residues (default: on)."
+                    ))
+    parser.add_argument("--no_fix_missing_residues", "--no-fix-missing-residues", dest="fix_missing_residues",
+                    action="store_false",
+                    help="Disable setup-time PDBFixer repair of internal missing-residue gaps")
+    parser.add_argument("--fix_missing_residue_name", default="GLY",
+                    help="3-letter residue name used for residue-number gaps when no SEQRES identity is available (default: GLY)")
+    parser.add_argument("--fix_missing_residue_max_gap", type=int, default=80,
+                    help="Do not auto-build any individual missing-residue gap longer than this many residues (default: 80)")
+    parser.add_argument("--split_long_linkers", "--split-long-linkers", dest="split_long_linkers",
+                    action="store_true", default=True,
+                    help="Break flexible linker sections longer than --max_linker_len before writing the fingerprint (default: on)")
+    parser.add_argument("--no_split_long_linkers", "--no-split-long-linkers", dest="split_long_linkers",
+                    action="store_false",
+                    help="Disable automatic splitting of very long flexible linker sections")
+    parser.add_argument("--max_linker_len", "--max-linker-len", type=int, default=25,
+                    help="Split flexible '-' sections only when their length is greater than this value (default: 25)")
+    parser.add_argument("--long_linker_fake_helix_len", "--long-linker-fake-helix-len", type=int, default=3,
+                    help="Length of each artificial H separator used to break a long linker (default: 3)")
     parser.add_argument("--foxs_cmd_default", default="pyfoxs",
                     help="Default FoXS command for the generated RunMe script; user can still override as first shell arg")
     parser.add_argument("--python_exe", default=None,
@@ -1255,6 +1692,17 @@ def main():
         if not (0.0 <= args.guinier_trim_max_fraction <= 1.0):
             parser.error("--guinier_trim_max_fraction must be between 0 and 1")
 
+    if args.fix_missing_residues:
+        if args.fix_missing_residue_max_gap < 1:
+            parser.error("--fix_missing_residue_max_gap must be >= 1")
+        args.fix_missing_residue_name = str(args.fix_missing_residue_name).upper()
+
+    if args.split_long_linkers:
+        if args.max_linker_len < 4:
+            parser.error("--max_linker_len must be >= 4")
+        if args.long_linker_fake_helix_len < 1:
+            parser.error("--long_linker_fake_helix_len must be >= 1")
+
     print("DIR: "+str(args.dir))
     print(os.getcwd())
     
@@ -1287,13 +1735,24 @@ def main():
         refine_dir = cdt.setup_refinement_dir(args.name, fit_master_dir)
         print(f"Created directory structure in: {refine_dir}")
 
-        # Process PDB/CIF and extract structure information
-        # Catch malformed mmCIF _atom_site rows before PDBFixer/OpenMM produces
-        # a cryptic IndexError.  Valid PDB/CIF inputs pass silently.
+        # Process PDB/CIF and extract structure information.
+        # First perform any repairs that must happen before Carbonara sees the structure.
+        # In particular, build internal missing-residue gaps with PDBFixer as a physical
+        # temporary PDB, rather than patching CarbonaraDataTools section labels afterwards.
+        preflight_structure_extension_matches_content(args.pdb)
         preflight_mmcif_atom_site_table(args.pdb)
 
+        pdb_for_carbonara = pdbfixer_prepare_structure_before_carbonara(
+            args.pdb,
+            refine_dir,
+            enabled=args.fix_missing_residues,
+            residue_name=args.fix_missing_residue_name,
+            max_gap=args.fix_missing_residue_max_gap,
+            internal_only=True,
+        )
+
         coords_chains, sequence_chains, secondary_structure_chains, missing_residues_chains = (
-            cdt.pull_structure_from_pdb(args.pdb)
+            cdt.pull_structure_from_pdb(pdb_for_carbonara)
         )
 
         print("The number of chains is ", len(coords_chains))
@@ -1318,6 +1777,17 @@ def main():
         coords_chains = np.array(new_coords_chains, dtype=object)
         sequence_chains = np.array(new_sequence_chains, dtype=object)
         secondary_structure_chains = np.array(new_secondary_structure_chains, dtype=object)
+
+        # Break very long flexible regions before any Carbonara section numbering is
+        # created.  This deliberately modifies only the secondary-structure labels;
+        # sequence and coordinates retain exactly the same length/indexing.
+        secondary_structure_chains, _long_linker_report = split_long_linkers_in_secondary_structure(
+            secondary_structure_chains,
+            enabled=args.split_long_linkers,
+            max_linker_len=args.max_linker_len,
+            fake_helix_len=args.long_linker_fake_helix_len,
+            report_path=os.path.join(refine_dir, "long_linker_break_report.json"),
+        )
 
         # collapse coordinates file into one chain
         coords_full = None
@@ -1372,7 +1842,7 @@ def main():
             # regions when selecting flexible linkers.  The flag below disables only
             # this setup-time linker filter; it does not affect disulfide constraints
             # passed to the backmapper/watcher.
-            linker_check_pdb = None if args.no_disulfide_linker_check else args.pdb
+            linker_check_pdb = None if args.no_disulfide_linker_check else pdb_for_carbonara
             if args.no_disulfide_linker_check:
                 print(
                     "WARNING: setup-time disulfide linker check disabled; "
