@@ -417,6 +417,448 @@ def pdbfixer_prepare_structure_before_carbonara(
 
 
 
+def _pdb_atom_line(atom):
+    """Write a minimal standard fixed-width PDB ATOM record."""
+    return (
+        f"ATOM  {atom['serial']:5d} {atom['name']:<4s}{atom.get('altloc',' '):1s}"
+        f"{atom['resname']:>3s} {atom['chain'][:1]:1s}"
+        f"{int(atom['resseq']):4d}{atom.get('icode',' '):1s}   "
+        f"{float(atom['x']):8.3f}{float(atom['y']):8.3f}{float(atom['z']):8.3f}"
+        f"{float(atom.get('occupancy',1.0)):6.2f}{float(atom.get('bfactor',50.0)):6.2f}          "
+        f"{atom.get('element', atom['name'].strip()[0]).strip()[:2]:>2s}\n"
+    )
+
+
+def _parse_pdb_atom_record_for_bridge(line: str):
+    if not line.startswith(('ATOM  ', 'HETATM')):
+        return None
+    try:
+        resseq = int(line[22:26])
+        x = float(line[30:38]); y = float(line[38:46]); z = float(line[46:54])
+    except Exception:
+        return None
+    name = line[12:16].strip()
+    element = line[76:78].strip() if len(line) >= 78 else ''
+    if not element:
+        element = ''.join(ch for ch in name if ch.isalpha())[:1] or 'C'
+    return {
+        'record': line[0:6].strip(),
+        'name': name,
+        'altloc': line[16:17] if len(line) > 16 else ' ',
+        'resname': line[17:20].strip(),
+        'chain': (line[21:22] if len(line) > 21 else ' ') or ' ',
+        'resseq': resseq,
+        'icode': line[26:27] if len(line) > 26 else ' ',
+        'x': x,
+        'y': y,
+        'z': z,
+        'occupancy': float(line[54:60]) if len(line) >= 60 and line[54:60].strip() else 1.0,
+        'bfactor': float(line[60:66]) if len(line) >= 66 and line[60:66].strip() else 50.0,
+        'element': element,
+    }
+
+
+def _bridge_unit_perpendicular(direction):
+    import numpy as _np
+    direction = _np.asarray(direction, dtype=float)
+    norm = float(_np.linalg.norm(direction))
+    if norm <= 1e-12:
+        direction = _np.array([1.0, 0.0, 0.0])
+    else:
+        direction = direction / norm
+    axis = _np.array([0.0, 0.0, 1.0])
+    if abs(float(_np.dot(direction, axis))) > 0.9:
+        axis = _np.array([0.0, 1.0, 0.0])
+    perp = _np.cross(direction, axis)
+    pnorm = float(_np.linalg.norm(perp))
+    return perp / pnorm if pnorm > 1e-12 else _np.array([0.0, 1.0, 0.0])
+
+
+def _make_ca_arc_points(p0, p1, n_missing: int, ca_spacing: float = 3.8):
+    """Return missing CA positions on a smooth circular bridge.
+
+    Adjacent CA positions, including the two observed endpoint CAs, are placed at
+    approximately ``ca_spacing`` (exactly so to floating-point precision whenever
+    the endpoint geometry permits).  This is much safer for Carbonara than asking
+    PDBFixer to choose a compact loop geometry and, unlike a straight interpolation,
+    it can accommodate a contour length much larger than the endpoint separation.
+    """
+    import numpy as _np
+
+    p0 = _np.asarray(p0, dtype=float)
+    p1 = _np.asarray(p1, dtype=float)
+    n_missing = int(n_missing)
+    if n_missing <= 0:
+        return []
+
+    n_segments = n_missing + 1
+    spacing = float(ca_spacing)
+    if spacing <= 0:
+        raise ValueError("ca_spacing must be > 0")
+
+    chord_vec = p1 - p0
+    chord = float(_np.linalg.norm(chord_vec))
+    max_reach = n_segments * spacing
+    if chord > max_reach + 1e-5:
+        raise ValueError(
+            f"Cannot bridge {n_missing} missing residues: endpoint CA distance "
+            f"{chord:.3f} A exceeds the available {n_segments} x {spacing:.3f} A "
+            f"CA contour ({max_reach:.3f} A)."
+        )
+
+    # Nearly fully extended: avoid a numerically huge circle radius.
+    if chord >= max_reach - 1e-6:
+        pts = _np.linspace(p0, p1, n_segments + 1)
+        return [pts[i].copy() for i in range(1, n_missing + 1)]
+
+    if chord <= 1e-8:
+        # Degenerate case: build a closed regular polygon in an arbitrary plane.
+        u = _np.array([1.0, 0.0, 0.0])
+        v = _np.array([0.0, 1.0, 0.0])
+        delta = 2.0 * _np.pi / n_segments
+        radius = spacing / (2.0 * _np.sin(delta / 2.0))
+        centre = p0 + radius * v
+        r0 = p0 - centre
+        normal = _np.array([0.0, 0.0, 1.0])
+    else:
+        u = chord_vec / chord
+        v = _bridge_unit_perpendicular(u)
+
+        # For N equal circular-arc chords of length s, solve
+        #   D/s = sin(N*delta/2) / sin(delta/2)
+        # on 0 < delta < 2*pi/N.  This branch is monotone from N to 0.
+        target = chord / spacing
+        lo = 1e-10
+        hi = 2.0 * _np.pi / n_segments - 1e-10
+
+        def _ratio(delta):
+            return _np.sin(n_segments * delta / 2.0) / _np.sin(delta / 2.0)
+
+        for _ in range(80):
+            mid = 0.5 * (lo + hi)
+            if _ratio(mid) > target:
+                lo = mid
+            else:
+                hi = mid
+        delta = 0.5 * (lo + hi)
+        radius = spacing / (2.0 * _np.sin(delta / 2.0))
+        total_angle = n_segments * delta
+        midpoint = 0.5 * (p0 + p1)
+        centre = midpoint + radius * _np.cos(total_angle / 2.0) * v
+        r0 = p0 - centre
+        normal = _np.cross(u, v)
+        nrm = float(_np.linalg.norm(normal))
+        if nrm <= 1e-12:
+            normal = _np.array([0.0, 0.0, 1.0])
+        else:
+            normal = normal / nrm
+
+    def _rotate(vec, angle):
+        return (
+            vec * _np.cos(angle)
+            + _np.cross(normal, vec) * _np.sin(angle)
+            + normal * float(_np.dot(normal, vec)) * (1.0 - _np.cos(angle))
+        )
+
+    # Select the rotation direction that lands on p1.
+    total = n_segments * delta
+    plus_end = centre + _rotate(r0, total)
+    minus_end = centre + _rotate(r0, -total)
+    sign = 1.0 if _np.linalg.norm(plus_end - p1) <= _np.linalg.norm(minus_end - p1) else -1.0
+
+    pts = [centre + _rotate(r0, sign * k * delta) for k in range(n_segments + 1)]
+    pts[0] = p0.copy()
+    pts[-1] = p1.copy()
+    return [_np.asarray(pts[i], dtype=float).copy() for i in range(1, n_missing + 1)]
+
+def _make_fake_gly_backbone(ca_points, chain, resseqs, serial_start, bfactor=80.0):
+    """Create minimal N/CA/C/O atoms for fake GLY residues around CA arc points."""
+    import numpy as _np
+    atoms = []
+    if not ca_points:
+        return atoms, serial_start
+    pts = [_np.asarray(p, dtype=float) for p in ca_points]
+    perp = _bridge_unit_perpendicular((pts[-1] - pts[0]) if len(pts) > 1 else _np.array([1.0, 0.0, 0.0]))
+    serial = int(serial_start)
+    for i, ca in enumerate(pts):
+        if len(pts) == 1:
+            tangent = _np.array([1.0, 0.0, 0.0])
+        elif i == 0:
+            tangent = pts[1] - pts[0]
+        elif i == len(pts) - 1:
+            tangent = pts[-1] - pts[-2]
+        else:
+            tangent = pts[i + 1] - pts[i - 1]
+        tnorm = float(_np.linalg.norm(tangent))
+        tangent = tangent / tnorm if tnorm > 1e-12 else _np.array([1.0, 0.0, 0.0])
+        coords = {
+            'N':  ca - 1.30 * tangent,
+            'CA': ca,
+            'C':  ca + 1.30 * tangent,
+            'O':  ca + 1.30 * tangent + 1.00 * perp,
+        }
+        for name in ('N', 'CA', 'C', 'O'):
+            xyz = coords[name]
+            atoms.append({
+                'serial': serial,
+                'name': name,
+                'altloc': ' ',
+                'resname': 'GLY',
+                'chain': chain,
+                'resseq': int(resseqs[i]),
+                'icode': ' ',
+                'x': float(xyz[0]), 'y': float(xyz[1]), 'z': float(xyz[2]),
+                'occupancy': 1.0,
+                'bfactor': float(bfactor),
+                'element': 'N' if name == 'N' else ('O' if name == 'O' else 'C'),
+            })
+            serial += 1
+    return atoms, serial
+
+
+def bridge_missing_residue_gaps_to_pdb_before_carbonara(
+    structure_path: str,
+    refine_dir: str,
+    enabled: bool = True,
+    residue_name: str = 'GLY',
+    max_gap: int = 80,
+    ca_spacing: float = 3.8,
+) -> str:
+    """Create a run-local repaired PDB before Carbonara reads the structure.
+
+    The user's input file is *never* changed.  Every original PDB record is copied
+    verbatim to the run-local repaired file; only new minimal N/CA/C/O records for
+    genuinely absent internal residues are inserted.  This preserves SSBOND, HELIX,
+    SHEET, HETATM, CONECT, REMARK and other records from the original file.
+
+    Gap detection uses observed ATOM residues with CA atoms and therefore does not
+    mistake modified protein residues such as MSE for missing residues.
+    """
+    report_path = os.path.join(refine_dir, 'missing_residue_bridge_report.json')
+    report = {
+        'enabled': bool(enabled),
+        'method': 'pre_carbonara_equal_ca_spacing_bridge',
+        'input_structure': str(structure_path),
+        'output_structure': None,
+        'status': 'disabled' if not enabled else 'not_run',
+        'residue_name': str(residue_name).upper(),
+        'max_gap': int(max_gap),
+        'ca_spacing': float(ca_spacing),
+        'gaps': [],
+        'total_inserted_residues': 0,
+        'original_input_modified': False,
+    }
+
+    def write_report():
+        with open(report_path, 'w') as fh:
+            json.dump(report, fh, indent=2, sort_keys=True)
+
+    if not enabled:
+        write_report()
+        return structure_path
+
+    if str(residue_name).upper() != 'GLY':
+        print('WARNING: pre-Carbonara gap bridge currently writes GLY residues; ignoring --fix_missing_residue_name')
+
+    if not _is_pdb_path(structure_path):
+        report['status'] = 'not_pdb_no_bridge_applied'
+        write_report()
+        return structure_path
+
+    with open(structure_path, 'r', errors='replace') as fh:
+        original_lines = fh.readlines()
+
+    # Existing atom serials are retained exactly.  New fake atoms get fresh serials
+    # above the existing maximum, so CONECT/SSBOND/header records remain untouched.
+    max_serial = 0
+    for line in original_lines:
+        if line.startswith(('ATOM  ', 'HETATM')):
+            try:
+                max_serial = max(max_serial, int(line[6:11]))
+            except Exception:
+                pass
+    next_serial = max_serial + 1
+
+    # Build residue blocks from ATOM records in file order.  Do not filter on the
+    # 3-letter residue name: modified amino acids (e.g. MSE) are real observed
+    # residues and must not be mistaken for gaps.
+    residues = []
+    current = None
+    for line_index, line in enumerate(original_lines):
+        atom = _parse_pdb_atom_record_for_bridge(line)
+        if atom is None or atom['record'] != 'ATOM':
+            continue
+        key = (atom['chain'], int(atom['resseq']), atom['icode'])
+        if current is None or key != current['key']:
+            if current is not None:
+                residues.append(current)
+            current = {
+                'key': key,
+                'resname': atom['resname'],
+                'atoms': [],
+                'first_line_index': int(line_index),
+                'last_line_index': int(line_index),
+            }
+        current['atoms'].append(atom)
+        current['last_line_index'] = int(line_index)
+    if current is not None:
+        residues.append(current)
+
+    if not residues:
+        report['status'] = 'no_protein_atom_records_no_bridge_applied'
+        write_report()
+        return structure_path
+
+    def ca_of(residue):
+        ca_atoms = [a for a in residue['atoms'] if a['name'].strip().upper() == 'CA']
+        if not ca_atoms:
+            return None
+        # Prefer the highest-occupancy CA if alternate locations are present.
+        ca = max(ca_atoms, key=lambda a: float(a.get('occupancy', 0.0)))
+        return np.array([ca['x'], ca['y'], ca['z']], dtype=float)
+
+    insert_before = {}
+    inserted_total = 0
+    inserted_gap_count = 0
+
+    for left, right in zip(residues[:-1], residues[1:]):
+        left_chain, left_resseq, left_icode = left['key']
+        right_chain, right_resseq, right_icode = right['key']
+        if right_chain != left_chain:
+            continue
+
+        # Never bridge across an explicit TER record, even if chain IDs happen to
+        # be reused afterwards.
+        between = original_lines[left['last_line_index'] + 1:right['first_line_index']]
+        if any(line.startswith('TER') for line in between):
+            continue
+
+        missing_count = int(right_resseq) - int(left_resseq) - 1
+        if missing_count <= 0:
+            continue
+
+        gap_info = {
+            'chain': left_chain,
+            'left_resseq': int(left_resseq),
+            'right_resseq': int(right_resseq),
+            'n_missing': int(missing_count),
+        }
+        if max_gap is not None and int(max_gap) > 0 and missing_count > int(max_gap):
+            gap_info['status'] = f'skipped_gap_longer_than_{int(max_gap)}'
+            report['gaps'].append(gap_info)
+            continue
+
+        p0 = ca_of(left)
+        p1 = ca_of(right)
+        if p0 is None or p1 is None:
+            gap_info['status'] = 'skipped_missing_endpoint_CA'
+            report['gaps'].append(gap_info)
+            continue
+
+        try:
+            ca_points = _make_ca_arc_points(p0, p1, missing_count, ca_spacing=ca_spacing)
+        except ValueError as exc:
+            gap_info['status'] = 'skipped_geometry_impossible'
+            gap_info['error'] = str(exc)
+            report['gaps'].append(gap_info)
+            continue
+
+        fake_resseqs = list(range(int(left_resseq) + 1, int(right_resseq)))
+        fake_atoms, next_serial = _make_fake_gly_backbone(
+            ca_points, left_chain, fake_resseqs, next_serial, bfactor=80.0
+        )
+        fake_lines = [_pdb_atom_line(atom) for atom in fake_atoms]
+        insert_before.setdefault(right['first_line_index'], []).extend(fake_lines)
+
+        full_ca_path = [p0] + [np.asarray(p, dtype=float) for p in ca_points] + [p1]
+        ca_steps = [float(np.linalg.norm(b - a)) for a, b in zip(full_ca_path[:-1], full_ca_path[1:])]
+        gap_info.update({
+            'status': 'inserted',
+            'residue_numbers': fake_resseqs,
+            'endpoint_ca_distance': float(np.linalg.norm(p1 - p0)),
+            'ca_step_min': float(min(ca_steps)),
+            'ca_step_max': float(max(ca_steps)),
+            'insert_before_pdb_line_1based': int(right['first_line_index'] + 1),
+        })
+        report['gaps'].append(gap_info)
+        inserted_total += missing_count
+        inserted_gap_count += 1
+
+    if inserted_total <= 0:
+        report['status'] = 'no_internal_missing_residue_gaps_detected'
+        write_report()
+        return structure_path
+
+    out_path = os.path.join(
+        refine_dir,
+        Path(str(structure_path)).stem + '_precarbonara_missing_linkers.pdb'
+    )
+
+    # Preserve every original line verbatim and insert only the fake residue records.
+    with open(out_path, 'w', newline='') as fh:
+        for idx, line in enumerate(original_lines):
+            for added in insert_before.get(idx, []):
+                fh.write(added)
+            fh.write(line)
+
+    report['total_inserted_residues'] = int(inserted_total)
+    report['output_structure'] = out_path
+    report['status'] = 'fixed_missing_residues'
+    write_report()
+    print(
+        'Pre-Carbonara missing-linker bridge: inserted '
+        f'{inserted_total} residue(s) across {inserted_gap_count} internal gap(s); '
+        f'wrote {out_path}'
+    )
+    return out_path
+
+def prepare_structure_before_carbonara(
+    structure_path: str,
+    refine_dir: str,
+    enabled: bool = True,
+    residue_name: str = 'GLY',
+    max_gap: int = 80,
+    method: str = 'bridge',
+) -> str:
+    """Select the pre-Carbonara missing-residue repair strategy."""
+    method = str(method).lower()
+    if not enabled:
+        return structure_path
+    if method == 'pdbfixer':
+        return pdbfixer_prepare_structure_before_carbonara(
+            structure_path,
+            refine_dir,
+            enabled=True,
+            residue_name=residue_name,
+            max_gap=max_gap,
+            internal_only=True,
+        )
+    if method == 'bridge':
+        # The explicit bridge writer is intentionally PDB-only.  For CIF/mmCIF,
+        # retain automatic repair by falling back to PDBFixer rather than silently
+        # returning an unrepaired structure.
+        if _is_pdb_path(structure_path):
+            return bridge_missing_residue_gaps_to_pdb_before_carbonara(
+                structure_path,
+                refine_dir,
+                enabled=True,
+                residue_name=residue_name,
+                max_gap=max_gap,
+            )
+        # CIF/mmCIF is checked with PDBFixer because the explicit bridge writer
+        # is PDB-only.  If no genuine internal missing residues are detected,
+        # PDBFixer returns the original CIF/mmCIF path unchanged and prints no
+        # misleading "bridge" message.
+        return pdbfixer_prepare_structure_before_carbonara(
+            structure_path,
+            refine_dir,
+            enabled=True,
+            residue_name=residue_name,
+            max_gap=max_gap,
+            internal_only=True,
+        )
+    raise ValueError(f"Unknown --fix_missing_residue_method {method!r}; expected 'bridge' or 'pdbfixer'")
+
 def split_long_linkers_in_secondary_structure(
     secondary_structure_chains,
     enabled: bool = True,
@@ -1638,16 +2080,20 @@ def main():
     parser.add_argument("--fix_missing_residues", "--fix-missing-residues", dest="fix_missing_residues",
                     action="store_true", default=True,
                     help=(
-                        "Use PDBFixer before Carbonara reads the structure to build internal missing-residue gaps "
-                        "as flexible linker seed residues (default: on)."
+                        "Repair internal missing-residue gaps before Carbonara reads the structure "
+                        "(default: on; Carbonara-friendly bridge method for PDB inputs)."
                     ))
     parser.add_argument("--no_fix_missing_residues", "--no-fix-missing-residues", dest="fix_missing_residues",
                     action="store_false",
-                    help="Disable setup-time PDBFixer repair of internal missing-residue gaps")
+                    help="Disable setup-time repair of internal missing-residue gaps")
     parser.add_argument("--fix_missing_residue_name", default="GLY",
                     help="3-letter residue name used for residue-number gaps when no SEQRES identity is available (default: GLY)")
     parser.add_argument("--fix_missing_residue_max_gap", type=int, default=80,
                     help="Do not auto-build any individual missing-residue gap longer than this many residues (default: 80)")
+    parser.add_argument("--fix_missing_residue_method", choices=["bridge", "pdbfixer"], default="bridge",
+                    help=("Missing-residue repair method. 'bridge' (default) writes a run-local, "
+                          "Carbonara-friendly GLY backbone bridge before any CDT reading; "
+                          "'pdbfixer' uses PDBFixer addMissingAtoms."))
     parser.add_argument("--split_long_linkers", "--split-long-linkers", dest="split_long_linkers",
                     action="store_true", default=True,
                     help="Break flexible linker sections longer than --max_linker_len before writing the fingerprint (default: on)")
@@ -1737,22 +2183,43 @@ def main():
 
         # Process PDB/CIF and extract structure information.
         # First perform any repairs that must happen before Carbonara sees the structure.
-        # In particular, build internal missing-residue gaps with PDBFixer as a physical
-        # temporary PDB, rather than patching CarbonaraDataTools section labels afterwards.
+        # In particular, build internal missing-residue gaps as a run-local physical
+        # structure before Carbonara reads it, rather than patching section labels afterwards.
         preflight_structure_extension_matches_content(args.pdb)
         preflight_mmcif_atom_site_table(args.pdb)
 
-        pdb_for_carbonara = pdbfixer_prepare_structure_before_carbonara(
+        pdb_for_carbonara = prepare_structure_before_carbonara(
             args.pdb,
             refine_dir,
             enabled=args.fix_missing_residues,
             residue_name=args.fix_missing_residue_name,
             max_gap=args.fix_missing_residue_max_gap,
-            internal_only=True,
+            method=args.fix_missing_residue_method,
         )
 
+        # From this point onward the repaired copy (when one was needed) is the
+        # canonical structure for the run.  The user's original input file is
+        # never renamed, moved, overwritten, or otherwise modified.
+        #
+        # Do NOT rely on assigning a module global to update a Jupyter variable:
+        # setup is commonly run as an imported module or subprocess, in which case
+        # its globals live in a different namespace.  Persist the canonical path
+        # beside fingerPrint1.dat so CarbonaraDataTools can recover it later even
+        # when a notebook still holds the original pdb_name.
+        canonical_structure_file = os.path.join(refine_dir, "carbonara_structure_path.txt")
+        canonical_structure_path = os.path.abspath(str(pdb_for_carbonara))
+        with open(canonical_structure_file, "w") as fh:
+            fh.write(canonical_structure_path + "\n")
+        print(f"Canonical Carbonara structure: {canonical_structure_path}")
+
+        # Retain the module-level assignment as a convenience for direct/%run use,
+        # but correctness no longer depends on it.
+        global pdb_name
+        pdb_name = canonical_structure_path
+        args.pdb = pdb_name
+
         coords_chains, sequence_chains, secondary_structure_chains, missing_residues_chains = (
-            cdt.pull_structure_from_pdb(pdb_for_carbonara)
+            cdt.pull_structure_from_pdb(pdb_name)
         )
 
         print("The number of chains is ", len(coords_chains))
@@ -1842,7 +2309,7 @@ def main():
             # regions when selecting flexible linkers.  The flag below disables only
             # this setup-time linker filter; it does not affect disulfide constraints
             # passed to the backmapper/watcher.
-            linker_check_pdb = None if args.no_disulfide_linker_check else pdb_for_carbonara
+            linker_check_pdb = None if args.no_disulfide_linker_check else pdb_name
             if args.no_disulfide_linker_check:
                 print(
                     "WARNING: setup-time disulfide linker check disabled; "

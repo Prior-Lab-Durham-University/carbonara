@@ -15,6 +15,9 @@ import numpy as np
 from scipy.spatial.distance import cdist
 
 import os
+# Prefer the CPU platform for any PDBFixer/OpenMM clean-up performed during
+# Carbonara input preparation. This avoids broken OpenCL drivers crashing setup.
+os.environ.setdefault("OPENMM_DEFAULT_PLATFORM", "CPU")
 import sys
 import subprocess
 import shutil
@@ -51,6 +54,26 @@ import json
 # Set Plotly to use the correct renderer for Colab
 
 from glob import glob
+
+
+def _carbonara_openmm_cpu_platform_or_none():
+    """Return the OpenMM CPU platform if available, otherwise None."""
+    try:
+        from openmm import Platform
+        return Platform.getPlatformByName("CPU")
+    except Exception:
+        return None
+
+
+def _carbonara_pdbfixer(filename):
+    """Construct PDBFixer while explicitly preferring CPU over OpenCL/CUDA."""
+    cpu_platform = _carbonara_openmm_cpu_platform_or_none()
+    if cpu_platform is not None:
+        try:
+            return PDBFixer(filename=filename, platform=cpu_platform)
+        except TypeError:
+            pass
+    return PDBFixer(filename=filename)
 
 
 def _numbered_indices_for_carbonara_inputs(directory, prefix):
@@ -135,7 +158,7 @@ def pdb_2_biobox(pdb_file):
         M.import_pdb(pdb_file)
     elif ext == ".cif":
         # Load with PDBFixer
-        fixer = PDBFixer(filename=pdb_file)
+        fixer = _carbonara_pdbfixer(pdb_file)
         fixer.findMissingResidues()
         fixer.findMissingAtoms()
         fixer.addMissingAtoms()
@@ -462,7 +485,7 @@ def pull_structure_from_pdb(file_path):
         traj = md.load(file_path)
     elif ext == ".cif":
         # Load with PDBFixer
-        fixer = PDBFixer(filename=file_path)
+        fixer = _carbonara_pdbfixer(file_path)
         fixer.findMissingResidues()
         fixer.findMissingAtoms()
         fixer.addMissingAtoms()
@@ -2305,12 +2328,75 @@ def export_segment_list(segment_set, filename):
 
     _replicate_numbered_file_from_1(filename, "varyingSectionSecondary")
 
+def _canonical_structure_for_fingerprint(pdb_fl, structure_file):
+    """Return the structure that was actually used to create a run fingerprint.
+
+    ``setup_carbonara_allAtom.py`` writes ``carbonara_structure_path.txt`` beside
+    ``fingerPrint1.dat``.  This is necessary because setup is often run in a
+    subprocess/imported module, so changing a ``pdb_name`` global inside setup
+    cannot change an already-existing Jupyter variable in the caller.
+
+    If no marker exists, preserve the historical behaviour and use ``pdb_fl``.
+    """
+    from pathlib import Path
+
+    marker = Path(structure_file).expanduser().resolve().parent / "carbonara_structure_path.txt"
+    if not marker.exists():
+        return str(pdb_fl)
+
+    recorded = marker.read_text().strip()
+    if not recorded:
+        raise ValueError(f"Canonical structure marker is empty: {marker}")
+
+    canonical = Path(recorded).expanduser()
+    if not canonical.is_absolute():
+        canonical = (marker.parent / canonical).resolve()
+
+    if not canonical.exists():
+        raise FileNotFoundError(
+            f"Canonical structure recorded for this Carbonara run does not exist: {canonical} "
+            f"(marker: {marker})"
+        )
+
+    return str(canonical)
+
+
+def canonical_structure_for_run(run_name, fallback_pdb=None):
+    """Public helper for notebooks: return the run's canonical/repaired PDB path."""
+    from pathlib import Path
+
+    marker = Path("carbonara_runs") / str(run_name) / "carbonara_structure_path.txt"
+    if marker.exists():
+        recorded = marker.read_text().strip()
+        if not recorded:
+            raise ValueError(f"Canonical structure marker is empty: {marker}")
+        canonical = Path(recorded).expanduser()
+        if not canonical.is_absolute():
+            canonical = (marker.parent / canonical).resolve()
+        if not canonical.exists():
+            raise FileNotFoundError(
+                f"Canonical structure recorded for run {run_name!r} does not exist: {canonical}"
+            )
+        return str(canonical)
+
+    if fallback_pdb is None:
+        raise FileNotFoundError(
+            f"No carbonara_structure_path.txt found for run {run_name!r}, and no fallback PDB was supplied."
+        )
+    return str(fallback_pdb)
+
+
 def getResIDs_from_structure(pdb_fl, structure_file):
     """
     Returns resid_tensor split to match the chains in the structure file,
     ignoring original PDB chain IDs.
+
+    For run fingerprints, automatically use the canonical/repaired PDB recorded
+    by setup rather than a stale original ``pdb_name`` from a notebook.
     """
     import re
+
+    pdb_fl = _canonical_structure_for_fingerprint(pdb_fl, structure_file)
 
     # Get all CA atoms
     M = pdb_2_biobox(pdb_fl)
@@ -2323,6 +2409,22 @@ def getResIDs_from_structure(pdb_fl, structure_file):
     n = int(lines[0])
     structures = lines[2::2]
     lengths = [len(struct) for struct in structures]
+
+    if len(structures) != n:
+        raise ValueError(
+            f"Fingerprint says {n} chains, but contains {len(structures)} structure lines: {structure_file}"
+        )
+
+    expected = int(sum(lengths))
+    observed = int(len(resids))
+    if observed != expected:
+        raise ValueError(
+            "Fingerprint/PDB residue-count mismatch: "
+            f"{structure_file} describes {expected} residues, but {pdb_fl} contains "
+            f"{observed} CA atoms. This would otherwise produce an out-of-bounds linker index. "
+            "Check that setup created carbonara_structure_path.txt and that it points to the "
+            "repaired run-local structure."
+        )
 
     # Split resids according to structure lengths
     resid_tensor = []
@@ -4023,7 +4125,7 @@ def _carbonara_cif_to_pdb(cif_file):
             "Install them or convert the mmCIF to PDB before calling Carbonara."
         ) from exc
 
-    fixer = PDBFixer(filename=cif_file)
+    fixer = _carbonara_pdbfixer(cif_file)
     tmp = NamedTemporaryFile(mode='w', suffix='.pdb', delete=False)
     tmp_path = tmp.name
     tmp.close()
