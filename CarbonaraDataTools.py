@@ -9,6 +9,261 @@ and generating useful inputs for external programs
 ------------------------------------------------------------------------------------------------
 '''
 
+
+
+# -----------------------------------------------------------------------------
+# Assemble a mixture from independently prepared Carbonara runs
+# -----------------------------------------------------------------------------
+
+def merge_carbonara_setups(
+    source_dirs,
+    name,
+    root_dir=None,
+    *,
+    make_runme=True,
+    max_mixture_combos=30,
+    mixture_step=0.1,
+    mixture_snap=0.05,
+    mixture_dirichlet_alpha=1.0,
+    run_options=None,
+):
+    """Merge existing, independently prepared Carbonara components into a new run.
+
+    Each entry of ``source_dirs`` is either a folder containing a prepared
+    Carbonara run, or ``(folder, component_number)`` to choose another numbered
+    component from an existing multi-structure run.  Nothing is reprocessed:
+    fingerprints, coordinates, flexible-section selections and restraints are
+    copied byte-for-byte and only the filename indices change.
+
+    The output is ``root_dir/carbonara_runs/name`` (root_dir defaults to cwd).
+    If ``make_runme=True``, reuse ``setup_carbonara_allAtom.write_runme`` to make
+    a launcher alongside ``carbonara_runs``.  Because that existing generator
+    uses the current directory as its data root, ``root_dir`` must then equal
+    the current working directory.  Use ``make_runme=False`` to prepare data
+    under another root without generating the launcher.
+
+    Components need not contain the same protein or the same number of chains.
+    If at least one supplies fixed distances, empty constraint files represent
+    components without restraints (the manifest distinguishes these).
+    One experimental SAXS file is used for the fit; differences are warned about.
+
+    Example::
+
+        merge_carbonara_setups(
+            ['carbonara_runs/monomer', 'carbonara_runs/dimer'],
+            'monomer_dimer',
+            run_options={'fit_n_times': 10, 'max_q': 0.2},
+        )
+
+    Returns the Path to the new run directory.  Refuses to overwrite a run.
+    """
+    import hashlib
+    import importlib.util
+    import warnings
+
+    if not isinstance(name, str) or not name or name in {'.', '..'} or Path(name).name != name:
+        raise ValueError('name must be a nonempty run-folder name, without path separators')
+    source_dirs = list(source_dirs)
+    if not source_dirs:
+        raise ValueError('Supply at least two independently prepared Carbonara components')
+    if len(source_dirs) < 2:
+        raise ValueError('Mixture merging requires at least two components')
+
+    root = Path(root_dir if root_dir is not None else os.getcwd()).expanduser().resolve()
+    target = root / 'carbonara_runs' / name
+    launch_path = root / ('RunMe_' + name + '.sh')
+    if target.exists():
+        raise FileExistsError('Refusing to overwrite existing run: ' + str(target))
+    if make_runme:
+        if root != Path.cwd().resolve():
+            raise ValueError('For make_runme=True, run from root_dir (or use make_runme=False)')
+        if launch_path.exists():
+            raise FileExistsError('Refusing to overwrite existing launcher: ' + str(launch_path))
+
+    # Preflight every component before creating anything.  In particular, a
+    # missing numbered file must never silently fall back to component 1.
+    components = []
+    for chosen in source_dirs:
+        if isinstance(chosen, (tuple, list)) and len(chosen) == 2:
+            folder, original_idx = chosen
+        else:
+            folder, original_idx = chosen, 1
+        folder = Path(folder).expanduser().resolve()
+        original_idx = int(original_idx)
+        if original_idx < 1 or not folder.is_dir():
+            raise ValueError('Invalid source directory or component number: ' + str(chosen))
+        files = {key: folder / (prefix + str(original_idx) + '.dat')
+                 for key, prefix in (
+                     ('coordinates', 'coordinates'),
+                     ('fingerprint', 'fingerPrint'),
+                     ('flexibility', 'varyingSectionSecondary'),
+                 )}
+        files['constraints'] = folder / ('fixedDistanceConstraints' + str(original_idx) + '.dat')
+        files['saxs'] = folder / 'Saxs.dat'
+        files['chain_lengths'] = (
+            folder / ('chainLengths' + str(original_idx) + '.dat')
+            if (folder / ('chainLengths' + str(original_idx) + '.dat')).is_file()
+            else folder / 'chainLengths.dat'
+        )
+        for key in ('coordinates', 'fingerprint', 'flexibility', 'saxs', 'chain_lengths'):
+            if not files[key].is_file():
+                raise FileNotFoundError('Missing ' + key + ' input: ' + str(files[key]))
+        if files['coordinates'].stat().st_size == 0 or files['fingerprint'].stat().st_size == 0:
+            raise ValueError('Empty structural input in ' + str(folder))
+        components.append((folder, original_idx, files))
+
+    # For mixtures, Carbonara uses one experimental profile.  Check every
+    # candidate against the first by numeric content, not only file bytes.
+    def _saxs_array(path):
+        array = np.loadtxt(path, comments='#', ndmin=2)
+        if array.ndim != 2 or array.shape[1] not in (2, 3) or not np.isfinite(array).all():
+            raise ValueError('Expected finite 2/3-column SAXS data in ' + str(path))
+        return array
+
+    reference_saxs = _saxs_array(components[0][2]['saxs'])
+    saxs_checks = []
+    for i, (_folder, _idx, files) in enumerate(components, start=1):
+        current_saxs = _saxs_array(files['saxs'])
+        same = (current_saxs.shape == reference_saxs.shape and
+                np.allclose(current_saxs, reference_saxs, rtol=1e-7, atol=1e-10))
+        saxs_checks.append(bool(same))
+        if not same:
+            warnings.warn(
+                'SAXS data for component ' + str(i) + ' differ from component 1; '
+                'the merged fit will use the first component\'s Saxs.dat',
+                RuntimeWarning, stacklevel=2,
+            )
+
+    # Reuse the established run-script writer.  No DSSP, automatic linker
+    # selection or setup regeneration is performed by this import.
+    setup = None
+    if make_runme:
+        setup_path = Path(__file__).resolve().with_name('setup_carbonara_allAtom.py')
+        if not setup_path.is_file():
+            raise FileNotFoundError(
+                'For RunMe generation, setup_carbonara_allAtom.py must be alongside '
+                'CarbonaraDataTools.py: ' + str(setup_path)
+            )
+        spec = importlib.util.spec_from_file_location('_carbonara_setup_for_merge', setup_path)
+        setup = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(setup)
+        if not callable(getattr(setup, 'write_runme', None)):
+            raise RuntimeError('Installed setup script has no write_runme() function')
+
+    has_constraints = any(files['constraints'].is_file() and
+                          bool(files['constraints'].read_text().strip())
+                          for _folder, _idx, files in components)
+    if not np.isfinite(mixture_step) or mixture_step <= 0 or mixture_step > 1:
+        raise ValueError('mixture_step must be in (0, 1]')
+    if not np.isfinite(mixture_dirichlet_alpha) or mixture_dirichlet_alpha <= 0:
+        raise ValueError('mixture_dirichlet_alpha must be > 0')
+    if not np.isfinite(mixture_snap) or mixture_snap < 0 or mixture_snap > 1:
+        raise ValueError('mixture_snap must be in [0, 1]')
+    if int(max_mixture_combos) < 1:
+        raise ValueError('max_mixture_combos must be >= 1')
+
+    options = dict(run_options or {})
+    controlled = {'working_path', 'fit_name', 'no_structures', 'pairedQ'}
+    if controlled.intersection(options):
+        raise ValueError('The merger sets working_path, fit_name, no_structures and pairedQ itself')
+    defaults = {'fit_n_times': 20, 'min_q': 0.01, 'max_q': 0.2,
+                'max_q_start': 0.2, 'max_fit_steps': 10000}
+    defaults.update(options)
+
+    # Make the same weight-list convention used by setup_carbonara_allAtom.py.
+    # The unnormalised component SAXS profiles are combined with these weights;
+    # weights are not scattering-intensity fractions for unequal-size species.
+    n = len(components)
+    def _snap(row):
+        row = np.maximum(np.asarray(row, dtype=float), 0)
+        if mixture_snap > 0:
+            row = np.round(row / mixture_snap) * mixture_snap
+        total = row.sum()
+        if total == 0:
+            row = np.full(n, 1 / n)
+        else:
+            row = row / total
+        return row
+
+    rows = []
+    if int(max_mixture_combos) == 1:
+        rows.append(np.full(n, 1 / n))
+    elif n == 2:
+        steps = int(round(1 / mixture_step))
+        rows.extend([np.array([min(1.0, k * mixture_step),
+                               max(0.0, 1 - k * mixture_step)]) for k in range(steps + 1)])
+        rows.extend([np.array([0., 1.]), np.array([1., 0.])])
+    else:
+        rows.append(np.full(n, 1 / n))
+        rows.extend(np.eye(n))
+        rng = np.random.default_rng(0)
+        for _ in range(int(max_mixture_combos) * 20):
+            if len(rows) >= int(max_mixture_combos) * 3:
+                break
+            rows.append(rng.dirichlet(np.full(n, mixture_dirichlet_alpha)))
+    unique, seen = [], set()
+    for row in rows:
+        row = _snap(row)
+        key = tuple(np.round(row, 8))
+        if key not in seen:
+            unique.append(row)
+            seen.add(key)
+        if len(unique) >= int(max_mixture_combos):
+            break
+
+    # All checks are done; make an entirely new output, never mutate sources.
+    target.mkdir(parents=True, exist_ok=False)
+    try:
+        shutil.copy2(components[0][2]['saxs'], target / 'Saxs.dat')
+        (target / 'fitdata').mkdir()
+        (target / 'redundant').touch()
+        manifest = {'name': name, 'mixture_n': n,
+                    'saxs_reference': str(components[0][2]['saxs']),
+                    'saxs_files_match_reference': saxs_checks, 'components': []}
+        for new_idx, (folder, original_idx, files) in enumerate(components, start=1):
+            for key, prefix in (('coordinates', 'coordinates'),
+                                ('fingerprint', 'fingerPrint'),
+                                ('flexibility', 'varyingSectionSecondary')):
+                shutil.copy2(files[key], target / (prefix + str(new_idx) + '.dat'))
+            original_constraints = files['constraints'].is_file() and bool(files['constraints'].read_text().strip())
+            if has_constraints:
+                outfile = target / ('fixedDistanceConstraints' + str(new_idx) + '.dat')
+                if files['constraints'].is_file():
+                    shutil.copy2(files['constraints'], outfile)
+                else:
+                    outfile.touch()  # this component has zero restraints
+            shutil.copy2(files['chain_lengths'], target / ('chainLengths' + str(new_idx) + '.dat'))
+            if new_idx == 1:
+                # Legacy name used by existing notebook/backmapping code.  Store
+                # component-specific files too, without combining chain counts.
+                shutil.copy2(files['chain_lengths'], target / 'chainLengths.dat')
+            manifest['components'].append({
+                'new_index': new_idx,
+                'source_directory': str(folder),
+                'source_index': original_idx,
+                'has_distance_constraints': bool(original_constraints),
+                'fingerprint_sha256': hashlib.sha256(files['fingerprint'].read_bytes()).hexdigest(),
+            })
+        np.savetxt(target / 'mixtureFile.dat', np.vstack(unique), fmt='%.3f')
+        (target / 'mixture_manifest.json').write_text(
+            json.dumps(manifest, indent=2) + '\n', encoding='utf-8'
+        )
+        if make_runme:
+            setup.write_runme(working_path=str(target), fit_name=name,
+                              no_structures=n, pairedQ=has_constraints, **defaults)
+    except Exception:
+        # Do not leave a misleading half-prepared folder.  If the launcher was
+        # created, remove only the new launcher owned by this merge operation.
+        if make_runme and launch_path.exists():
+            launch_path.unlink()
+        shutil.rmtree(target)
+        raise
+
+    print('Merged ' + str(n) + ' Carbonara components into ' + str(target))
+    if make_runme:
+        print('Run script: ' + str(launch_path))
+    return target
+
 import pandas as pd
 import numpy as np
 
@@ -978,7 +1233,7 @@ def sheet_pipe(coords_file, fingerprint_file):
 
 # - * - Inferring flexible regions of protein - * -
 
-def generate_random_structures(coords_file, fingerprint_file):
+def generate_random_structures(coords_file, fingerprint_file, return_failures=False):
 
     '''Generate random structures changing one linker section at a time
 
@@ -1000,6 +1255,7 @@ def generate_random_structures(coords_file, fingerprint_file):
     min_linker_len = 4
     linker_indices = []
     skipped_short_linkers = []
+    skipped_chain_start_linkers = []
     currMax = 0
     for chain_i, ss in enumerate(secondarystruct):
         sections = split_into_sections(ss)
@@ -1007,11 +1263,24 @@ def generate_random_structures(coords_file, fingerprint_file):
             if len(sec) == 0 or sec[0] != '-':
                 continue
             global_i = currMax + local_i
+            # An N-terminal linker has no preceding structural frame.  The
+            # original selector excludes only global section 0 *after* trial
+            # generation; apply the same exclusion at every chain boundary
+            # *before* invoking the empirical C++ internal-linker sampler.
+            if local_i == 0:
+                skipped_chain_start_linkers.append((global_i, chain_i + 1, len(sec)))
+                continue
             if len(sec) >= min_linker_len:
                 linker_indices.append(global_i)
             else:
                 skipped_short_linkers.append((global_i, chain_i + 1, local_i, len(sec)))
         currMax += len(sections)
+
+    if skipped_chain_start_linkers:
+        print('CarbonaraDataTools: excluded N-terminal linkers from internal-linker '
+              'trials (global section, chain, residues): '
+              + ', '.join(f'{g} (chain {c}, n={n})'
+                          for g, c, n in skipped_chain_start_linkers))
 
     if skipped_short_linkers:
         preview = ', '.join(
@@ -1027,8 +1296,18 @@ def generate_random_structures(coords_file, fingerprint_file):
         )
 
     linker_indices = np.asarray(linker_indices, dtype=int)
-    #current = os.getcwd() # this is only correct if the system path is also the carbonara folder
-    current = os.path.dirname(os.path.realpath(sys.argv[0]))
+    # The importable CarbonaraDataTools.py lives in the Carbonara installation root.
+    # Unlike sys.argv[0], this is independent of notebook / launcher arguments.
+    current = str(Path(__file__).resolve().parent)
+    generator_executable = os.path.join(current, 'build', 'bin', 'generate_structure')
+    if not os.path.isfile(generator_executable):
+        raise FileNotFoundError('Carbonara trial generator not found: ' + generator_executable)
+
+    # generate_structure requires the interpolation-data root. Its C++ entry
+    # point may not set CARBONARA_ROOT, so carbonaraConfig.cpp reads this env var.
+    generator_env = os.environ.copy()
+    generator_env['CARBONARA_ROOT'] = current
+
     random = 'rand_structures'
     random_working = os.path.join(os.getcwd(), random)
 
@@ -1045,17 +1324,62 @@ def generate_random_structures(coords_file, fingerprint_file):
     # print('Beginning random structures generation \n')
 
     rand_file_dict = {}
+    successful_indices = []
+    failed_sections = []
     for l in tqdm(linker_indices):
 
         outputname = random_working+'/section_'+str(l)
 
 #         !./generate_structure {fingerprint_file} {coords_file} {outputname} {l}
-        result = subprocess.run([current+'/build/bin/generate_structure', fingerprint_file, coords_file, outputname, str(l)], capture_output=True, text=True)
+        # Retry only stochastic no-output runs. An unchanged but written trial
+        # remains valid, as in the existing audited beta-sheet selection.
+        max_generator_attempts = 4
+        for attempt in range(1, max_generator_attempts + 1):
+            result = subprocess.run(
+                [generator_executable, str(fingerprint_file), str(coords_file), outputname, str(l)],
+                cwd=current,
+                env=generator_env,
+                capture_output=True,
+                text=True,
+            )
+            # A nonzero exit is a real C++ / installation failure, not simply
+            # a rejected geometric trial: preserve the existing hard error.
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f'Carbonara generate_structure failed for section {int(l)} '
+                    f'(return code {result.returncode}).\n'
+                    f'Command: {generator_executable} ... {int(l)}\n'
+                    f'stderr:\n{result.stderr[-3000:]}\nstdout:\n{result.stdout[-3000:]}'
+                )
+
+            if any(Path(random_working).glob(f'section_{int(l)}_*')):
+                successful_indices.append(int(l))
+                if attempt > 1:
+                    print(f'Carbonara: section {int(l)} generated trial files '
+                          f'on attempt {attempt}/{max_generator_attempts}.')
+                break
+            if attempt < max_generator_attempts:
+                print(f'Carbonara: section {int(l)} generated no trial files '
+                      f'on attempt {attempt}; retrying.')
+        else:
+            failure = {
+                'section_index': int(l),
+                'attempts': max_generator_attempts,
+                'reason': 'generator returned success but produced no trial files',
+                'selected_automatically': False,
+            }
+            failed_sections.append(failure)
+            print(f'WARNING: Carbonara section {int(l)} produced no trial files '
+                  f'after {max_generator_attempts} attempts. Excluding it from '
+                  'automatic linker selection; continuing setup.')
 
     # print('')
     # print('Finished generating random structures')
 
-    return linker_indices
+    successful_indices = np.asarray(successful_indices, dtype=int)
+    if return_failures:
+        return successful_indices, failed_sections
+    return successful_indices
 
 
 def sheet_pairwise_bond_number(sheet_coords, thr=5.5):
@@ -2759,35 +3083,124 @@ def build_global_sections(secondary):
 
 
 def find_non_varying_linkers(initial_coords_file, fingerprint_file):
-    """
-    Identify linkers that can be varied without breaking sheet hydrogen bonds.
-    Returns (allowed_linker, linker_indices), both in global section index space.
+    """Original beta-sheet selection with an auditable, fail-closed trial check.
+
+    The empirical decision criterion is unchanged: a linker is allowed only if
+    no evaluated trial reduces the per-strand-pair CA contact count. HDX does not
+    participate in this function.
+
+    Previously zero matched trials produced zero broken contacts, so ALL linkers
+    passed despite no useful structural evidence. Missing or invalid trial sets
+    still trigger an error. Valid unchanged trials count as zero contact loss.
     """
     sheet_coords = sheet_pipe(initial_coords_file, fingerprint_file)
     ref_bonds = sheet_pairwise_bond_number(sheet_coords, thr=5.5)
+    ref_coords = read_coords(initial_coords_file)
+    total_sheet_contacts = int(ref_bonds.sum())
+    n_residues = sum(len(ss) for ss in get_secondary(fingerprint_file))
+    if ref_coords.shape != (n_residues, 3):
+        raise RuntimeError(
+            f'Beta-sheet selector: {ref_coords.shape} reference-coordinate shape '
+            f'does not match fingerprint with {n_residues} CA positions.')
+    if len(sheet_coords) >= 2 and total_sheet_contacts == 0:
+        raise RuntimeError(
+            f'Beta-sheet selector: {len(sheet_coords)} strand sections, but zero '
+            'inter-strand contacts. Check fingerprint and coordinate alignment.')
 
-    linker_indices = generate_random_structures(initial_coords_file, fingerprint_file)
+    linker_indices, skipped_generator_sections = generate_random_structures(
+        initial_coords_file, fingerprint_file, return_failures=True
+    )
     linker_bond_arr_dict = random_bond_finder(
         'rand_structures/', fingerprint_file, linker_indices
     )
 
+    # These are precisely the filenames matched by random_bond_finder().
+    # Require valid evaluated trial files, but allow unchanged structures:
+    # a failed regeneration can leave the original contacts intact.
+    # Do not change the scoring rule.
+    trial_dir = Path('rand_structures')
+    names = [p for p in trial_dir.iterdir() if p.is_file() and not p.name.startswith('.')]
     bond_breaks_dict = {}
-    for l in linker_indices:
-        bond_break_lst = []
-        for bond_arr in linker_bond_arr_dict[l]:
-            bond_break_lst.append((ref_bonds > bond_arr).sum())
-        bond_breaks_dict[l] = sum(bond_break_lst) / (len(linker_bond_arr_dict[l]) + 1)
+    audit = []
+    errors = []
+    for l0 in linker_indices:
+        l = int(l0)
+        matches = sorted(p for p in names if len(p.name.split('_')) > 1
+                         and p.name.split('_')[1] == str(l))
+        matrices = linker_bond_arr_dict.get(l0, [])
+        if len(matrices) != len(matches):
+            errors.append(f'section {l}: {len(matches)} matching files but '
+                          f'{len(matrices)} contact matrices')
+        changed = 0
+        invalid = []
+        for p in matches:
+            try:
+                xyz = read_coords(str(p))
+                if xyz.shape != ref_coords.shape or not np.isfinite(xyz).all():
+                    invalid.append(p.name + ' (wrong size or nonfinite)')
+                elif np.max(np.abs(xyz - ref_coords)) > 1e-5:
+                    changed += 1
+            except Exception as exc:
+                invalid.append(p.name + f' ({exc})')
+        unchanged = len(matches) - changed - len(invalid)
+        if not matrices or invalid:
+            errors.append(f'section {l}: {len(matches)} matched files, '
+                          f'{len(matrices)} evaluated matrices, '
+                          f'{changed} genuinely changed structures, '
+                          f'{len(invalid)} invalid files')
+        if any(np.shape(a) != ref_bonds.shape for a in matrices):
+            errors.append(f'section {l}: trial contact matrix shape mismatch')
+        # Retain the original decision calculation exactly for valid trials.
+        breaks = [int((ref_bonds > a).sum()) for a in matrices
+                  if np.shape(a) == ref_bonds.shape]
+        score = sum(breaks) / (len(matrices) + 1)
+        bond_breaks_dict[l] = score
+        audit.append({
+            'section_index': l,
+            'matching_trial_files': len(matches),
+            'evaluated_trial_matrices': len(matrices),
+            'changed_trial_files': changed,
+            'unchanged_trial_files': unchanged,
+            'invalid_trial_files': invalid,
+            'trials_breaking_at_least_one_sheet_pair': sum(x > 0 for x in breaks),
+            'total_broken_sheet_pair_counts': sum(breaks),
+            'original_score': score,
+            'selected_by_original_sheet_rule': bool(score < 1e-7),
+        })
 
-    conds = np.asarray(list(bond_breaks_dict.values())) < 1e-7
+    report = {
+        'reference_structure': str(initial_coords_file),
+        'fingerprint': str(fingerprint_file),
+        'strand_sections': len(sheet_coords),
+        'reference_interstrand_ca_contacts_at_5_5A': total_sheet_contacts,
+        'eligible_linker_count': len(linker_indices),
+        'attempted_linker_count': len(linker_indices) + len(skipped_generator_sections),
+        'generator_excluded_linker_count': len(skipped_generator_sections),
+        'generator_excluded_linkers': skipped_generator_sections,
+        'beta_sheet_approved_count': sum(x['selected_by_original_sheet_rule'] for x in audit),
+        'errors': errors,
+        'linkers': audit,
+    }
+    report_path = Path(fingerprint_file).parent / 'beta_sheet_selection_audit.json'
+    report_path.write_text(json.dumps(report, indent=2) + '\n')
+    print(f'Beta-sheet selector: {len(sheet_coords)} strand sections, '
+          f'{total_sheet_contacts} reference CA contacts, '
+          f'{len(linker_indices)} eligible linkers, '
+          f'{report["beta_sheet_approved_count"]} passed original contact-loss rule. '
+          f'Audit: {report_path}')
+    if errors:
+        raise RuntimeError(
+            'Beta-sheet selection cannot be trusted; see ' + str(report_path)
+            + '. First problems: ' + '; '.join(errors[:5])
+            + '. No automatic linker selection was written.')
+
+    conds = np.asarray([bond_breaks_dict[int(l)] < 1e-7 for l in linker_indices], dtype=bool)
     allowed_linker = linker_indices[conds]
-
     secondary = get_secondary(fingerprint_file)
     global_sections = build_global_sections(secondary)
     global_linker_indices = [i for i, sec in enumerate(global_sections) if sec[0] == '-']
-
-    allowed_linker = np.array([i for i in allowed_linker if i in global_linker_indices])
-    global_linker_indices = np.array([i for i in global_linker_indices if i != 0])
-
+    allowed_linker = np.array([i for i in allowed_linker if i in global_linker_indices], dtype=int)
+    global_linker_indices = np.array([i for i in global_linker_indices if i != 0], dtype=int)
     return allowed_linker, global_linker_indices
 
 
@@ -4402,3 +4815,683 @@ def set_disulfide_constraints_for_run(run_name, disulfide_file):
     runme.write_text(text_new)
     print(f"Updated {runme}:")
     print(replacement)
+
+
+# -----------------------------------------------------------------------------
+# HDX-MS-guided flexibility for Carbonara setups.
+# HDX is an exchange/protection proxy, not a direct measure of backbone mobility.
+# Positions may refer to the concatenated fingerprint chains, one chain, or repeated subunits.
+# Apply any helical override BEFORE writing/numbering the fingerprint.
+# -----------------------------------------------------------------------------
+def prepare_hdx_flexibility_from_csv(
+    csv_file,
+    sequence_chains,
+    secondary_structure_chains,
+    *,
+    chain=None,
+    mapping='auto',
+    include_medium=False,
+    override_helices=False,
+    position_offset=0,
+    min_helix_run=4,
+    fast_min=1.0,
+    medium_min=0.1,
+    return_measured_masks=False,
+):
+    """Map sparse per-residue HDX measurements to Carbonara's prepared chains.
+
+    ``position`` is ALWAYS retained: a missing ``k_est`` does not shift any
+    subsequent residue. The four mapping schemes are:
+
+    * global: CSV positions refer to the concatenation of fingerprint chains,
+      starting at chain 1, residue 1. Suitable for a 900-residue tetramer
+      whose *total* length is 900.
+    * repeat: the same measured 1..L profile applies separately to every
+      chain. Suitable for a homotetramer with L residues PER subunit.
+    * chain: positions refer only to ``chain`` (1-based), optionally using
+      ``position_offset`` to convert original numbering to chain-local.
+    * auto: choose global if the full CSV length equals total chain length;
+      choose repeat if every chain matches that length; single-chain cases
+      choose chain. Otherwise require an explicit mapping.
+
+    Missing values are unknown, not evidence of stability or flexibility.
+    ``aa`` sequence validation is required for helix override and recommended
+    otherwise. ``H`` -> ``-`` is performed only on consecutive selected helical
+    runs of ``min_helix_run`` or more residues, before fingerprint numbering.
+    Strands and coordinates are never touched.
+
+    Returns (secondary_structure_chains, selected_masks, diagnostic_report),
+    or those three values plus measured_masks when return_measured_masks=True.
+    The optional fourth return preserves the existing API for other callers.
+    """
+    from pathlib import Path as _Path
+    csv_file = _Path(csv_file).expanduser().resolve()
+    if not csv_file.is_file():
+        raise FileNotFoundError(f'HDX CSV not found: {csv_file}')
+    if not (0 < medium_min < fast_min) or int(min_helix_run) < 4:
+        raise ValueError('Require 0 < medium_min < fast_min and min_helix_run >= 4')
+    if mapping not in ('auto', 'global', 'repeat', 'chain'):
+        raise ValueError('HDX mapping must be auto, global, repeat or chain')
+    if len(sequence_chains) != len(secondary_structure_chains) or len(sequence_chains) == 0:
+        raise ValueError('Sequence/secondary-structure chain counts differ or are empty')
+    if chain is not None and (int(chain) < 1 or int(chain) > len(sequence_chains)):
+        raise ValueError(f'HDX chain {chain} invalid; fingerprint has {len(sequence_chains)} chains')
+    if chain is not None and mapping in ('global', 'repeat'):
+        raise ValueError('--hdx-chain cannot be combined with global/repeat mapping')
+
+    seqs = [''.join(str(x) for x in s).upper() for s in sequence_chains]
+    ss_chains = [''.join(str(x) for x in s) for s in secondary_structure_chains]
+    lengths = [len(s) for s in seqs]
+    if any(len(seq) != len(ss) for seq, ss in zip(seqs, ss_chains)):
+        raise ValueError('HDX sequence and secondary structure lengths differ')
+
+    df = pd.read_csv(csv_file)
+    missing_cols = {'position', 'k_est'} - set(df.columns)
+    if missing_cols:
+        raise ValueError(f'HDX CSV missing columns: {sorted(missing_cols)}')
+    pos = pd.to_numeric(df['position'], errors='coerce')
+    if pos.isna().any() or ((pos % 1) != 0).any() or (pos <= 0).any():
+        raise ValueError('HDX positions must be positive integer residue indices')
+    pos = pos.astype(int)
+    if pos.duplicated().any():
+        repeated = pos[pos.duplicated()].head(6).tolist()
+        raise ValueError(f'Duplicate HDX residue positions: {repeated}')
+    rates = pd.to_numeric(df['k_est'], errors='coerce').to_numpy(dtype=float)
+    if np.any(np.isinf(rates)) or np.any(rates[np.isfinite(rates)] < 0):
+        raise ValueError('HDX k_est contains infinite or negative exchange rates')
+    # Proline has no backbone amide proton. In conventional backbone HDX,
+    # k_est=0 for proline is NOT evidence of protection or rigidity; retaining
+    # it as a measured low-exchange restraint can spuriously preserve an H1
+    # island between otherwise fast-exchanging linkers. Exclude it from the
+    # HDX evidence masks, without removing rows or changing residue numbering.
+    # (All non-proline finite exchange values retain their original meaning.)
+    proline_uninformative = np.zeros(len(rates), dtype=bool)
+    if 'aa' in df.columns:
+        aa_letters = df['aa'].fillna('').astype(str).str.strip().str.upper().to_numpy()
+        proline_uninformative = (aa_letters == 'P') & np.isfinite(rates)
+    measured = np.isfinite(rates) & ~proline_uninformative
+    offset = int(position_offset)
+    positions = pos.to_numpy(dtype=int) - offset
+    nrows = len(df)
+    # Determine whether this is a whole-complex or repeated-subunit profile
+    # from its ORIGINAL numbering, before any offset is applied. In particular,
+    # an offset of one must not stop a 900-row profile being recognised as a
+    # repeated profile for 900-residue subunits.
+    csv_length = int(pos.max())
+    full_length = sum(lengths)
+    if mapping == 'auto':
+        if chain is not None or len(lengths) == 1:
+            mapping = 'chain'
+        elif csv_length == full_length:
+            mapping = 'global'
+        elif all(L == csv_length for L in lengths):
+            mapping = 'repeat'
+        else:
+            raise ValueError(
+                f'Cannot safely map {len(df)} HDX CSV positions (maximum {csv_length}) '
+                f'to {len(lengths)} Carbonara chains of lengths {lengths}. '
+                'Specify --hdx-mapping global, repeat, or chain with --hdx-chain. '
+                'Missing measurements must not be compressed or shifted.'
+            )
+    if mapping == 'chain' and chain is None:
+        if len(lengths) != 1:
+            raise ValueError('HDX chain mapping requires --hdx-chain for multichain structures')
+        chain = 1
+
+    # Translate a CSV row to zero or more (chain-index-0, residue-index-0)
+    # targets.  A 900-row CSV may map to 900 positions across four chains,
+    # or (repeat mode) to 900 in each of four identical subunits.
+    boundaries = np.cumsum([0] + lengths)
+    targets_per_row = []
+    in_bounds_measured_rows = 0
+    for p, known in zip(positions, measured):
+        targets = []
+        if mapping == 'global':
+            if 1 <= p <= full_length:
+                ci = int(np.searchsorted(boundaries, p, side='left') - 1)
+                # At a chain boundary p == boundaries[j], this residue
+                # belongs to the PREVIOUS chain.
+                ci = min(max(ci, 0), len(lengths) - 1)
+                local = int(p - boundaries[ci] - 1)
+                targets = [(ci, local)]
+        elif mapping == 'repeat':
+            targets = [(ci, int(p - 1)) for ci, L in enumerate(lengths) if 1 <= p <= L]
+        else:
+            ci = int(chain) - 1
+            if 1 <= p <= lengths[ci]:
+                targets = [(ci, int(p - 1))]
+        targets_per_row.append(targets)
+        if known and targets:
+            in_bounds_measured_rows += 1
+
+    # Unmeasured rows are placeholders, not restraints. An offset may place
+    # empty terminal placeholders outside the structure, which is harmless.
+    # Measured rows must NEVER be silently discarded.
+    out_of_bounds_measured = measured & np.asarray([not t for t in targets_per_row])
+    if mapping in ('global', 'repeat') and np.any(out_of_bounds_measured):
+        bad = pos[out_of_bounds_measured].head(8).tolist()
+        raise ValueError(
+            f'Measured HDX positions outside {mapping} mapping for prepared '
+            f'chains {lengths}, with position_offset={offset}: {bad}. '
+            'Check numbering or structure length; no measured HDX rows were dropped.'
+        )
+    if in_bounds_measured_rows == 0:
+        raise ValueError('No measured HDX positions map to selected Carbonara chain(s)')
+
+    comparisons = []
+    mismatches = []
+    if 'aa' in df.columns:
+        for csv_p, value, known, targets in zip(pos, df['aa'], measured, targets_per_row):
+            if not known or pd.isna(value):
+                continue
+            letter = str(value).strip().upper()
+            if len(letter) != 1 or not letter.isalpha():
+                continue
+            for ci, local in targets:
+                expected = seqs[ci][local]
+                if letter == 'X' or expected == 'X':
+                    continue
+                comparisons.append((int(csv_p), int(ci + 1), int(local + 1), letter, expected))
+                if letter != expected:
+                    mismatches.append((int(csv_p), int(ci + 1), int(local + 1), letter, expected))
+        if comparisons and len(mismatches) > max(2, int(np.ceil(0.05 * len(comparisons)))):
+            example = ', '.join(
+                f'CSV {p}->chain {c}:{l} {a}!={b}' for p,c,l,a,b in mismatches[:6]
+            )
+            # A single missing N-terminal residue or a numbering convention
+            # change shifts all comparisons. Suggest an offset only when the
+            # FULL observed sequence gives strong evidence for it. We do not
+            # silently remap the user's experimental data.
+            observed_rows = []
+            for raw_p, letter, known in zip(pos.to_numpy(dtype=int), df['aa'], measured):
+                if not known or pd.isna(letter):
+                    continue
+                letter = str(letter).strip().upper()
+                if len(letter) == 1 and letter.isalpha() and letter != 'X':
+                    observed_rows.append((int(raw_p), letter))
+
+            def offset_fit(candidate_offset):
+                matches, compared = 0, 0
+                for raw_p, letter in observed_rows:
+                    p = raw_p - candidate_offset
+                    if mapping == 'global':
+                        if not (1 <= p <= full_length):
+                            continue
+                        ci = int(np.searchsorted(boundaries, p, side='left') - 1)
+                        ci = min(max(ci, 0), len(lengths) - 1)
+                        pairs = [(ci, int(p - boundaries[ci] - 1))]
+                    elif mapping == 'repeat':
+                        pairs = [(ci, p - 1) for ci, L in enumerate(lengths) if 1 <= p <= L]
+                    else:
+                        ci = int(chain) - 1
+                        pairs = [(ci, p - 1)] if 1 <= p <= lengths[ci] else []
+                    for ci, local in pairs:
+                        expected = seqs[ci][local]
+                        if expected != 'X':
+                            matches += (letter == expected)
+                            compared += 1
+                return matches, compared
+
+            fit_candidates = []
+            for candidate in range(offset - 100, offset + 101):
+                hits, total = offset_fit(candidate)
+                if total >= max(30, int(0.75 * len(comparisons))):
+                    fit_candidates.append((hits / total, total, candidate))
+            best = max(fit_candidates, default=None)
+            hint = ''
+            if best is not None:
+                frac, n_checked, best_offset = best
+                if best_offset != offset and frac >= 0.95:
+                    hint = (f' Best constant-offset alignment: '
+                            f'--hdx-position-offset {best_offset} gives '
+                            f'{100 * frac:.1f}% amino-acid identity across '
+                            f'{n_checked} comparisons. Try that offset; '
+                            'the mapping is NOT changed automatically.')
+                else:
+                    hint = (f' Best tested constant offset was {best_offset} '
+                            f'({100 * frac:.1f}% identity); no convincing '
+                            'simple offset correction was found. Confirm the '
+                            'PDB and HDX refer to the same sequence/construct.')
+            raise ValueError(
+                f'HDX CSV does not align with prepared sequence: '
+                f'{len(mismatches)}/{len(comparisons)} known amino acids differ ({example}). '
+                'Check whether the CSV covers the complete tetramer, '
+                'one repeated subunit, or a single chain.' + hint
+            )
+    elif override_helices:
+        raise ValueError('Helix override requires HDX CSV aa column for sequence validation')
+    if override_helices and len(comparisons) < 10:
+        raise ValueError('Helix override requires at least 10 measured amino-acid comparisons')
+
+    # Residue-by-residue mapping, without compressing positions with NaN rates.
+    # Do not mark mismatched amino acids as flexible even if their rate is high.
+    bad_residues = {(c - 1, l - 1) for _, c, l, _, _ in mismatches}
+    selected = [np.zeros(L, dtype=bool) for L in lengths]
+    measured_masks = [np.zeros(L, dtype=bool) for L in lengths]
+    for targets, k, informative in zip(targets_per_row, rates, measured):
+        if not informative:
+            continue
+        for ci, local in targets:
+            measured_masks[ci][local] = True
+            if k >= (medium_min if include_medium else fast_min) and (ci, local) not in bad_residues:
+                selected[ci][local] = True
+
+    changed = []
+    all_converted = []
+    all_skipped = []
+    per_chain = []
+    for ci, (ss, mask, observed) in enumerate(zip(ss_chains, selected, measured_masks)):
+        before = np.asarray(list(ss), dtype='<U1')
+        after = before.copy()
+        converted, skipped = [], []
+        if override_helices:
+            moving = (before == 'H') & mask
+            i = 0
+            while i < len(moving):
+                if not moving[i]:
+                    i += 1
+                    continue
+                start = i
+                while i < len(moving) and moving[i]:
+                    i += 1
+                end = i
+                run = [int(start + 1), int(end)]
+                if end - start >= min_helix_run:
+                    after[start:end] = '-'
+                    converted.append(run)
+                else:
+                    skipped.append(run)
+        changed.append(after)
+        all_converted.extend([{'chain': ci + 1, 'start': a, 'end': b} for a,b in converted])
+        all_skipped.extend([{'chain': ci + 1, 'start': a, 'end': b} for a,b in skipped])
+        per_chain.append({
+            'chain': ci + 1,
+            'length': len(ss),
+            'measured_residues': int(observed.sum()),
+            'unmeasured_residues': int((~observed).sum()),
+            'selected_residues': int(mask.sum()),
+            'helix_residues_relabelled': int(np.sum(before != after)),
+            'helix_to_coil_runs_chain_local_inclusive': converted,
+        })
+
+    report = {
+        'source_csv': str(csv_file),
+        'source_rows': nrows,
+        'csv_position_min': int(pos.min()),
+        'csv_position_max': int(pos.max()),
+        'mapping': mapping,
+        'prepared_chain_lengths': lengths,
+        'target_chain_1based': chain if mapping == 'chain' else None,
+        'position_offset': offset,
+        'numbering': 'CSV positions are 1-based; subtract position_offset before mapping',
+        'mode': 'fast_and_medium' if include_medium else 'fast_only',
+        'thresholds': {'fast_k_min': float(fast_min), 'medium_k_min': float(medium_min)},
+        'measured_rows': int(measured.sum()),
+        'unmeasured_rows': int((~measured).sum()),
+        'source_finite_k_est_rows': int(np.isfinite(rates).sum()),
+        'nonexchangeable_proline_rate_rows_ignored': int(proline_uninformative.sum()),
+        'nonexchangeable_proline_positions_1based_csv': pos[proline_uninformative].astype(int).tolist(),
+        'fast_rows_total': int(np.sum(measured & (rates >= fast_min))),
+        'medium_rows_total': int(np.sum(measured & (rates >= medium_min) & (rates < fast_min))),
+        'slow_rows_total': int(np.sum(measured & (rates < medium_min))),
+        'measured_positions_mapped_in_csv': in_bounds_measured_rows,
+        'measured_positions_outside_chain': int(np.sum(measured & np.asarray([not t for t in targets_per_row]))),
+        'amino_acids_compared': len(comparisons),
+        'amino_acid_mismatches': [list(x) for x in mismatches],
+        'selected_positions_count': int(sum(int(mask.sum()) for mask in selected)),
+        'selected_chain_local_positions_1based': [
+            {'chain': ci + 1, 'residues': (np.flatnonzero(mask) + 1).tolist()}
+            for ci, mask in enumerate(selected)
+        ],
+        'override_helices': bool(override_helices),
+        'helix_override_min_run': int(min_helix_run),
+        'helix_to_coil_runs_chain_local_inclusive': all_converted,
+        'short_helix_runs_not_overridden': all_skipped,
+        'helix_residues_relabelled': int(sum(c['helix_residues_relabelled'] for c in per_chain)),
+        'strands_relabelled': 0,
+        'per_chain': per_chain,
+        'note': 'Missing k_est and proline k_est are uninformative for backbone HDX (not evidence of protection); no rows are deleted or shifted. HDX exchange/protection is not a direct mobility measurement.',
+    }
+    result = (np.array(changed, dtype=object), selected, report)
+    if return_measured_masks:
+        return (*result, measured_masks)
+    return result
+
+def select_hdx_linkers_from_fingerprint(fingerprint_file, selected_masks, *, min_length=4):
+    """Select entire internal '-' sections intersecting chosen HDX residues.
+
+    Segment IDs are global zero-based Carbonara indices. The fingerprint must
+    already contain any HDX helix overrides and long-linker splitting.
+    """
+    chains = parse_structures_with_segments(str(fingerprint_file))
+    if len(chains) != len(selected_masks):
+        raise ValueError('HDX mask count does not match fingerprint chain count')
+    selected_ids = []
+    selected_info = []
+    for chain_i, (chain, mask) in enumerate(zip(chains, selected_masks), start=1):
+        mask = np.asarray(mask, dtype=bool)
+        if len(mask) != len(chain['sequence']) or len(mask) != len(chain['structure']):
+            raise ValueError(f'HDX mask/sequence mismatch in chain {chain_i}')
+        for segment in chain['segments']:
+            start, end = segment['start'], segment['end']
+            if (segment['type'] == '-' and end - start >= min_length
+                    and start > 0 and end < len(mask) and mask[start:end].any()):
+                selected_ids.append(int(segment['segment_num']))
+                selected_info.append({
+                    'segment_id_0based_global': int(segment['segment_num']),
+                    'chain': chain_i, 'start_1based': start + 1,
+                    'end_1based_inclusive': end,
+                    'length': end - start,
+                    'hdx_selected_residues_in_segment': int(mask[start:end].sum()),
+                })
+    return selected_ids, selected_info
+
+
+def select_hdx_linkers_with_automatic_fallback(
+    fingerprint_file, selected_masks, measured_masks, automatic_linkers,
+    *, min_length=4, hdx_only=False,
+):
+    """Combine HDX evidence with Carbonara's ordinary linker selection.
+
+    The fingerprint already includes optional H->'-' HDX overrides and
+    long-linker splitting. We NEVER change it here.
+
+    For each internal whole coil section of >= min_length residues:
+      1. At least one HDX-selected position -> select via HDX, even if
+         automatic selection rejects this linker (experimental guidance).
+      2. No HDX measurements anywhere in section -> inherit the ordinary
+         automatic selection, unless hdx_only=True.
+      3. Some measured positions, none selected -> do not select from auto.
+         This makes measured data the authority over the entire section.
+
+    A section containing both measured and unmeasured positions is explicitly
+    recorded as mixed coverage; it is not mislabelled 'unmeasured'.
+    All eligible sections are reported, including ones not selected.
+
+    Returns (selected_global_section_ids, per_section_report).
+    """
+    chains = parse_structures_with_segments(str(fingerprint_file))
+    if not (len(chains) == len(selected_masks) == len(measured_masks)):
+        raise ValueError('HDX selection, coverage and fingerprint chain counts differ')
+
+    auto_ids = set(int(x) for x in automatic_linkers)
+    selected_ids = []
+    section_report = []
+    for chain_i, (chain, positives, observed) in enumerate(
+        zip(chains, selected_masks, measured_masks), start=1
+    ):
+        positives = np.asarray(positives, dtype=bool)
+        observed = np.asarray(observed, dtype=bool)
+        chain_length = len(chain['sequence'])
+        if (len(positives) != chain_length or len(observed) != chain_length
+                or len(chain['structure']) != chain_length):
+            raise ValueError(f'HDX masks/sequence mismatch in chain {chain_i}')
+        if np.any(positives & ~observed):
+            raise ValueError(f'HDX-selected residues lack measurements in chain {chain_i}')
+        for section in chain['segments']:
+            start, end = int(section['start']), int(section['end'])
+            if not (section['type'] == '-' and end - start >= min_length
+                    and start > 0 and end < chain_length):
+                continue
+            sid = int(section['segment_num'])
+            n_positive = int(positives[start:end].sum())
+            n_measured = int(observed[start:end].sum())
+            n_unknown = end - start - n_measured
+            auto_selected = sid in auto_ids
+            if n_positive:
+                reason = 'hdx_selected'
+                keep = True
+            elif n_measured:
+                reason = 'hdx_measured_below_threshold'
+                keep = False
+            elif hdx_only:
+                reason = 'unmeasured_hdx_only'
+                keep = False
+            elif auto_selected:
+                reason = 'automatic_unmeasured'
+                keep = True
+            else:
+                reason = 'automatic_unmeasured_rejected'
+                keep = False
+            if keep:
+                selected_ids.append(sid)
+            section_report.append({
+                'segment_id_0based_global': sid,
+                'chain': chain_i,
+                'start_1based': start + 1,
+                'end_1based_inclusive': end,
+                'length': end - start,
+                'hdx_selected_residues_in_segment': n_positive,
+                'measured_residues_in_segment': n_measured,
+                'unmeasured_residues_in_segment': n_unknown,
+                'automatically_selected': auto_selected,
+                'selected': keep,
+                'selection_reason': reason,
+                'mixed_coverage': n_measured > 0 and n_unknown > 0,
+            })
+    return selected_ids, section_report
+
+
+# Carbonara requires at least three C-alpha points for most transition frames.
+# This is deliberately an input-geometry policy, not a change to the empirical
+# curvature/torsion distributions in randomMolGen.cpp.
+def _carbonara_structure_runs(labels):
+    """Return (type, start, exclusive_end) for each contiguous section."""
+    labels = list(labels)
+    if not labels:
+        return []
+    out = []
+    start = 0
+    for i in range(1, len(labels) + 1):
+        if i == len(labels) or labels[i] != labels[start]:
+            out.append((str(labels[start]), start, i))
+            start = i
+    return out
+
+
+def regularize_secondary_structure_for_carbonara(
+    secondary_structure_chains, *, measured_masks=None, flexible_masks=None,
+    min_frame_length=3, min_sampled_linker_length=4,
+):
+    """Conservatively regularise short sections before fingerprint numbering.
+
+    The input is a chainwise series of H, S, - labels, after any HDX helices
+    have been overridden, and before long-linker splitting. Coordinates and
+    sequence remain untouched. Chain boundaries are strict.
+
+    Rules:
+      * Isolated 1-2 residue helices (often left behind by HDX overrides) may
+        become coil only if adjacent to coil AND every such residue is either
+        HDX-fast or unmeasured. Slow/medium-measured helices are protected.
+      * A three-residue H island entirely HDX-fast and flanked by two coils
+        may be absorbed to bridge those coils (a special HDX-guided exception).
+      * Very short coils (<3), or fast-measured internal 3-residue coils, can
+        acquire neighbouring helix residues if the remaining helix stays >=3,
+        and those residues aren't HDX-measured below the fast threshold.
+      * No strand is automatically relabelled. Unrepairable short H/S/coil
+        sections are reported as unsafe and rejected. We do not invent a
+        helix by converting an unsupported coil into H.
+      * HDX-fast coils must be long enough to be selectable (>=4) if internal.
+
+    Important: this only enforces structural frame-length conditions. It does
+    not prove all stochastic coordinate-generation attempts will succeed.
+
+    Returns (modified_secondary_chains, JSON-serialisable report).
+    """
+    if min_frame_length < 3 or min_sampled_linker_length < 4:
+        raise ValueError('Carbonara frame minimum must be >=3 and sampled linker minimum >=4')
+    chains = list(secondary_structure_chains)
+    if measured_masks is not None and len(measured_masks) != len(chains):
+        raise ValueError('HDX measured masks do not match fingerprint chain count')
+    if flexible_masks is not None and len(flexible_masks) != len(chains):
+        raise ValueError('HDX selected masks do not match fingerprint chain count')
+    output = []
+    report = {
+        'policy': 'conservative_frame_compatibility',
+        'minimum_frame_section_length': int(min_frame_length),
+        'minimum_hdx_selected_internal_coil_length': int(min_sampled_linker_length),
+        'strand_relabelling_allowed': False,
+        'measured_below_threshold_relabelling_allowed': False,
+        'edits': [], 'unresolved': [], 'chains': [],
+    }
+    def sections(arr):
+        return _carbonara_structure_runs(arr)
+
+    for cidx, ss in enumerate(chains):
+        arr = np.asarray(list(ss) if isinstance(ss, str) else ss, dtype='<U1').copy().reshape(-1)
+        n = len(arr)
+        if n == 0 or not set(arr.tolist()).issubset({'H','S','-'}):
+            raise ValueError(f'Chain {cidx+1} has empty or invalid secondary structure labels')
+        measured = (np.zeros(n, dtype=bool) if measured_masks is None
+                    else np.asarray(measured_masks[cidx], dtype=bool).reshape(-1))
+        positive = (np.zeros(n, dtype=bool) if flexible_masks is None
+                    else np.asarray(flexible_masks[cidx], dtype=bool).reshape(-1))
+        if len(measured) != n or len(positive) != n or np.any(positive & ~measured):
+            raise ValueError(f'Chain {cidx+1}: invalid HDX mask length or HDX-selected unmeasured residue')
+        protected = measured & ~positive
+        chain_edits = []
+        sections_before = len(sections(arr))
+
+        def log_edit(kind, a, b, previous, new, justification):
+            edit = {'chain': cidx+1, 'start_1based': int(a+1),
+                    'end_1based_inclusive': int(b), 'length': int(b-a),
+                    'old_label': previous, 'new_label': new,
+                    'action': kind, 'reason': justification}
+            chain_edits.append(edit)
+            report['edits'].append(edit)
+
+        # Pass 1: absorb truncated helices. Re-run because merging can change
+        # neighbouring runs, but edits only move H -> '-' (cannot oscillate).
+        while True:
+            change = False
+            for j, (typ, start, end) in enumerate(sections(arr)):
+                if typ != 'H' or end-start >= min_frame_length:
+                    continue
+                adjacent_coil = (start > 0 and arr[start-1] == '-') or (end < n and arr[end] == '-')
+                if adjacent_coil and not protected[start:end].any():
+                    arr[start:end] = '-'
+                    log_edit('absorb_short_helix', start, end, 'H', '-',
+                             'Too short to define a transition frame; adjoining coil, no protected HDX measurements')
+                    change = True
+                    break
+            if not change:
+                break
+
+        # Pass 1b: a three-residue H island wholly supported by FAST HDX
+        # evidence, flanked on both sides by coil, is not a robust helix to
+        # preserve. Converting it to coil merges two otherwise short linkers.
+        # Do NOT generalise this to other H3 sections: these have the minimum
+        # three points needed for the empirical transition frame.
+        while True:
+            change = False
+            for typ, start, end in sections(arr):
+                if (typ == 'H' and end-start == min_frame_length
+                        and start > 0 and end < n
+                        and arr[start-1] == '-' and arr[end] == '-'
+                        and positive[start:end].all()):
+                    arr[start:end] = '-'
+                    log_edit('bridge_fast_hdx_helix_island', start, end, 'H', '-',
+                             'Three-residue helix between coils, all residues fast-exchanging in HDX; '
+                             'merges short linkers without changing protected structural assignments')
+                    change = True
+                    break
+            if not change:
+                break
+
+        # Pass 2: extend only coil sections that cannot supply a 3-point frame,
+        # or contain fast HDX and would otherwise be too short for selection.
+        # Borrow edge residues only from an H run that remains >=3 afterwards.
+        # A high-confidence helix is not demolished to repair a short linker.
+        while True:
+            change = False
+            for typ, start, end in sections(arr):
+                if typ != '-':
+                    continue
+                target = min_frame_length
+                if start > 0 and end < n and positive[start:end].any():
+                    target = max(target, min_sampled_linker_length)
+                if end-start >= target:
+                    continue
+                need = target - (end-start)
+                for _ in range(need):
+                    candidates = []
+                    for neighbor in (start-1, end):
+                        if neighbor < 0 or neighbor >= n or arr[neighbor] != 'H' or protected[neighbor]:
+                            continue
+                        for t,a,b in sections(arr):
+                            if a <= neighbor < b:
+                                if b-a-1 >= min_frame_length:
+                                    # Prefer experimentally fast residues; then unmeasured.
+                                    candidates.append((0 if positive[neighbor] else 1, neighbor))
+                                break
+                    if not candidates:
+                        break
+                    _, idx = min(candidates, key=lambda p: (p[0], p[1]))
+                    arr[idx] = '-'
+                    log_edit('extend_short_coil', idx, idx+1, 'H', '-',
+                             'Needed for transition frame/HDX linker length; retained >=3 neighbouring helix')
+                    change = True
+                    # Expansion changes the boundaries; derive them again below.
+                    if idx == start-1: start -= 1
+                    else: end += 1
+                if change:
+                    break
+            if not change:
+                break
+
+        # Validation is deliberately strict for ALL short H/S sections. We do
+        # not silently change a strand or protected helix to make C++ run.
+        chain_issues = []
+        for typ,start,end in sections(arr):
+            ln = end-start
+            requirement = min_frame_length
+            if typ == '-' and start > 0 and end < n and positive[start:end].any():
+                requirement = max(requirement, min_sampled_linker_length)
+            if ln < requirement:
+                reason = ('short_beta_strand_not_relabelled' if typ == 'S' else
+                          'short_protected_or_isolated_helix' if typ == 'H' else
+                          'short_coil_cannot_extend_without_compromising_helix_or_HDX')
+                issue = {'chain': cidx+1, 'type': typ, 'start_1based': int(start+1),
+                         'end_1based_inclusive': int(end), 'length': int(ln),
+                         'required_length': int(requirement), 'reason': reason,
+                         'measured_below_threshold': int(protected[start:end].sum()),
+                         'hdx_selected': int(positive[start:end].sum())}
+                chain_issues.append(issue)
+                report['unresolved'].append(issue)
+
+        output.append(arr)
+        report['chains'].append({
+            'chain': cidx+1, 'length': int(n), 'edited_residues': len(chain_edits),
+            'n_edits': len(chain_edits), 'unresolved': len(chain_issues),
+            'sections_before': sections_before, 'sections_after': len(sections(arr)),
+        })
+
+    report['n_edits'] = len(report['edits'])
+    report['n_unresolved'] = len(report['unresolved'])
+    return np.array(output, dtype=object), report
+
+
+def validate_carbonara_secondary_sections(
+    secondary_structure_chains, *, min_frame_length=3, min_flexible_length=4,
+    flexible_masks=None,
+):
+    """Verify section frame lengths after long-linker splitting (no edits)."""
+    chains = list(secondary_structure_chains)
+    if flexible_masks is not None and len(flexible_masks) != len(chains):
+        raise ValueError('Mismatch between flexible masks and chain count')
+    issues = []
+    for ci, ss in enumerate(chains):
+        arr = np.asarray(list(ss) if isinstance(ss, str) else ss, dtype='<U1').reshape(-1)
+        positive = (np.zeros(len(arr), dtype=bool) if flexible_masks is None
+                    else np.asarray(flexible_masks[ci], dtype=bool).reshape(-1))
+        if len(arr) != len(positive):
+            raise ValueError(f'Chain {ci+1}: flexibility mask length mismatch')
+        for typ,a,b in _carbonara_structure_runs(arr):
+            required = min_frame_length
+            if typ == '-' and a > 0 and b < len(arr) and positive[a:b].any():
+                required = max(required, min_flexible_length)
+            if b-a < required:
+                issues.append({'chain': ci+1, 'type': typ, 'start_1based': a+1,
+                               'end_1based_inclusive': b, 'length': b-a,
+                               'required_length': required})
+    return issues

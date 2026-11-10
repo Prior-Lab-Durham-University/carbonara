@@ -13,6 +13,7 @@ import shlex
 import json
 import subprocess
 import re
+import hashlib
 from pathlib import Path
 from string import ascii_uppercase
 from typing import Optional, List
@@ -883,8 +884,10 @@ def split_long_linkers_in_secondary_structure(
     fake_helix_len = int(fake_helix_len)
     if max_linker_len < 4:
         raise ValueError("max_linker_len must be >= 4")
-    if fake_helix_len < 1:
-        raise ValueError("fake_helix_len must be >= 1")
+    # Artificial H separators must provide a three-point transition frame.
+    # Anything shorter is invalid even if the resulting coils are long enough.
+    if fake_helix_len < 3:
+        raise ValueError("fake_helix_len must be >= 3 (Carbonara transition frame)")
 
     report = {
         "enabled": bool(enabled),
@@ -921,7 +924,9 @@ def split_long_linkers_in_secondary_structure(
                 while True:
                     flexible_residues = run_len - n_breaks * fake_helix_len
                     n_chunks = n_breaks + 1
-                    if flexible_residues >= n_chunks:
+                    # Every resulting coil must be long enough for the
+                    # four-point stochastic section constructor.
+                    if flexible_residues >= 4 * n_chunks:
                         largest_chunk = (flexible_residues + n_chunks - 1) // n_chunks
                         if largest_chunk <= max_linker_len:
                             break
@@ -1140,7 +1145,7 @@ def write_runme(
     backend: str = "modeller",
     cg2all_exec: str = "./bin/micromamba run -p /root/micromamba/envs/cg2all convert_cg2all",
     disulfide_constraints_file: str = "",
-    foxs_cmd_default: str = "pyfoxs",
+    foxs_cmd_default: Optional[str] = None,
     python_exe: Optional[str] = None,
     terminate_on_foxs: bool = False,
     terminate_threshold: float = 2.5,
@@ -1150,12 +1155,26 @@ def write_runme(
     script_name = "RunMe_" + str(fit_name) + ".sh"
     run_file = os.path.join(curr, script_name)
     
-    carbonaradir = os.path.dirname(os.path.realpath(sys.argv[0]))
+    # Resolve the installation from this setup file, not from the caller's cwd/argv.
+    carbonaradir = str(Path(__file__).resolve().parent)
 
-    # Use the Python that ran setup by default. The generated shell script still
-    # allows PYTHON_EXE to override this at runtime, which is useful for notebooks,
-    # HPC modules, or advanced users.
-    python_exe = python_exe or sys.executable
+    # Prefer this installation's Python when it has a virtual environment.  If
+    # not, preserve the setup interpreter (which can be a machine-specific venv).
+    # A --python_exe override takes precedence over both.
+    if python_exe is None:
+        python_default_lines = [
+            '    if [[ -x "$CARBONARADIR/.venv/bin/python" ]]; then',
+            '        PYTHON_EXE="$CARBONARADIR/.venv/bin/python"',
+            '    else',
+            f'        PYTHON_EXE={shlex.quote(sys.executable)}',
+            '    fi',
+        ]
+    else:
+        python_default_lines = [f'    PYTHON_EXE={shlex.quote(str(python_exe))}']
+
+    # Each generated RunMe is stamped so we can diagnose mixed setup versions.
+    setup_sha = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
+    setup_source = str(Path(__file__).resolve())
 
     # Path to the data directory (relative to ROOT)
     data_path = f"carbonara_runs/{fit_name}"
@@ -1167,7 +1186,8 @@ def write_runme(
     os.makedirs(new_data_dir, exist_ok=True)
     os.makedirs(fitdata_dir, exist_ok=True)
 
-    # Copy necessary files from refine_dir to new_data_dir
+    # Copy necessary files from refine_dir to new_data_dir.  In the common
+    # case these are the same directory: do not attempt a SameFileError copy.
     try:
         files_to_copy = ["Saxs.dat", "mixtureFile.dat", "chainLengths.dat"]
 
@@ -1190,40 +1210,63 @@ def write_runme(
             source = os.path.join(working_path, file)
             destination = os.path.join(new_data_dir, file)
 
-            if os.path.exists(source):
-                shutil.copy2(source, destination)
-                print(f"Copied {file} to {destination}")
-            else:
-                print(f"Warning: Source file {source} not found")
-
-        # Create an empty redundant file
-        with open(os.path.join(new_data_dir, "redundant"), "w") as f:
-            f.write("")
+            if not os.path.isfile(source):
+                raise FileNotFoundError(f"Required input file missing during setup: {source}")
+            if os.path.isfile(destination) and os.path.samefile(source, destination):
+                continue
+            shutil.copy2(source, destination)
+            print(f"Copied {file} to {destination}")
 
     except Exception as e:
-        print(f"Warning: Could not copy files: {e}")
+        raise RuntimeError(f"Could not prepare Carbonara run input files: {e}") from e
+
+    # Ensure the restart placeholder exists even if copying was unnecessary.
+    # Never truncate a pre-existing placeholder for an existing run.
+    Path(new_data_dir, "redundant").touch(exist_ok=True)
 
     lines = [
         "#!/bin/bash",
+        f"# Generated from: {setup_source}",
+        f"# Setup SHA256 prefix: {setup_sha}",
         "echo $0",
         "echo $SHELL",
         "set -euo pipefail",
         "set +m   # ensure background jobs stay in same job-control context",
         "",
-        "# Determine the root directory based on the script location",
-        'ROOT=$(dirname "$(readlink -f "$0")")',
-        'CARBONARADIR='+str(carbonaradir),
-        'export PATH=$PATH:'+str(carbonaradir),
-        "",
-        "# Optional first argument: FoXS command",
-        f'FOXS_CMD="${{1:-{foxs_cmd_default}}}"',
+        "# ROOT is where setup created carbonara_runs, NOT the location of this RunMe script.",
+        "# Capture it at setup time so RunMe can be launched or moved anywhere.",
+        f'ROOT={shlex.quote(str(Path(curr).resolve()))}',
+        '# Optional override if the run data have themselves been moved.',
+        'ROOT="${CARBONARA_RUN_ROOT:-$ROOT}"',
+        'echo "Carbonara run-data root: $ROOT"',
+        # Quote the absolute installation path (including when it contains spaces).
+        f'CARBONARADIR={shlex.quote(carbonaradir)}',
+        'export PATH="$PATH:$CARBONARADIR"',
         "",
         "# Python executable for watcher/backmapping.",
-        "# Default is the Python used to generate this script; PYTHON_EXE can override it.",
+        "# Prefer this installation's .venv, then the setup Python. Runtime override: PYTHON_EXE.",
         'if [[ -z "${PYTHON_EXE:-}" ]]; then',
-        f'    PYTHON_EXE={shlex.quote(str(python_exe))}',
+        *python_default_lines,
         "fi",
         'echo "Using Python for watcher/backmapping: $PYTHON_EXE"',
+        "",
+        "# Optional first RunMe argument or explicit --foxs_cmd_default overrides the default.",
+        # Prefer the installation's FoXS. If it is absent, prefer the interpreter's
+        # companion executable rather than an unrelated executable on PATH.
+        f'FOXS_CMD_CONFIGURED={shlex.quote(foxs_cmd_default or "")}',
+        'if [[ -n "${1:-}" ]]; then',
+        '    FOXS_CMD="$1"',
+        'elif [[ -n "$FOXS_CMD_CONFIGURED" ]]; then',
+        '    FOXS_CMD="$FOXS_CMD_CONFIGURED"',
+        'elif [[ -x "$CARBONARADIR/.venv/bin/pyfoxs" ]]; then',
+        '    FOXS_CMD="$CARBONARADIR/.venv/bin/pyfoxs"',
+        'elif [[ -x "$(dirname "$PYTHON_EXE")/pyfoxs" ]]; then',
+        '    FOXS_CMD="$(dirname "$PYTHON_EXE")/pyfoxs"',
+        'else',
+        '    FOXS_CMD="pyfoxs"',
+        'fi',
+        'echo "Using FoXS executable: $FOXS_CMD"',
+        'echo "Generated by: ' + setup_source + ' (SHA256 prefix ' + setup_sha + ')"',
         "",
         "# Directory to clear before running",
         f'CLEAR_DIR="$ROOT/{data_path}/fitdata"',
@@ -1257,11 +1300,6 @@ def write_runme(
         "trap cleanup SIGINT SIGTERM",
         "# ======================================================",
         "",
-        "# Clear the directory",
-        'echo "Clearing directory: $CLEAR_DIR"',
-        'rm -rf "$CLEAR_DIR"/*',
-        'mkdir -p "$CLEAR_DIR"',
-        "",
         "### argv[ 1] scattering data file",
         f'ScatterFile="$ROOT/{data_path}/Saxs.dat"',
         "",
@@ -1272,7 +1310,7 @@ def write_runme(
         'initialCoordsFile="frompdb"',
         "",
         "### argv[ 4] paired distances file (can be empty)",
-        f'pairedPredictions="$ROOT/{data_path}/fixedDistanceConstraints1.dat"' if pairedQ else 'pairedPredictions="False"',
+        'pairedPredictions="True"' if pairedQ else 'pairedPredictions="False"',
         "",
         "### argv[ 5] fixed sections file (again can be empty)",
         f'fixedsections="$ROOT/{data_path}/varyingSectionSecondary1.dat"',
@@ -1319,6 +1357,45 @@ def write_runme(
         "### argv[19] use errors in scattering calculation",
         'useErrors="True"',
         "",
+        "# Validate the run-data root BEFORE clearing fitdata or launching predictors.",
+        'if [[ ! -d "$fileLocs" ]]; then',
+        '    echo "ERROR: Run data directory does not exist: $fileLocs" >&2',
+        '    echo "       Set CARBONARA_RUN_ROOT to the directory containing carbonara_runs." >&2',
+        '    exit 1',
+        'fi',
+        'required_files=("$ScatterFile" "$mixtureFile")',
+        'for ((j=1; j<=noStructures; j++)); do',
+        '    required_files+=("${fileLocs}coordinates${j}.dat" "${fileLocs}fingerPrint${j}.dat" "${fileLocs}varyingSectionSecondary${j}.dat")',
+        'done',
+        'if [[ "$pairedPredictions" == "True" ]]; then',
+        '    for ((j=1; j<=noStructures; j++)); do',
+        '        required_files+=("${fileLocs}fixedDistanceConstraints${j}.dat")',
+        '    done',
+        'fi',
+        'for required_file in "${required_files[@]}"; do',
+        '    if [[ ! -f "$required_file" ]]; then',
+        '        echo "ERROR: Missing Carbonara input file: $required_file" >&2',
+        '        echo "       ROOT=$ROOT; set CARBONARA_RUN_ROOT if the run data moved." >&2',
+        '        exit 1',
+        '    fi',
+        'done',
+        "",
+        *([
+            "# Check FoXS availability before clearing previous results.",
+            'if [[ "$FOXS_CMD" == */* ]]; then',
+            '    if [[ ! -x "$FOXS_CMD" ]]; then',
+            '        echo "ERROR: FoXS executable not found/executable: $FOXS_CMD" >&2',
+            '        echo "       Set --foxs_cmd_default or pass a FoXS path to RunMe." >&2',
+            '        exit 1',
+            '    fi',
+            'elif ! command -v "$FOXS_CMD" >/dev/null 2>&1; then',
+            '    echo "ERROR: FoXS command not found on PATH: $FOXS_CMD" >&2',
+            '    echo "       Set --foxs_cmd_default or pass a FoXS path to RunMe." >&2',
+            '    exit 1',
+            'fi',
+            "",
+        ] if do_foxs else []),
+        # Deliberately defer clearing until after watcher/Python preflight.
         "# ========= NEW: backmapping backend =========",
         f'BACKMAP_BACKEND="{backend}"',
         f'CG2ALL_EXEC="{cg2all_exec}"',
@@ -1360,6 +1437,11 @@ def write_runme(
         "        exit 1",
         "    fi",
         "fi",
+        "",
+        "# All preflight checks passed; it is now safe to clear previous fitdata.",
+        'echo "Clearing directory: $CLEAR_DIR"',
+        'rm -rf "$CLEAR_DIR"/*',
+        'mkdir -p "$CLEAR_DIR"',
         "",
         "WATCHER_ARGS=(",
         '    --watch-dir "$predictionFile"',
@@ -1431,6 +1513,8 @@ def write_runme(
         '        "$endLinePrevLog" \\',
         '        "$affineTrans" \\',
         '        "$useErrors" \\',
+        # argv[20]: absolute Carbonara installation root for C++ interpolation files.
+        '        "$CARBONARADIR" \\',
         '        > "$predictionFile/run$i.out" 2> "$predictionFile/run$i.err" &',
         "",
         '    pid=$!',
@@ -1964,6 +2048,234 @@ def _write_guinier_trim_report(saxs_path: str, report: dict) -> None:
         print(f"WARNING: could not write Guinier trim report {report_path}: {exc}")
 
 
+
+# -----------------------------------------------------------------------------
+# Optional non-interactive flexibility and distance-constraint input.
+# These inputs are applied after the ordinary DSSP/fingerprint preparation.
+# -----------------------------------------------------------------------------
+def _input_text(inline, file_path, description):
+    """Return user data supplied inline OR from a text file."""
+    if inline is not None and file_path is not None:
+        raise ValueError(f"Supply either inline {description} or its file, not both")
+    if file_path is not None:
+        source = Path(file_path).expanduser().resolve()
+        if not source.is_file():
+            raise FileNotFoundError(f"{description} file not found: {source}")
+        return source.read_text(encoding="utf-8"), str(source)
+    if inline is not None:
+        return str(inline), "command line"
+    return None, None
+
+
+def parse_user_flexible_ranges(text):
+    """Parse 1-based, fingerprint-chain-local ranges: '1:5-12,1:40-55'.
+
+    A file may use exactly the same notation or rows of 'chain start end'.
+    Chain numbers refer to the chains in fingerPrint1.dat, NOT original PDB
+    chain IDs.  This follows runCarbonaraUserflex.ipynb.
+    """
+    ranges = {}
+    if text is None:
+        return ranges
+    for lineno, raw in enumerate(text.replace(';', '\n').splitlines(), start=1):
+        row = raw.split('#', 1)[0].strip()
+        if not row:
+            continue
+        for token in row.split(','):
+            token = token.strip()
+            if not token:
+                continue
+            match = re.fullmatch(r'(\d+)\s*:\s*(\d+)\s*-\s*(\d+)', token)
+            if match is None:
+                match = re.fullmatch(r'(\d+)\s+(\d+)\s+(\d+)', token)
+            if match is None:
+                raise ValueError(
+                    f"Invalid flexibility range at line {lineno}: {token!r}; "
+                    "use 'chain:start-end' or 'chain start end' (1-based)."
+                )
+            chain, start, end = map(int, match.groups())
+            if chain < 1 or start < 1 or end < start:
+                raise ValueError(f"Invalid flexible range {token!r}: chain/start >= 1, end >= start required")
+            ranges.setdefault(chain, []).append((start, end))
+    if not ranges:
+        raise ValueError("A flexible-ranges input was supplied, but it contains no ranges")
+    return ranges
+
+
+def select_user_flexible_linkers(user_ranges, fingerprint_file, pdb_name, refine_dir):
+    """Use precisely the notebook's range -> existing-linker overlap machinery."""
+    resid_tensor = cdt.getResIDs_from_structure(pdb_name, fingerprint_file)
+    n_chains = len(resid_tensor)
+    for chain, bounds in user_ranges.items():
+        if not 1 <= chain <= n_chains:
+            raise ValueError(f"Requested chain {chain}, but fingerprint has only {n_chains} chains")
+        length = len(resid_tensor[chain - 1])
+        for start, end in bounds:
+            if end > length:
+                raise ValueError(
+                    f"Requested chain {chain} residues {start}-{end}; valid fingerprint-chain "
+                    f"positions are 1-{length}"
+                )
+
+    available = cdt.possibleLinkerList_all_chains(fingerprint_file, pdb_name)
+    requested_structure_ranges = cdt.convert_user_ranges_to_structure(user_ranges, resid_tensor)
+    matches = cdt.linker_ids_from_ranges_new(available, requested_structure_ranges)
+    rows = [] if np.asarray(matches).size == 0 else np.asarray(matches).reshape(-1, 2).tolist()
+    proposed = [int(row[0]) for row in rows]
+    if not proposed:
+        raise ValueError(
+            "No existing DSSP linker overlaps the requested residue ranges. "
+            "The secondary-structure assignment has not been altered."
+        )
+    # Section IDs are from the *existing fingerprint*, and must be internal,
+    # coil-only segments of at least four residues. Do not relabel DSSP or
+    # silently accept an end-of-chain linker.
+    eligible = set()
+    for chain in cdt.parse_structures_with_segments(fingerprint_file):
+        chain_length = len(chain['structure'])
+        for segment in chain['segments']:
+            if (segment['type'] == '-' and
+                    segment['end'] - segment['start'] >= 4 and
+                    segment['start'] > 0 and segment['end'] < chain_length):
+                eligible.add(int(segment['segment_num']))
+    accepted = sorted(set(proposed).intersection(eligible))
+    if not accepted:
+        raise ValueError(
+            "User ranges overlap linkers, but none survived the minimum-length "
+            "(4 residues) and terminal-linker checks. No default linkers were substituted."
+        )
+    labels = {int(r[0]): str(r[1]) for r in rows}
+    excluded = [idx for idx in proposed if idx not in accepted]
+    # A requested range can intersect a helix/strand without an eligible linker.
+    # Report that explicitly instead of quietly dropping it.
+    range_status = []
+    for chain, pairs in sorted(requested_structure_ranges.items()):
+        for start, end in pairs:
+            matched_ids = []
+            for idx in accepted:
+                linker_chain, linker_start, linker_end = cdt.parse_linker_label(labels[idx])
+                if linker_chain == chain and not (end < linker_start or linker_end < start):
+                    matched_ids.append(idx)
+            status = 'selected' if matched_ids else 'no_valid_linker_overlap'
+            range_status.append({
+                'chain': chain, 'requested_structure_start': int(start),
+                'requested_structure_end': int(end),
+                'selected_segment_ids': matched_ids, 'status': status,
+            })
+    report = {
+        'mode': 'user_defined_linker_overlap',
+        'numbering': '1-based position within each final fingerprint chain',
+        'user_ranges': {str(ch): [list(pair) for pair in bounds]
+                        for ch, bounds in sorted(user_ranges.items())},
+        'converted_structure_ranges': {str(ch): [list(pair) for pair in bounds]
+                                       for ch, bounds in sorted(requested_structure_ranges.items())},
+        'selected_segment_ids_0based_global': accepted,
+        'selected_linkers': [labels[idx] for idx in accepted],
+        'rejected_segment_ids': excluded,
+        'requested_range_status': range_status,
+    }
+    report_path = Path(refine_dir) / 'user_flexibility_selection.json'
+    report_path.write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+    print('User-defined flexibility (whole DSSP linkers; no relabelling):')
+    for idx in accepted:
+        print(f'  segment {idx}: {labels[idx]}')
+    if excluded:
+        print(f'  Not selected after linker validation: {excluded}')
+    for entry in range_status:
+        if entry['status'] != 'selected':
+            print(
+                f"  WARNING: Chain {entry['chain']} residues "
+                f"{entry['requested_structure_start']}-{entry['requested_structure_end']} "
+                'did not overlap a valid internal DSSP linker.'
+            )
+    print(f'  Selection report: {report_path}')
+    return accepted
+
+
+def parse_user_distance_constraints(text, chain_lengths, coords):
+    """Read notebook-style constraints 'res1 chain1 res2 chain2 [distance]'.
+
+    Missing distances mean preserve the starting C-alpha distance.  Chain
+    letters correspond to the fingerprint chain order A, B, C, ... .
+    """
+    if text is None:
+        return [], [], []
+    offsets = {}
+    offset = 0
+    for chain in sorted(chain_lengths):
+        offsets[chain] = offset
+        offset += int(chain_lengths[chain])
+    coords = np.asarray(coords, dtype=float)
+    if coords.ndim != 2 or coords.shape[1] < 3 or len(coords) != offset:
+        raise ValueError(
+            f'Coordinate/fingerprint length mismatch: {len(coords)} coordinates, {offset} residues'
+        )
+    pairs, distances, records = [], [], []
+    for lineno, raw in enumerate(text.replace(';', '\n').splitlines(), 1):
+        line = raw.split('#', 1)[0].strip()
+        if not line:
+            continue
+        for item in line.split(','):
+            tokens = item.strip().split()
+            if not tokens:
+                continue
+            if len(tokens) not in (4, 5):
+                raise ValueError(
+                    f'Distance constraint at line {lineno} must be "res1 chain1 res2 chain2 [distance]": {item!r}'
+                )
+            r1, c1, r2, c2 = tokens[:4]
+            c1, c2 = c1.upper(), c2.upper()
+            if c1 not in offsets or c2 not in offsets:
+                raise ValueError(
+                    f'Unknown chain in distance constraint {item!r}; '
+                    f'valid fingerprint chains: {", ".join(sorted(offsets))}'
+                )
+            try:
+                r1, r2 = int(r1), int(r2)
+            except ValueError as exc:
+                raise ValueError(f'Invalid residue number in distance constraint {item!r}') from exc
+            if not 1 <= r1 <= chain_lengths[c1] or not 1 <= r2 <= chain_lengths[c2]:
+                raise ValueError(
+                    f'Residue outside chain bounds in distance constraint {item!r}; '
+                    f'{c1}: 1-{chain_lengths[c1]}, {c2}: 1-{chain_lengths[c2]}'
+                )
+            g1 = offsets[c1] + r1
+            g2 = offsets[c2] + r2
+            if g1 == g2:
+                raise ValueError(f'Distance constraint connects a residue to itself: {item!r}')
+            if len(tokens) == 5:
+                try:
+                    distance = float(tokens[4])
+                except ValueError as exc:
+                    raise ValueError(f'Invalid target distance in {item!r}') from exc
+                if not np.isfinite(distance) or distance <= 0:
+                    raise ValueError(f'Target distance must be positive and finite in {item!r}')
+            else:
+                distance = float(np.linalg.norm(coords[g1 - 1, :3] - coords[g2 - 1, :3]))
+            pairs.append([g1, g2])
+            distances.append(distance)
+            records.append({'residue1': r1, 'chain1': c1, 'residue2': r2, 'chain2': c2,
+                            'global_indices_1based': [g1, g2],
+                            'target_distance_angstrom': distance})
+    if not pairs:
+        raise ValueError('Distance constraints input was supplied, but has no constraints')
+    return pairs, distances, records
+
+
+def apply_user_distance_constraints(text, chain_lengths, coord_file, refine_dir):
+    coords = cdt.read_coords_from_file(coord_file)
+    pairs, distances, records = parse_user_distance_constraints(text, chain_lengths, coords)
+    # This is the same existing translation that the multimer notebook invokes.
+    cdt.translate_distance_constraints(pairs, coords, refine_dir, distances)
+    output_file = Path(refine_dir) / 'fixedDistanceConstraints1.dat'
+    if not output_file.is_file() or output_file.stat().st_size == 0:
+        raise RuntimeError(f'No translated distance constraints were written to {output_file}')
+    (Path(refine_dir) / 'user_distance_constraints.json').write_text(
+        json.dumps({'constraints': records}, indent=2) + '\n', encoding='utf-8'
+    )
+    print(f'Added {len(records)} distance constraints to {output_file}')
+    return output_file
+
 def main():
     parser = argparse.ArgumentParser(description="Setup Carbonara processing pipeline")
     parser.add_argument("-p", "--pdb", required=True, help="Path to input PDB file")
@@ -1996,6 +2308,42 @@ def main():
         type=int,
         default=10000,
         help="Maximum number of fitting steps (default: 10000)",
+    )
+    flex_inputs = parser.add_mutually_exclusive_group()
+    flex_inputs.add_argument(
+        '--flexible-ranges', '--flexible_ranges', default=None,
+        help=("User flexible residue ranges, e.g. '1:5-12,1:240-287,3:5-12'. "
+              '1-based positions in the fingerprint chains; existing DSSP linkers are selected whole.')
+    )
+    flex_inputs.add_argument(
+        '--flexible-ranges-file', '--flexible_ranges_file', default=None,
+        help="Text file of user flexible ranges, one 'chain start end' or 'chain:start-end' per line."
+    )
+    # HDX-MS k_est guidance. Selection is exclusive of manual ranges and PAE.
+    parser.add_argument('--hdx-csv', '--hdx_csv', default=None,
+                        help='Per-residue HDX CSV with position, k_est, and preferably aa columns.')
+    parser.add_argument('--hdx-include-medium', '--hdx_include_medium', action='store_true',
+                        help='Select k_est >= 0.1 as flexible (default: fast only, k_est >= 1).')
+    parser.add_argument('--hdx-mapping', '--hdx_mapping', choices=('auto', 'global', 'repeat', 'chain'), default='auto',
+                        help='How CSV positions map: auto; global across all fingerprint chains; repeat per subunit; or one chain.')
+    parser.add_argument('--hdx-chain', '--hdx_chain', type=int, default=None,
+                        help='One-based target fingerprint chain for mapping=chain (implicitly selects chain mapping).')
+    parser.add_argument('--hdx-position-offset', '--hdx_position_offset', type=int, default=0,
+                        help='Map CSV position P to target chain-local residue P-offset (default: 0).')
+    parser.add_argument('--hdx-override-helices', '--hdx_override_helices', action='store_true',
+                        help='Relabel >=4 consecutive HDX-selected HELICAL residues H as flexible coil; do not alter strands.')
+    parser.add_argument('--hdx-only', '--hdx_only', action='store_true',
+                        help='DEPRECATED: unsupported, because it bypasses the established beta-sheet selection checks.')
+    dist_inputs = parser.add_mutually_exclusive_group()
+    dist_inputs.add_argument(
+        '--distance-constraints', '--distance_constraints', default=None,
+        help=("Inline constraints, separated by ';': "
+              "'125 A 234 C 15; 20 A 90 A 6.5'. "
+              'Format: residue1 chain1 residue2 chain2 [distance Angstrom].')
+    )
+    dist_inputs.add_argument(
+        '--distance-constraints-file', '--distance_constraints_file', default=None,
+        help='Text file with one distance constraint per line, same format as the multimer notebook.'
     )
     parser.add_argument("--pairedQ", action="store_true", help="Use paired predictions")
     parser.add_argument("--rotation", action="store_true", help="Apply affine rotations")
@@ -2104,10 +2452,16 @@ def main():
                     help="Split flexible '-' sections only when their length is greater than this value (default: 25)")
     parser.add_argument("--long_linker_fake_helix_len", "--long-linker-fake-helix-len", type=int, default=3,
                     help="Length of each artificial H separator used to break a long linker (default: 3)")
-    parser.add_argument("--foxs_cmd_default", default="pyfoxs",
-                    help="Default FoXS command for the generated RunMe script; user can still override as first shell arg")
+    parser.add_argument('--regularize-fingerprint', dest='regularize_fingerprint',
+                        action='store_true', default=None,
+                        help='Regularise short sections before fingerprint numbering (default: enabled for HDX helix overrides)')
+    parser.add_argument('--no-regularize-fingerprint', dest='regularize_fingerprint',
+                        action='store_false',
+                        help='Disable short-section regularisation (unsafe if HDX introduces short sections)')
+    parser.add_argument("--foxs_cmd_default", default=None,
+                    help="FoXS executable override (default: installation .venv/bin/pyfoxs, then companion of watcher Python, then PATH); RunMe first argument overrides")
     parser.add_argument("--python_exe", default=None,
-                    help="Python executable for watcher/backmapping in the generated RunMe script (default: the Python running setup). Runtime override: PYTHON_EXE=/path/to/python ./RunMe_name.sh")
+                    help="Watcher/backmapping interpreter override (default: installation .venv/bin/python if available, else setup Python); RunMe supports PYTHON_EXE=...")
     parser.add_argument("--cg2all_exec",default=None,help="Override cg2all executable command string (advanced users only)")
     parser.add_argument("--terminate-on-foxs", action="store_true",
                     help="Opt-in batch mode: terminate individual predictStructureQvary runs once FoXS chi^2 is good enough")
@@ -2116,6 +2470,29 @@ def main():
     parser.add_argument("--terminate-confirmation-count", type=int, default=1,
                     help="Number of qualifying FoXS scores required before stopping a run (default: 1)")
     args = parser.parse_args()
+
+    try:
+        flexible_text, flexible_source = _input_text(
+            args.flexible_ranges, args.flexible_ranges_file, 'flexible ranges'
+        )
+        constraints_text, constraints_source = _input_text(
+            args.distance_constraints, args.distance_constraints_file, 'distance constraints'
+        )
+        requested_flexible_ranges = parse_user_flexible_ranges(flexible_text) if flexible_text is not None else None
+    except (ValueError, OSError) as exc:
+        parser.error(str(exc))
+    if requested_flexible_ranges is not None and args.alphaFoldFlex:
+        parser.error('--flexible-ranges/--flexible-ranges-file overrides automatic or PAE selection; omit --alphaFoldFlex')
+
+
+    if args.hdx_csv is not None and (requested_flexible_ranges is not None or args.alphaFoldFlex):
+        parser.error('--hdx-csv cannot be combined with --flexible-ranges or --alphaFoldFlex')
+    if args.hdx_csv is None and (args.hdx_include_medium or args.hdx_override_helices or args.hdx_only or args.hdx_chain is not None or args.hdx_position_offset != 0 or args.hdx_mapping != 'auto'):
+        parser.error('--hdx-* options require --hdx-csv')
+    if args.hdx_csv is not None and args.hdx_chain is not None and args.hdx_chain < 1:
+        parser.error('--hdx-chain must be >= 1')
+    if args.hdx_only:
+        parser.error('--hdx-only is disabled: HDX must not bypass the original sheet/disulfide-aware automatic selection')
 
     if args.terminate_confirmation_count < 1:
         parser.error("--terminate-confirmation-count must be >= 1")
@@ -2245,6 +2622,67 @@ def main():
         sequence_chains = np.array(new_sequence_chains, dtype=object)
         secondary_structure_chains = np.array(new_secondary_structure_chains, dtype=object)
 
+        # HDX-guided flexibility operates on the prepared, split chain arrays.
+        # For helical overrides, change the secondary labels BEFORE the fingerprint
+        # is numbered. No coordinate, sequence, or original input is changed.
+        hdx_masks = None
+        hdx_measured_masks = None
+        hdx_report = None
+        if args.hdx_csv is not None:
+            secondary_structure_chains, hdx_masks, hdx_report, hdx_measured_masks = cdt.prepare_hdx_flexibility_from_csv(
+                args.hdx_csv,
+                sequence_chains,
+                secondary_structure_chains,
+                mapping=args.hdx_mapping,
+                chain=args.hdx_chain,
+                include_medium=args.hdx_include_medium,
+                override_helices=args.hdx_override_helices,
+                position_offset=args.hdx_position_offset,
+                return_measured_masks=True,
+            )
+            print(
+                f"HDX guidance: mapping={hdx_report['mapping']} over chain lengths "
+                f"{hdx_report['prepared_chain_lengths']}; "
+                f"{hdx_report['measured_rows']} measured and "
+                f"{hdx_report['unmeasured_rows']} unmeasured CSV residues; "
+                f"{hdx_report['selected_positions_count']} selected residues; "
+                f"{hdx_report['helix_residues_relabelled']} helical residues relabelled."
+            )
+            if hdx_report.get('nonexchangeable_proline_rate_rows_ignored', 0):
+                print(
+                    f"HDX: ignored {hdx_report['nonexchangeable_proline_rate_rows_ignored']} "
+                    'proline k_est value(s) as uninformative for backbone amide exchange; '
+                    'the CSV numbering and original values remain unchanged.'
+                )
+            if hdx_report['measured_positions_outside_chain']:
+                print(
+                    f"WARNING: {hdx_report['measured_positions_outside_chain']} measured HDX "
+                    'positions fell outside the target chain; check chain and offset.'
+                )
+
+        # IMPORTANT: empirical transition probabilities require short reference
+        # frames. HDX helix relabelling can leave 1-2 residue H islands, even
+        # when all *selected* linkers satisfy the ordinary >=4 safeguard.
+        # Run before splitting and before any global segment IDs are assigned.
+        use_regularizer = args.regularize_fingerprint
+        if use_regularizer is None:
+            use_regularizer = bool(args.hdx_csv and args.hdx_override_helices)
+        if use_regularizer:
+            secondary_structure_chains, section_reg_report = cdt.regularize_secondary_structure_for_carbonara(
+                secondary_structure_chains,
+                measured_masks=hdx_measured_masks,
+                flexible_masks=hdx_masks,
+            )
+        else:
+            section_reg_report = {
+                'enabled': False, 'reason': 'disabled or HDX helical overrides not used',
+                'edits': [], 'unresolved': [], 'n_edits': 0, 'n_unresolved': 0,
+            }
+        section_reg_report['enabled'] = bool(use_regularizer)
+        if hdx_report is not None:
+            section_reg_report['nonexchangeable_proline_rate_rows_ignored'] = int(
+                hdx_report.get('nonexchangeable_proline_rate_rows_ignored', 0))
+
         # Break very long flexible regions before any Carbonara section numbering is
         # created.  This deliberately modifies only the secondary-structure labels;
         # sequence and coordinates retain exactly the same length/indexing.
@@ -2255,6 +2693,35 @@ def main():
             fake_helix_len=args.long_linker_fake_helix_len,
             report_path=os.path.join(refine_dir, "long_linker_break_report.json"),
         )
+
+        if use_regularizer:
+            final_short_issues = cdt.validate_carbonara_secondary_sections(
+                secondary_structure_chains, flexible_masks=hdx_masks,
+            )
+            section_reg_report['after_long_linker_split_issues'] = final_short_issues
+            section_reg_report['long_linker_modified_count'] = int(_long_linker_report['modified_linker_count'])
+            print(
+                f"Fingerprint regularisation: {section_reg_report['n_edits']} residue changes, "
+                f"{len(final_short_issues)} unresolved short sections."
+            )
+        else:
+            final_short_issues = []
+        reg_path = os.path.join(refine_dir, 'fingerprint_regularization_report.json')
+        with open(reg_path, 'w') as fp:
+            json.dump(section_reg_report, fp, indent=2)
+        if final_short_issues:
+            brief = '; '.join(
+                f"chain {x['chain']} {x['type']} {x['start_1based']}-{x['end_1based_inclusive']} "
+                f"length {x['length']} (needs {x['required_length']})"
+                for x in final_short_issues[:12]
+            )
+            raise ValueError(
+                'Fingerprint has unsupported short secondary-structure sections after '
+                'HDX correction. No C++ run will be generated. '
+                f'Examples: {brief}. Full diagnostic: {reg_path}. '
+                'These sections must be reviewed before selecting a physically '
+                'defensible relabelling; strands and slow-exchanging helices were protected.'
+            )
 
         # collapse coordinates file into one chain
         coords_full = None
@@ -2295,9 +2762,17 @@ def main():
         # check the requested min q is not less than the minimum value in the saxs file
         qmin = np.max([np.loadtxt(refine_dir + "/Saxs.dat")[0][0], args.min_q])
 
-        # set alphaFold flexibility
+        # Set flexibility ONLY through the original user/PAE/automatic selector.
+        # HDX may have changed the fingerprint secondary labels above, but may
+        # never directly force or veto a linker selection.
         varying_linker_chains = []
-        if args.alphaFoldFlex:
+        if requested_flexible_ranges is not None:
+            print(f'Applying user flexibility from {flexible_source}')
+            selected = select_user_flexible_linkers(
+                requested_flexible_ranges, fingerprint_file, pdb_name, refine_dir
+            )
+            varying_linker_chains = [selected]
+        elif args.alphaFoldFlex:
             # use pae scores to specify flexibility
             varying_linker_chains = cdt.getFlexibility(
                 args.pae, fingerprint_file,
@@ -2353,7 +2828,61 @@ def main():
             filtered_segments = np.asarray(filtered_segments, dtype=int)
             np.savetxt(vs_path, filtered_segments, fmt="%i")
 
-        
+        # HDX is ONLY a preprocessing transformation of the prepared secondary
+        # structure. All selected linker IDs above came from the original
+        # automatic sheet/disulfide-aware selector. HDX-positive regions must
+        # not bypass that selector; these annotations are diagnostics only.
+        if hdx_report is not None:
+            final_selected = set(int(x) for x in np.atleast_1d(
+                np.loadtxt(vs_path, dtype=int, ndmin=1)
+            )) if os.path.getsize(vs_path) else set()
+            fp_chains = cdt.parse_structures_with_segments(fingerprint_file)
+            if len(fp_chains) != len(hdx_masks):
+                raise RuntimeError('HDX masks do not match final fingerprint chains')
+            hdx_sections = []
+            for cidx, (fp_chain, hdx_positive, measured) in enumerate(
+                zip(fp_chains, hdx_masks, hdx_measured_masks), start=1
+            ):
+                positive = np.asarray(hdx_positive, dtype=bool)
+                observed = np.asarray(measured, dtype=bool)
+                if len(positive) != len(fp_chain['sequence']) or len(observed) != len(positive):
+                    raise RuntimeError(f'HDX masks do not match fingerprint length for chain {cidx}')
+                for sec in fp_chain['segments']:
+                    lo, hi = int(sec['start']), int(sec['end'])
+                    if not (sec['type'] == '-' and hi - lo >= 4
+                            and lo > 0 and hi < len(positive)):
+                        continue
+                    sid = int(sec['segment_num'])
+                    hdx_sections.append({
+                        'segment_id_0based_global': sid,
+                        'chain': cidx,
+                        'start_1based': lo + 1,
+                        'end_1based_inclusive': hi,
+                        'length': hi - lo,
+                        'hdx_selected_residues_in_segment': int(positive[lo:hi].sum()),
+                        'measured_residues_in_segment': int(observed[lo:hi].sum()),
+                        'selected': sid in final_selected,
+                        'selection_reason': ('original_automatic_allowed' if sid in final_selected
+                                             else 'original_automatic_rejected'),
+                    })
+            hdx_report['selection_policy'] = 'original_automatic_sheet_and_disulfide_checks'
+            hdx_report['hdx_does_not_override_linker_selection'] = True
+            hdx_report['fingerprint_regularization_report'] = 'fingerprint_regularization_report.json'
+            hdx_report['fingerprint_regularization_edit_count'] = section_reg_report['n_edits']
+            hdx_report['eligible_linker_sections'] = hdx_sections
+            hdx_report['selected_sections'] = [s for s in hdx_sections if s['selected']]
+            hdx_report['selected_section_ids'] = sorted(final_selected)
+            rejected_with_fast = [s for s in hdx_sections
+                                  if not s['selected'] and s['hdx_selected_residues_in_segment']]
+            hdx_report['hdx_fast_eligible_linkers_rejected_by_structural_checks'] = len(rejected_with_fast)
+            report_path = Path(refine_dir) / 'hdx_flexibility_report.json'
+            report_path.write_text(json.dumps(hdx_report, indent=2) + '\n', encoding='utf-8')
+            print(f'HDX preprocessing: {hdx_report["helix_residues_relabelled"]} H residues '
+                  f'relabelled, then original automatic linker selection used unchanged. '
+                  f'{len(final_selected)} sections selected. '
+                  f'{len(rejected_with_fast)} HDX-fast linker(s) rejected by structural checks.')
+            print(f'HDX diagnostic report: {report_path}')
+
          # store chain lengths
         chain_lengths = parse_structure_lengths(refine_dir + "/fingerPrint1.dat")
         with open(refine_dir + "/chainLengths.dat", "wb") as f:
@@ -2374,6 +2903,17 @@ def main():
                 snap=args.mixture_snap,
                 seed=0,
             )
+
+        # Optional non-interactive distance constraints.  Translate to Carbonara's
+        # existing six-column section-local format using the notebook's helper.
+        # Do this BEFORE replication and RunMe generation, so all ensemble
+        # members receive the constraints and pairedQ is automatically enabled.
+        if constraints_text is not None:
+            print(f'Applying distance constraints from {constraints_source}')
+            apply_user_distance_constraints(
+                constraints_text, chain_lengths, coords_files[0], refine_dir
+            )
+            args.pairedQ = True
 
         # Replicate required numbered files for ensemble refinement (mixture_n > 1)
         replicate_numbered_files(refine_dir, args.mixture_n)
@@ -2397,7 +2937,7 @@ def main():
             cg2all_exec=args.cg2all_exec,
             disulfide_constraints_file=args.disulfide_constraints_file,
             foxs_cmd_default=args.foxs_cmd_default,
-            python_exe=args.python_exe or sys.executable,
+            python_exe=args.python_exe,
             terminate_on_foxs=args.terminate_on_foxs,
             terminate_threshold=args.terminate_threshold,
             terminate_confirmation_count=args.terminate_confirmation_count,
@@ -2409,7 +2949,9 @@ def main():
         print(f"Initial files were created in: {refine_dir}")
         print(f"Files for Carbonara were copied to: {new_data_dir}")
         print(f"Run script created at: {run_script}")
-        print(f"Watcher/backmapping Python: {args.python_exe or sys.executable}")
+        print("Watcher/backmapping Python: " +
+              (str(args.python_exe) if args.python_exe else
+               "installation .venv/bin/python if present, otherwise setup Python"))
         if args.terminate_on_foxs:
             print(f"Run mode: terminate-on-FoXS, threshold={args.terminate_threshold}, confirmation_count={args.terminate_confirmation_count}")
         else:
