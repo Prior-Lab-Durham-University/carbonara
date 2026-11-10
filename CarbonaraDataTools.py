@@ -4786,34 +4786,78 @@ def pull_structure_from_pdb(
                 pass
 
 
-# Update the generated RunMe script to use a specific disulfide constraint file.
-def set_disulfide_constraints_for_run(run_name, disulfide_file):
-    runme = Path(f"RunMe_{run_name}.sh")
-    disulfide_file = Path(disulfide_file).resolve()
+# Register the run's standard disulfide constraints for backmapping and ensure
+# that each identical component of a multi-structure fit has its own numbered file.
+def set_disulfide_constraints_for_run(run_name):
+    """Configure disulfide backmapping and fill missing numbered constraint files.
 
-    if not runme.exists():
+    The user only supplies ``run_name``. Constraints are read from
+    carbonara_runs/<run_name>/fixedDistanceConstraints1.dat; the number of
+    structures comes from the generated RunMe_<run_name>.sh launcher.
+
+    Existing component-specific constraint files are never overwritten.
+    To avoid applying the wrong restraint indices to a heterogeneous mixture,
+    file 1 is replicated only to components with identical fingerprints.
+    """
+    runme = Path(f"RunMe_{run_name}.sh")
+    if not runme.is_file():
         raise FileNotFoundError(f"Could not find generated run script: {runme}")
 
-    if not disulfide_file.exists():
+    run_dir = runme.parent / "carbonara_runs" / str(run_name)
+    disulfide_file = (run_dir / "fixedDistanceConstraints1.dat").resolve()
+    if not disulfide_file.is_file():
         raise FileNotFoundError(f"Could not find disulfide constraint file: {disulfide_file}")
 
     text = runme.read_text()
+    match = re.search(r"(?m)^\s*noStructures\s*=\s*[\"']?(\d+)[\"']?\s*(?:#.*)?$", text)
+    if match is None:
+        raise RuntimeError(f"Could not read noStructures from {runme}")
+    no_structures = int(match.group(1))
+    if no_structures < 1:
+        raise ValueError(f"Invalid noStructures={no_structures} in {runme}")
 
     replacement = f'DISULFIDE_CONSTRAINTS_FILE="{disulfide_file}"'
     text_new, n = re.subn(
         r'(?m)^DISULFIDE_CONSTRAINTS_FILE=.*$',
-        replacement,
+        lambda _: replacement,
         text,
     )
-
-    if n == 0:
+    if n != 1:
         raise RuntimeError(
-            "Could not find DISULFIDE_CONSTRAINTS_FILE line in "
-            f"{runme}. Regenerate the RunMe script or add the variable manually."
+            f"Expected one DISULFIDE_CONSTRAINTS_FILE line in {runme}, found {n}. "
+            "Regenerate the launcher or correct it manually."
         )
 
+    # Preflight every missing file before copying any: a merged mixture may
+    # contain different proteins, for which file 1's residue indices are wrong.
+    to_create = []
+    if no_structures > 1:
+        fp1 = run_dir / "fingerPrint1.dat"
+        for i in range(2, no_structures + 1):
+            destination = run_dir / f"fixedDistanceConstraints{i}.dat"
+            if destination.exists():
+                if not destination.is_file():
+                    raise ValueError(f"Constraint destination is not a file: {destination}")
+                continue  # Preserve existing, potentially distinct restraints.
+            fpi = run_dir / f"fingerPrint{i}.dat"
+            if not fp1.is_file() or not fpi.is_file():
+                raise FileNotFoundError(
+                    f"Cannot replicate disulfide constraints: missing {fp1} or {fpi}"
+                )
+            if fp1.read_bytes() != fpi.read_bytes():
+                raise ValueError(
+                    f"Not copying constraints to component {i}: {fpi.name} "
+                    "differs from fingerPrint1.dat. Provide component-specific "
+                    f"fixedDistanceConstraints{i}.dat instead."
+                )
+            to_create.append(destination)
+
+    for destination in to_create:
+        shutil.copy2(disulfide_file, destination)
+        print(f"Created {destination}")
+
     runme.write_text(text_new)
-    print(f"Updated {runme}:")
+    print(f"Updated {runme} for {no_structures} structure(s):")
     print(replacement)
 
 
