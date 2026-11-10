@@ -10,6 +10,7 @@ include_directories(src)
 
 # Source files
 set(SOURCES
+    src/carbonaraConfig.cpp
     src/point.cpp
     src/polyHelix.cpp
     src/randomMolGen.cpp
